@@ -1,0 +1,12 @@
+{
+  "run_flag": "example",
+  "nside": 256,
+  "n_pixels": 786432,
+  "n_halos": 32,
+  "particle_mass_msun_h": 690511127976.0,
+  "sum_count_equivalent": 35626.93415397061,
+  "max_count_equivalent": 6984.52734375,
+  "nonzero_pixels": 1653,
+  "source_plc": "pinocchio.example.plc.slice32.out",
+  "output_fits": "geppetto.example.one_halo_counts.nside256.seg000.fits"
+}

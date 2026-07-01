@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+build/
+dist/
+
+# JAX/XLA caches and local outputs
+.jax_cache/
+outputs/
+*.h5
+*.hdf5
+*.fits
+*.npy
+*.npz
+
+# Generated example outputs that are too large for normal Git history.
+examples/pinocchio_geppetto_case/*.fits
+examples/pinocchio_geppetto_case/pinocchio.*.catalog.out
+examples/pinocchio_geppetto_case/pinocchio.example.histories.out
+examples/pinocchio_geppetto_case/pinocchio.example.plc.out
+
+# Environments
+.venv/
+venv/
+.env
+
+# Editors
+.vscode/
+.idea/

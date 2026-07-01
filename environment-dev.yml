@@ -1,0 +1,41 @@
+name: geppetto-dev
+channels:
+  - conda-forge
+dependencies:
+  # Latest Python available from conda-forge for this environment solve.
+  - python=3.14
+  - pip
+  - numpy
+  - scipy
+  - astropy
+  - h5py
+  - matplotlib
+  - ipython
+  - pytest
+  - ruff
+  - mypy
+  - hatchling
+  - git
+  - compilers
+  - make
+  - cmake
+  - pkg-config
+  - openmpi
+  - fftw=3.3.11=mpi_openmpi_h76e6d66_0
+  - gsl
+  - cfitsio
+  - healpix_cxx
+  - mpi4py
+  - jupyterlab
+  - autoconf
+  - automake
+  - libtool
+  - pip:
+      - jax==0.10.2
+      - jaxlib==0.10.2
+      - -e .[dev,io]
+
+# PFFT is not available as a conda-forge package. The active local environment
+# has PFFT 1.0.8-alpha built from source and installed into the conda prefix.
+# The active local environment also has HEALPix C 3.83's chealpix header/library
+# built from the official source archive for PINOCCHIO PLC mass-map compilation.

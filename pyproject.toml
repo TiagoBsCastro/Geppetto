@@ -1,0 +1,61 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "geppetto"
+version = "0.1.0"
+description = "Differentiable JAX one-halo matter/profile painter for PINOCCHIO halo catalogues"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+  {name = "Tiago Castro"}
+]
+keywords = ["cosmology", "jax", "pinocchio", "halo model", "baryonification", "weak lensing"]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: Astronomy",
+  "Topic :: Scientific/Engineering :: Physics"
+]
+dependencies = [
+  "jax>=0.4.26",
+  "jaxlib>=0.4.26",
+  "numpy>=1.24"
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "ruff>=0.5",
+  "mypy>=1.10"
+]
+io = [
+  "h5py>=3.10",
+  "astropy>=6.0",
+  "healpy>=1.16"
+]
+
+[project.urls]
+Repository = "https://github.com/TiagoBsCastro/GEPPETTO"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/geppetto"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests", "examples"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]
