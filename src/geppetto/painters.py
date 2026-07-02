@@ -7,7 +7,7 @@ import math
 import jax
 import jax.numpy as jnp
 
-from geppetto.catalog import HaloCatalog, LightconeHaloCatalog
+from geppetto.catalog import HaloCatalog, LightconeHaloCatalog, LightconeSparseStencil
 from geppetto.concentration import ConcentrationParams
 from geppetto.cosmology import Cosmology, rho_mean_comoving
 from geppetto.geometry import (
@@ -243,6 +243,67 @@ def paint_lightcone_surface_density(
     out0 = jnp.zeros(pixel_unit_vectors.shape[0], dtype=pixel_unit_vectors.dtype)
     out, _ = jax.lax.scan(body, out0, (uv_chunks, chi_chunks, mass_chunks, redshift_chunks, valid_chunks))
     return out
+
+
+def paint_lightcone_surface_density_sparse(
+    stencil: LightconeSparseStencil,
+    catalog: LightconeHaloCatalog,
+    cosmology: Cosmology = DEFAULT_COSMOLOGY,
+    concentration_params: ConcentrationParams = DEFAULT_CONCENTRATION_PARAMS,
+    profile_params: NFWProfileParams = DEFAULT_NFW_PROFILE_PARAMS,
+    pixel_area_sr: float | None = None,
+    return_mass_per_pixel: bool = False,
+) -> Array:
+    """Paint one-halo projected surface density from a sparse halo-pixel stencil.
+
+    Parameters
+    ----------
+    stencil:
+        Precomputed sparse halo-pixel geometry. ``stencil.r_perp`` is in
+        comoving ``Mpc/h`` and ``stencil.pix_id`` indexes the output map.
+        Stencil construction, including any HEALPix indexing and fixed ``Rmax``
+        cuts, belongs outside this differentiable JAX kernel.
+    catalog:
+        Lightcone halo catalogue. Masses are ``Msun/h`` and distances are
+        comoving ``Mpc/h``.
+    pixel_area_sr:
+        Pixel solid angle. Required only when ``return_mass_per_pixel=True``.
+    return_mass_per_pixel:
+        If true, convert each pair contribution to approximate projected mass
+        per pixel using ``Sigma * chi_h**2 * pixel_area_sr`` before scatter-add.
+
+    Returns
+    -------
+    Array
+        One-dimensional map with shape ``(stencil.n_pix,)``.
+
+    Notes
+    -----
+    The sparse map is differentiable with respect to halo/profile quantities and
+    profile/concentration parameters. The stencil geometry and retained pair set
+    are fixed inputs and are not differentiated.
+    """
+
+    if return_mass_per_pixel and pixel_area_sr is None:
+        raise ValueError("pixel_area_sr is required when return_mass_per_pixel=True")
+
+    halo_id = jnp.asarray(stencil.halo_id, dtype=jnp.int32)
+    pix_id = jnp.asarray(stencil.pix_id, dtype=jnp.int32)
+    mass = catalog.mass[halo_id]
+    redshift = catalog.redshift[halo_id]
+    sigma = nfw_projected_surface_density(
+        stencil.r_perp,
+        mass,
+        redshift,
+        cosmology,
+        concentration_params,
+        profile_params,
+    )
+    if return_mass_per_pixel:
+        chi = catalog.chi[halo_id]
+        sigma = sigma * (chi**2) * pixel_area_sr
+
+    return jnp.zeros((stencil.n_pix,), dtype=sigma.dtype).at[pix_id].add(sigma)
 
 
 def paint_lightcone_particle_count_map(

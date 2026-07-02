@@ -70,6 +70,34 @@ class LightconeHaloCatalog(NamedTuple):
         return int(self.mass.shape[0])
 
 
+class LightconeSparseStencil(NamedTuple):
+    """Sparse lightcone halo-pixel stencil for one-halo painting.
+
+    Parameters
+    ----------
+    pix_id:
+        Output pixel index for each retained halo-pixel pair, shape ``(n_pair,)``.
+    halo_id:
+        Halo index into a ``LightconeHaloCatalog`` for each retained pair, shape
+        ``(n_pair,)``.
+    r_perp:
+        Transverse comoving separation for each pair in ``Mpc/h``, shape
+        ``(n_pair,)``. The stencil builder fixes these geometry values outside
+        differentiable painter kernels.
+    n_pix:
+        Number of pixels in the output one-dimensional map.
+    """
+
+    pix_id: Array
+    halo_id: Array
+    r_perp: Array
+    n_pix: int
+
+    @property
+    def size(self) -> int:
+        return int(self.r_perp.shape[0])
+
+
 def unit_vectors_from_angles(theta: Array, phi: Array) -> Array:
     """Convert spherical angles to unit vectors.
 

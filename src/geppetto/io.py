@@ -18,7 +18,12 @@ from typing import Any, Literal
 import jax.numpy as jnp
 import numpy as np
 
-from geppetto.catalog import HaloCatalog, LightconeHaloCatalog, unit_vectors_from_angles
+from geppetto.catalog import (
+    HaloCatalog,
+    LightconeHaloCatalog,
+    LightconeSparseStencil,
+    unit_vectors_from_angles,
+)
 from geppetto.cosmology import Cosmology, rho_mean_comoving
 
 
@@ -782,6 +787,68 @@ def healpix_pixel_unit_vectors(
 
     x, y, z = hp.pix2vec(nside, pixel_values, nest=nest)
     return np.stack([x, y, z], axis=-1).astype(np.float64, copy=False)
+
+
+def build_lightcone_sparse_stencil(
+    pixel_unit_vectors: np.ndarray,
+    catalog: LightconeHaloCatalog,
+    rmax_mpc_h: np.ndarray | float,
+) -> LightconeSparseStencil:
+    """Build a brute-force sparse lightcone halo-pixel stencil.
+
+    This non-core helper uses NumPy and fixed geometry. It accepts target pixel
+    unit vectors, a lightcone catalogue with halo unit vectors and comoving
+    distances in ``Mpc/h``, and a scalar or per-halo ``Rmax`` in ``Mpc/h``.
+    Returned pairs satisfy ``R_perp <= Rmax_halo`` using the same chord
+    transverse-distance convention as GEPPETTO's dense lightcone painter.
+    """
+
+    pixels = np.asarray(pixel_unit_vectors, dtype=np.float64)
+    if pixels.ndim != 2 or pixels.shape[1] != 3:
+        raise PinocchioCatalogError("pixel_unit_vectors must have shape (n_pix, 3)")
+    n_pix = int(pixels.shape[0])
+
+    halo_unit_vectors = np.asarray(catalog.unit_vector, dtype=np.float64)
+    halo_chi = np.asarray(catalog.chi, dtype=np.float64)
+    if halo_unit_vectors.ndim != 2 or halo_unit_vectors.shape[1] != 3:
+        raise PinocchioCatalogError("catalog.unit_vector must have shape (n_halo, 3)")
+    if halo_chi.ndim != 1 or halo_chi.shape[0] != halo_unit_vectors.shape[0]:
+        raise PinocchioCatalogError("catalog.chi must have shape (n_halo,)")
+    if not np.all(np.isfinite(pixels)) or not np.all(np.isfinite(halo_unit_vectors)):
+        raise PinocchioCatalogError("stencil unit vectors must be finite")
+    if not np.all(np.isfinite(halo_chi)):
+        raise PinocchioCatalogError("catalog.chi must be finite")
+
+    n_halo = int(halo_chi.shape[0])
+    rmax = np.asarray(rmax_mpc_h, dtype=np.float64)
+    if rmax.ndim == 0:
+        rmax_value = float(rmax)
+        if not math.isfinite(rmax_value) or rmax_value < 0.0:
+            raise PinocchioCatalogError("rmax_mpc_h values must be finite and non-negative")
+        rmax = np.full((n_halo,), rmax_value, dtype=np.float64)
+    elif rmax.shape != (n_halo,):
+        raise PinocchioCatalogError("rmax_mpc_h must be scalar or have shape (n_halo,)")
+    if not np.all(np.isfinite(rmax)) or np.any(rmax < 0.0):
+        raise PinocchioCatalogError("rmax_mpc_h values must be finite and non-negative")
+
+    if n_pix == 0 or n_halo == 0:
+        return LightconeSparseStencil(
+            pix_id=jnp.empty((0,), dtype=jnp.int32),
+            halo_id=jnp.empty((0,), dtype=jnp.int32),
+            r_perp=jnp.empty((0,), dtype=jnp.float64),
+            n_pix=n_pix,
+        )
+
+    cosang = np.clip(pixels @ halo_unit_vectors.T, -1.0, 1.0)
+    chord = np.sqrt(np.maximum(2.0 * (1.0 - cosang), 0.0))
+    r_perp = chord * halo_chi[None, :]
+    pix_id, halo_id = np.nonzero(r_perp <= rmax[None, :])
+    return LightconeSparseStencil(
+        pix_id=jnp.asarray(pix_id, dtype=jnp.int32),
+        halo_id=jnp.asarray(halo_id, dtype=jnp.int32),
+        r_perp=jnp.asarray(r_perp[pix_id, halo_id]),
+        n_pix=n_pix,
+    )
 
 
 def read_pinocchio_mass_sheets(path: PathLike) -> PinocchioMassSheetTable:

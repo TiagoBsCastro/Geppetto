@@ -65,6 +65,21 @@ R_perp = chi_h sqrt[2(1 - nhat_pixel . nhat_halo)]
 
 This is appropriate for compact one-halo profiles and avoids `arccos` near zero angle. Exact angular-distance modes can be added if required.
 
+The sparse PLC painter uses the same NFW projected profile, but receives a
+precomputed halo-pixel stencil:
+
+```text
+(pix_id, halo_id, R_perp)
+```
+
+Stencil construction is non-core geometry. It may use NumPy, HEALPix helpers, or
+survey masks outside JAX, then pass fixed pair arrays into the differentiable
+painter. The first brute-force builder retains pairs with
+`R_perp <= Rmax_halo`; `Rmax` and the retained pair set are not differentiable
+parameters. The sparse painter remains differentiable with respect to
+concentration and profile parameters because it only gathers halo fields,
+evaluates the projected profile, and scatter-adds into the output map.
+
 For PINOCCHIO mass-map integration, the HEALPix-facing painter returns a
 count-equivalent one-halo collector:
 

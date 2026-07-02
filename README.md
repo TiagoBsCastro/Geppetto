@@ -83,6 +83,25 @@ sigma = paint_lightcone_surface_density(pixel_unit_vectors, catalog)
 print(sigma)  # projected one-halo surface density at the supplied pixels
 ```
 
+For larger maps, build a fixed sparse halo-pixel stencil outside the
+differentiable core and paint only the retained pairs:
+
+```python
+from geppetto import paint_lightcone_surface_density_sparse
+from geppetto.io import build_lightcone_sparse_stencil
+
+stencil = build_lightcone_sparse_stencil(
+    pixel_unit_vectors,
+    catalog,
+    rmax_mpc_h=5.0,  # fixed geometry cut in comoving Mpc/h
+)
+sigma_sparse = paint_lightcone_surface_density_sparse(stencil, catalog)
+```
+
+The sparse painter is differentiable with respect to NFW concentration/profile
+parameters. Pixel indices, HEALPix geometry, and the `Rmax` stencil cut are fixed
+inputs and are not differentiation targets.
+
 ## HEALPix one-halo particle-count map
 
 For PINOCCHIO mass-map integration, GEPPETTO can paint an NFW one-halo mass
