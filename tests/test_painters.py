@@ -1,20 +1,28 @@
 import jax
 import jax.numpy as jnp
+import pytest
 
 from geppetto import (
     ConcentrationParams,
     Cosmology,
     HaloCatalog,
     LightconeHaloCatalog,
+    LightconeSparseStencil,
     NFWProfileParams,
     density_at_points,
     density_at_points_chunked,
     paint_box_density_grid,
     paint_lightcone_particle_count_map,
+    paint_lightcone_particle_count_map_sparse,
     paint_lightcone_surface_density,
     paint_lightcone_surface_density_sparse,
 )
-from geppetto.io import build_lightcone_sparse_stencil
+from geppetto.io import (
+    PinocchioCatalogError,
+    build_lightcone_sparse_stencil,
+    build_lightcone_sparse_stencil_bruteforce,
+    validate_lightcone_sparse_stencil,
+)
 
 
 def test_density_at_points_shape_and_grad():
@@ -114,7 +122,9 @@ def test_lightcone_sparse_matches_dense_when_stencil_contains_all_pairs():
         mass=jnp.array([1.0e14, 5.0e13]),
         redshift=jnp.array([0.3, 0.35]),
     )
-    stencil = build_lightcone_sparse_stencil(pixel_unit_vectors, catalog, rmax_mpc_h=1.0e6)
+    stencil = build_lightcone_sparse_stencil_bruteforce(
+        pixel_unit_vectors, catalog, rmax_mpc_h=1.0e6
+    )
 
     dense = paint_lightcone_surface_density(pixel_unit_vectors, catalog)
     sparse = paint_lightcone_surface_density_sparse(stencil, catalog)
@@ -130,11 +140,48 @@ def test_lightcone_sparse_matches_dense_when_stencil_contains_all_pairs():
         pixel_area_sr=0.01,
         return_mass_per_pixel=True,
     )
+    dense_counts = paint_lightcone_particle_count_map(
+        pixel_unit_vectors,
+        catalog,
+        particle_mass_msun_h=1.0e10,
+        pixel_area_sr=0.01,
+    )
+    sparse_counts = paint_lightcone_particle_count_map_sparse(
+        stencil,
+        catalog,
+        particle_mass_msun_h=1.0e10,
+        pixel_area_sr=0.01,
+    )
 
     assert sparse.shape == (3,)
     assert stencil.size == 6
     assert jnp.allclose(sparse, dense, rtol=1.0e-5, atol=1.0e-5)
     assert jnp.allclose(sparse_mass, dense_mass, rtol=1.0e-5, atol=1.0e-5)
+    assert jnp.allclose(sparse_counts, sparse_mass / 1.0e10, rtol=1.0e-6)
+    assert jnp.allclose(sparse_counts, dense_counts, rtol=1.0e-5, atol=1.0e-5)
+
+
+def test_lightcone_sparse_painter_is_jit_safe():
+    pixel_unit_vectors = jnp.array(
+        [[1.0, 0.0, 0.0], [0.999, 0.045, 0.0], [0.0, 1.0, 0.0]]
+    )
+    pixel_unit_vectors = pixel_unit_vectors / jnp.linalg.norm(pixel_unit_vectors, axis=1)[:, None]
+    catalog = LightconeHaloCatalog(
+        unit_vector=jnp.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]),
+        chi=jnp.array([1000.0, 1000.0]),
+        mass=jnp.array([1.0e14, 5.0e13]),
+        redshift=jnp.array([0.3, 0.35]),
+    )
+    stencil = build_lightcone_sparse_stencil_bruteforce(
+        pixel_unit_vectors, catalog, rmax_mpc_h=50.0
+    )
+
+    direct = paint_lightcone_surface_density_sparse(stencil, catalog)
+    jitted = jax.jit(paint_lightcone_surface_density_sparse)
+    compiled = jitted(stencil, catalog)
+
+    assert compiled.shape == (stencil.n_pix,)
+    assert jnp.allclose(compiled, direct, rtol=1.0e-5, atol=1.0e-5)
 
 
 def test_lightcone_sparse_gradients_are_finite():
@@ -146,7 +193,9 @@ def test_lightcone_sparse_gradients_are_finite():
         mass=jnp.array([1.0e14]),
         redshift=jnp.array([0.3]),
     )
-    stencil = build_lightcone_sparse_stencil(pixel_unit_vectors, catalog, rmax_mpc_h=1.0e6)
+    stencil = build_lightcone_sparse_stencil_bruteforce(
+        pixel_unit_vectors, catalog, rmax_mpc_h=1.0e6
+    )
 
     def concentration_objective(amplitude):
         return jnp.sum(
@@ -184,14 +233,19 @@ def test_lightcone_sparse_builder_filters_pairs_and_handles_empty_stencils():
         redshift=jnp.array([0.3, 0.35]),
     )
 
-    scalar = build_lightcone_sparse_stencil(pixel_unit_vectors, catalog, rmax_mpc_h=50.0)
-    per_halo = build_lightcone_sparse_stencil(
+    scalar = build_lightcone_sparse_stencil_bruteforce(
+        pixel_unit_vectors, catalog, rmax_mpc_h=50.0
+    )
+    alias = build_lightcone_sparse_stencil(pixel_unit_vectors, catalog, rmax_mpc_h=50.0)
+    per_halo = build_lightcone_sparse_stencil_bruteforce(
         pixel_unit_vectors,
         catalog,
         rmax_mpc_h=jnp.array([50.0, 0.0]),
     )
-    zero_rmax = build_lightcone_sparse_stencil(pixel_unit_vectors, catalog, rmax_mpc_h=0.0)
-    empty = build_lightcone_sparse_stencil(
+    zero_rmax = build_lightcone_sparse_stencil_bruteforce(
+        pixel_unit_vectors, catalog, rmax_mpc_h=0.0
+    )
+    empty = build_lightcone_sparse_stencil_bruteforce(
         jnp.array([[0.0, 0.0, 1.0]]),
         LightconeHaloCatalog(
             unit_vector=jnp.array([[1.0, 0.0, 0.0]]),
@@ -205,6 +259,8 @@ def test_lightcone_sparse_builder_filters_pairs_and_handles_empty_stencils():
 
     assert scalar.pix_id.tolist() == [0, 1, 2]
     assert scalar.halo_id.tolist() == [0, 0, 1]
+    assert alias.pix_id.tolist() == scalar.pix_id.tolist()
+    assert alias.halo_id.tolist() == scalar.halo_id.tolist()
     assert per_halo.pix_id.tolist() == [0, 1, 2]
     assert per_halo.halo_id.tolist() == [0, 0, 1]
     assert zero_rmax.pix_id.tolist() == [0, 2]
@@ -212,6 +268,53 @@ def test_lightcone_sparse_builder_filters_pairs_and_handles_empty_stencils():
     assert empty.size == 0
     assert painted_empty.shape == (1,)
     assert jnp.all(jnp.isfinite(painted_empty))
+
+
+def test_validate_lightcone_sparse_stencil_rejects_invalid_inputs():
+    catalog = LightconeHaloCatalog(
+        unit_vector=jnp.array([[1.0, 0.0, 0.0]]),
+        chi=jnp.array([1000.0]),
+        mass=jnp.array([1.0e14]),
+        redshift=jnp.array([0.3]),
+    )
+    valid = LightconeSparseStencil(
+        pix_id=jnp.array([0], dtype=jnp.int32),
+        halo_id=jnp.array([0], dtype=jnp.int32),
+        r_perp=jnp.array([0.0]),
+        n_pix=1,
+    )
+    validate_lightcone_sparse_stencil(valid, catalog)
+
+    with pytest.raises(PinocchioCatalogError, match="pix_id"):
+        validate_lightcone_sparse_stencil(
+            LightconeSparseStencil(
+                pix_id=jnp.array([1], dtype=jnp.int32),
+                halo_id=jnp.array([0], dtype=jnp.int32),
+                r_perp=jnp.array([0.0]),
+                n_pix=1,
+            ),
+            catalog,
+        )
+    with pytest.raises(PinocchioCatalogError, match="halo_id"):
+        validate_lightcone_sparse_stencil(
+            LightconeSparseStencil(
+                pix_id=jnp.array([0], dtype=jnp.int32),
+                halo_id=jnp.array([1], dtype=jnp.int32),
+                r_perp=jnp.array([0.0]),
+                n_pix=1,
+            ),
+            catalog,
+        )
+    with pytest.raises(PinocchioCatalogError, match="r_perp"):
+        validate_lightcone_sparse_stencil(
+            LightconeSparseStencil(
+                pix_id=jnp.array([0], dtype=jnp.int32),
+                halo_id=jnp.array([0], dtype=jnp.int32),
+                r_perp=jnp.array([-1.0]),
+                n_pix=1,
+            ),
+            catalog,
+        )
 
 
 def test_lightcone_particle_count_map_shape_grad_and_normalization():

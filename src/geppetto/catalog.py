@@ -1,14 +1,16 @@
 """Halo-catalogue containers.
 
-The containers are intentionally small ``NamedTuple`` objects. JAX treats them as
-pytrees, so functions using them can be differentiated and transformed with
-``jax.jit``, ``jax.grad``, ``jax.vmap`` and ``jax.lax.scan``.
+The containers are intentionally small pytrees, so functions using them can be
+differentiated and transformed with ``jax.jit``, ``jax.grad``, ``jax.vmap`` and
+``jax.lax.scan``.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import NamedTuple
 
+import jax
 import jax.numpy as jnp
 
 from geppetto.types import Array
@@ -70,7 +72,9 @@ class LightconeHaloCatalog(NamedTuple):
         return int(self.mass.shape[0])
 
 
-class LightconeSparseStencil(NamedTuple):
+@jax.tree_util.register_pytree_node_class
+@dataclass(frozen=True)
+class LightconeSparseStencil:
     """Sparse lightcone halo-pixel stencil for one-halo painting.
 
     Parameters
@@ -92,6 +96,21 @@ class LightconeSparseStencil(NamedTuple):
     halo_id: Array
     r_perp: Array
     n_pix: int
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "n_pix", int(self.n_pix))
+
+    def tree_flatten(self) -> tuple[tuple[Array, Array, Array], int]:
+        """Keep ``n_pix`` static for ``jax.jit`` output-shape construction."""
+
+        return (self.pix_id, self.halo_id, self.r_perp), self.n_pix
+
+    @classmethod
+    def tree_unflatten(
+        cls, n_pix: int, children: tuple[Array, Array, Array]
+    ) -> LightconeSparseStencil:
+        pix_id, halo_id, r_perp = children
+        return cls(pix_id=pix_id, halo_id=halo_id, r_perp=r_perp, n_pix=n_pix)
 
     @property
     def size(self) -> int:

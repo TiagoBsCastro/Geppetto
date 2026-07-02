@@ -88,9 +88,9 @@ differentiable core and paint only the retained pairs:
 
 ```python
 from geppetto import paint_lightcone_surface_density_sparse
-from geppetto.io import build_lightcone_sparse_stencil
+from geppetto.io import build_lightcone_sparse_stencil_bruteforce
 
-stencil = build_lightcone_sparse_stencil(
+stencil = build_lightcone_sparse_stencil_bruteforce(
     pixel_unit_vectors,
     catalog,
     rmax_mpc_h=5.0,  # fixed geometry cut in comoving Mpc/h
@@ -102,6 +102,11 @@ The sparse painter is differentiable with respect to NFW concentration/profile
 parameters. Pixel indices, HEALPix geometry, and the `Rmax` stencil cut are fixed
 inputs and are not differentiation targets.
 
+`build_lightcone_sparse_stencil_bruteforce` materializes an `n_pix * n_halo`
+separation matrix before filtering, so it is meant for validation, examples, and
+small maps. Production HEALPix-local stencil construction belongs outside the
+JAX painter and should pass the same `LightconeSparseStencil` container.
+
 ## HEALPix one-halo particle-count map
 
 For PINOCCHIO mass-map integration, GEPPETTO can paint an NFW one-halo mass
@@ -110,7 +115,10 @@ pixel vectors; `geppetto.io` supplies the optional `healpy` adapter and parses
 the PINOCCHIO parameter file to compute the grid-element particle mass.
 
 ```python
-from geppetto import paint_lightcone_particle_count_map
+from geppetto import (
+    paint_lightcone_particle_count_map,
+    paint_lightcone_particle_count_map_sparse,
+)
 from geppetto.io import (
     healpix_pixel_area_sr,
     healpix_pixel_unit_vectors,
@@ -128,10 +136,19 @@ one_halo_counts = paint_lightcone_particle_count_map(
     cosmology=metadata.cosmology,
     chunk_size=1024,
 )
+
+sparse_counts = paint_lightcone_particle_count_map_sparse(
+    stencil,
+    lightcone_catalog,
+    particle_mass_msun_h=metadata.particle_mass_msun_h,
+    pixel_area_sr=healpix_pixel_area_sr(256),
+    cosmology=metadata.cosmology,
+)
 ```
 
-`one_halo_counts` is the projected NFW one-halo mass per pixel divided by the
-PINOCCHIO particle mass. It does not include PINOCCHIO's two-halo map.
+`one_halo_counts` and `sparse_counts` are projected NFW one-halo mass per pixel
+divided by the PINOCCHIO particle mass. They do not include PINOCCHIO's two-halo
+map.
 
 ## Reading PINOCCHIO outputs
 

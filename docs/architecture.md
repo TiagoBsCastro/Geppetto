@@ -74,9 +74,14 @@ precomputed halo-pixel stencil:
 
 Stencil construction is non-core geometry. It may use NumPy, HEALPix helpers, or
 survey masks outside JAX, then pass fixed pair arrays into the differentiable
-painter. The first brute-force builder retains pairs with
+painter. `LightconeSparseStencil` stores `n_pix` as static pytree metadata so
+the sparse painter can allocate its `(n_pix,)` result under `jax.jit`. The first
+builder, `build_lightcone_sparse_stencil_bruteforce`, retains pairs with
 `R_perp <= Rmax_halo`; `Rmax` and the retained pair set are not differentiable
-parameters. The sparse painter remains differentiable with respect to
+parameters. This helper materializes the full `n_pix * n_halo` separation
+matrix and is intended for validation and small maps. A scalable HEALPix-local
+builder should return the same stencil container after doing the discrete pixel
+queries outside JAX. The sparse painter remains differentiable with respect to
 concentration and profile parameters because it only gathers halo fields,
 evaluates the projected profile, and scatter-adds into the output map.
 
@@ -91,7 +96,9 @@ where `m_particle` is computed from the PINOCCHIO parameter file as the mean
 comoving matter density times `BoxSize^3 / GridSize^3`, with `BoxInH100`
 controlling whether the box size is already in `Mpc/h`. HEALPix pixel-to-vector
 conversion remains in `geppetto.io`; the JAX painter only sees fixed unit
-vectors and a pixel area.
+vectors and a pixel area. The sparse equivalent,
+`paint_lightcone_particle_count_map_sparse`, uses the same mass-per-pixel divided
+by particle-mass convention on a precomputed stencil.
 
 ## Box mode
 

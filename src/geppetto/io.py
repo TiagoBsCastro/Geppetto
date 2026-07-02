@@ -789,7 +789,57 @@ def healpix_pixel_unit_vectors(
     return np.stack([x, y, z], axis=-1).astype(np.float64, copy=False)
 
 
-def build_lightcone_sparse_stencil(
+def validate_lightcone_sparse_stencil(
+    stencil: LightconeSparseStencil,
+    catalog: LightconeHaloCatalog | None = None,
+) -> None:
+    """Validate a sparse lightcone stencil outside JAX-transformed paths.
+
+    This helper is intended for I/O adapters and manually constructed stencils.
+    It performs host-side NumPy checks and must not be called from differentiable
+    kernels.
+    """
+
+    pix_id = np.asarray(stencil.pix_id)
+    halo_id = np.asarray(stencil.halo_id)
+    r_perp = np.asarray(stencil.r_perp)
+
+    if pix_id.ndim != 1:
+        raise PinocchioCatalogError("stencil.pix_id must be one-dimensional")
+    if halo_id.ndim != 1:
+        raise PinocchioCatalogError("stencil.halo_id must be one-dimensional")
+    if r_perp.ndim != 1:
+        raise PinocchioCatalogError("stencil.r_perp must be one-dimensional")
+    if pix_id.shape[0] != halo_id.shape[0] or pix_id.shape[0] != r_perp.shape[0]:
+        raise PinocchioCatalogError("stencil fields must have matching lengths")
+    if not np.issubdtype(pix_id.dtype, np.integer):
+        raise PinocchioCatalogError("stencil.pix_id must contain integer indices")
+    if not np.issubdtype(halo_id.dtype, np.integer):
+        raise PinocchioCatalogError("stencil.halo_id must contain integer indices")
+
+    try:
+        n_pix = int(stencil.n_pix)
+    except TypeError as exc:
+        raise PinocchioCatalogError("stencil.n_pix must be an integer") from exc
+    if n_pix < 0:
+        raise PinocchioCatalogError("stencil.n_pix must be non-negative")
+    if pix_id.size and (np.any(pix_id < 0) or np.any(pix_id >= n_pix)):
+        raise PinocchioCatalogError("stencil.pix_id contains out-of-range pixel indices")
+    if halo_id.size and np.any(halo_id < 0):
+        raise PinocchioCatalogError("stencil.halo_id contains negative halo indices")
+    if not np.all(np.isfinite(r_perp)) or np.any(r_perp < 0.0):
+        raise PinocchioCatalogError("stencil.r_perp values must be finite and non-negative")
+
+    if catalog is not None:
+        mass = np.asarray(catalog.mass)
+        if mass.ndim != 1:
+            raise PinocchioCatalogError("catalog.mass must have shape (n_halo,)")
+        n_halo = int(mass.shape[0])
+        if halo_id.size and np.any(halo_id >= n_halo):
+            raise PinocchioCatalogError("stencil.halo_id contains out-of-range halo indices")
+
+
+def build_lightcone_sparse_stencil_bruteforce(
     pixel_unit_vectors: np.ndarray,
     catalog: LightconeHaloCatalog,
     rmax_mpc_h: np.ndarray | float,
@@ -801,6 +851,10 @@ def build_lightcone_sparse_stencil(
     distances in ``Mpc/h``, and a scalar or per-halo ``Rmax`` in ``Mpc/h``.
     Returned pairs satisfy ``R_perp <= Rmax_halo`` using the same chord
     transverse-distance convention as GEPPETTO's dense lightcone painter.
+
+    This implementation materializes an ``n_pix * n_halo`` separation matrix
+    before filtering. It is useful for validation, examples, and small maps, but
+    is not the scalable production HEALPix-local stencil builder.
     """
 
     pixels = np.asarray(pixel_unit_vectors, dtype=np.float64)
@@ -832,22 +886,45 @@ def build_lightcone_sparse_stencil(
         raise PinocchioCatalogError("rmax_mpc_h values must be finite and non-negative")
 
     if n_pix == 0 or n_halo == 0:
-        return LightconeSparseStencil(
+        stencil = LightconeSparseStencil(
             pix_id=jnp.empty((0,), dtype=jnp.int32),
             halo_id=jnp.empty((0,), dtype=jnp.int32),
             r_perp=jnp.empty((0,), dtype=jnp.float64),
             n_pix=n_pix,
         )
+        validate_lightcone_sparse_stencil(stencil, catalog)
+        return stencil
 
     cosang = np.clip(pixels @ halo_unit_vectors.T, -1.0, 1.0)
     chord = np.sqrt(np.maximum(2.0 * (1.0 - cosang), 0.0))
     r_perp = chord * halo_chi[None, :]
     pix_id, halo_id = np.nonzero(r_perp <= rmax[None, :])
-    return LightconeSparseStencil(
+    stencil = LightconeSparseStencil(
         pix_id=jnp.asarray(pix_id, dtype=jnp.int32),
         halo_id=jnp.asarray(halo_id, dtype=jnp.int32),
         r_perp=jnp.asarray(r_perp[pix_id, halo_id]),
         n_pix=n_pix,
+    )
+    validate_lightcone_sparse_stencil(stencil, catalog)
+    return stencil
+
+
+def build_lightcone_sparse_stencil(
+    pixel_unit_vectors: np.ndarray,
+    catalog: LightconeHaloCatalog,
+    rmax_mpc_h: np.ndarray | float,
+) -> LightconeSparseStencil:
+    """Backward-compatible alias for the brute-force sparse stencil builder.
+
+    Prefer :func:`build_lightcone_sparse_stencil_bruteforce` when the
+    construction cost matters. This alias retains the original prototype name
+    but still materializes an ``n_pix * n_halo`` separation matrix.
+    """
+
+    return build_lightcone_sparse_stencil_bruteforce(
+        pixel_unit_vectors,
+        catalog,
+        rmax_mpc_h,
     )
 
 

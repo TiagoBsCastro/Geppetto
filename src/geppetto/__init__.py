@@ -13,6 +13,7 @@ from geppetto.painters import (
     density_at_points_chunked,
     paint_box_density_grid,
     paint_lightcone_particle_count_map,
+    paint_lightcone_particle_count_map_sparse,
     paint_lightcone_surface_density,
     paint_lightcone_surface_density_sparse,
 )
@@ -32,6 +33,7 @@ __all__ = [
     "from_spherical_lightcone",
     "paint_box_density_grid",
     "paint_lightcone_particle_count_map",
+    "paint_lightcone_particle_count_map_sparse",
     "paint_lightcone_surface_density",
     "paint_lightcone_surface_density_sparse",
 ]

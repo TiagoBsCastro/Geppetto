@@ -306,6 +306,56 @@ def paint_lightcone_surface_density_sparse(
     return jnp.zeros((stencil.n_pix,), dtype=sigma.dtype).at[pix_id].add(sigma)
 
 
+def paint_lightcone_particle_count_map_sparse(
+    stencil: LightconeSparseStencil,
+    catalog: LightconeHaloCatalog,
+    particle_mass_msun_h: float,
+    pixel_area_sr: float,
+    cosmology: Cosmology = DEFAULT_COSMOLOGY,
+    concentration_params: ConcentrationParams = DEFAULT_CONCENTRATION_PARAMS,
+    profile_params: NFWProfileParams = DEFAULT_NFW_PROFILE_PARAMS,
+) -> Array:
+    """Paint a sparse count-equivalent one-halo lightcone map.
+
+    Parameters
+    ----------
+    stencil:
+        Precomputed sparse halo-pixel geometry. ``stencil.r_perp`` is in
+        comoving ``Mpc/h`` and ``stencil.pix_id`` indexes the output map.
+    catalog:
+        Lightcone halo catalogue with distances in comoving ``Mpc/h`` and masses
+        in ``Msun/h``.
+    particle_mass_msun_h:
+        PINOCCHIO particle mass in ``Msun/h``. The returned map is projected
+        one-halo mass per pixel divided by this value, matching
+        :func:`paint_lightcone_particle_count_map`.
+    pixel_area_sr:
+        Pixel solid angle in steradians.
+
+    Notes
+    -----
+    The result is differentiable with respect to halo/profile quantities and
+    profile/concentration parameters. Pixel identities, HEALPix geometry, and
+    the retained stencil pair set are fixed inputs outside this JAX kernel.
+    """
+
+    if particle_mass_msun_h <= 0.0:
+        raise ValueError("particle_mass_msun_h must be positive")
+    if pixel_area_sr <= 0.0:
+        raise ValueError("pixel_area_sr must be positive")
+
+    mass_per_pixel = paint_lightcone_surface_density_sparse(
+        stencil,
+        catalog,
+        cosmology=cosmology,
+        concentration_params=concentration_params,
+        profile_params=profile_params,
+        pixel_area_sr=pixel_area_sr,
+        return_mass_per_pixel=True,
+    )
+    return mass_per_pixel / particle_mass_msun_h
+
+
 def paint_lightcone_particle_count_map(
     pixel_unit_vectors: Array,
     catalog: LightconeHaloCatalog,
