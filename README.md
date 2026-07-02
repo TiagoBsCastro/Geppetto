@@ -120,11 +120,13 @@ from geppetto import (
     TabulatedProjectedProfileParams,
     paint_lightcone_surface_density_tabulated_sparse,
 )
+from geppetto.io import validate_tabulated_projected_profile_params
 
 profile = TabulatedProjectedProfileParams(
     x=jnp.linspace(0.0, 1.0, 32),
     log_shape=jnp.zeros(32),  # differentiable unconstrained amplitudes
 )
+validate_tabulated_projected_profile_params(profile)
 
 sigma_tabulated = paint_lightcone_surface_density_tabulated_sparse(
     stencil,
@@ -136,8 +138,15 @@ sigma_tabulated = paint_lightcone_surface_density_tabulated_sparse(
 
 The tabulated sparse painter uses JAX interpolation, exponentiates `log_shape`
 for positivity, and normalizes the disk integral inside `Rmax` to the halo mass.
-It is differentiable with respect to `log_shape`, masses, and catalogue
-distances used for mass-per-pixel conversion.
+It treats both `x` and `Rmax` as fixed geometry and is differentiable with
+respect to `log_shape`, masses, and catalogue distances used for mass-per-pixel
+conversion.
+
+The profile is normalized in the continuum. Exact discrete mass conservation on
+a HEALPix/pixel stencil is not enforced in this release, so coarse maps or
+stencils with very small `Rmax` only approximate the halo mass after pixel
+sampling. The current `exp(log_shape)` parameterization also enforces positive
+profiles; compensated signed profiles are a later extension.
 
 ## HEALPix one-halo particle-count map
 

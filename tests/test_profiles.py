@@ -68,6 +68,7 @@ def test_tabulated_projected_surface_density_shape_support_and_normalization():
         rmax,
         params,
     )
+    expected_sigma = mass[0] / (jnp.pi * rmax[0] ** 2)
     mass_integrand = 2.0 * jnp.pi * r * sigma
     recovered_mass = jnp.sum(
         0.5 * (mass_integrand[1:] + mass_integrand[:-1]) * (r[1:] - r[:-1])
@@ -76,6 +77,7 @@ def test_tabulated_projected_surface_density_shape_support_and_normalization():
     assert sigma.shape == (256,)
     assert jnp.all(jnp.isfinite(sigma))
     assert jnp.all(sigma >= 0.0)
+    assert jnp.allclose(sigma, expected_sigma, rtol=1.0e-6)
     assert jnp.all(outside == 0.0)
     assert jnp.allclose(recovered_mass, mass[0], rtol=5.0e-4)
 
@@ -113,3 +115,25 @@ def test_tabulated_projected_surface_density_stops_rmax_gradient():
         )
 
     assert jax.grad(objective)(2.0) == 0.0
+
+
+def test_tabulated_projected_surface_density_stops_x_grid_gradient():
+    params = TabulatedProjectedProfileParams(
+        x=jnp.linspace(0.0, 1.0, 6),
+        log_shape=jnp.linspace(0.0, -1.0, 6),
+    )
+
+    def objective(profile_params):
+        return jnp.sum(
+            tabulated_projected_surface_density(
+                jnp.array([0.1, 0.2, 0.7]),
+                jnp.array([1.0e14]),
+                2.0,
+                profile_params,
+            )
+        )
+
+    grad = jax.grad(objective)(params)
+    assert jnp.all(grad.x == 0.0)
+    assert grad.log_shape.shape == params.log_shape.shape
+    assert jnp.all(jnp.isfinite(grad.log_shape))

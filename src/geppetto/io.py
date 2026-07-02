@@ -25,6 +25,7 @@ from geppetto.catalog import (
     unit_vectors_from_angles,
 )
 from geppetto.cosmology import Cosmology, rho_mean_comoving
+from geppetto.profiles import TabulatedProjectedProfileParams
 
 
 class PinocchioCatalogError(ValueError):
@@ -837,6 +838,37 @@ def validate_lightcone_sparse_stencil(
         n_halo = int(mass.shape[0])
         if halo_id.size and np.any(halo_id >= n_halo):
             raise PinocchioCatalogError("stencil.halo_id contains out-of-range halo indices")
+
+
+def validate_tabulated_projected_profile_params(
+    profile_params: TabulatedProjectedProfileParams,
+) -> None:
+    """Validate tabulated projected-profile parameters outside JAX paths.
+
+    This helper checks host-side profile-grid contracts before callers enter
+    JIT-compiled kernels. The differentiable profile kernel assumes validated
+    one-dimensional arrays with fixed support covering ``0 <= x <= 1``.
+    """
+
+    x = np.asarray(profile_params.x)
+    log_shape = np.asarray(profile_params.log_shape)
+
+    if x.ndim != 1:
+        raise PinocchioCatalogError("profile_params.x must be one-dimensional")
+    if log_shape.ndim != 1:
+        raise PinocchioCatalogError("profile_params.log_shape must be one-dimensional")
+    if x.shape != log_shape.shape:
+        raise PinocchioCatalogError("profile_params.x and log_shape must have matching shapes")
+    if x.shape[0] < 2:
+        raise PinocchioCatalogError("profile_params.x must contain at least two grid points")
+    if not np.all(np.isfinite(x)):
+        raise PinocchioCatalogError("profile_params.x values must be finite")
+    if not np.all(np.isfinite(log_shape)):
+        raise PinocchioCatalogError("profile_params.log_shape values must be finite")
+    if not np.all(np.diff(x) > 0.0):
+        raise PinocchioCatalogError("profile_params.x must be strictly increasing")
+    if x[0] > 0.0 or x[-1] < 1.0:
+        raise PinocchioCatalogError("profile_params.x must cover the interval [0, 1]")
 
 
 def build_lightcone_sparse_stencil_bruteforce(

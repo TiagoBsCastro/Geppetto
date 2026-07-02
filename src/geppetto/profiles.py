@@ -200,7 +200,8 @@ def tabulated_projected_surface_density(
         :func:`jax.lax.stop_gradient` inside the kernel.
     profile_params:
         Shared dimensionless template. ``log_shape`` is differentiable; ``x``
-        is treated as a fixed grid by convention.
+        is treated as fixed non-differentiable geometry by applying
+        :func:`jax.lax.stop_gradient` inside the kernel.
 
     Returns
     -------
@@ -211,10 +212,12 @@ def tabulated_projected_surface_density(
     -----
     The projected template is normalized with
     ``2*pi*integral_0^1 x*shape(x) dx`` so the mass inside ``Rmax`` equals
-    ``mass``. Values outside the last tabulated radius are set to zero.
+    ``mass`` in the continuum. Values outside the last tabulated radius are set
+    to zero. Validate manually constructed tabulated profiles outside JAX paths
+    before passing them to this kernel.
     """
 
-    x_grid = jnp.asarray(profile_params.x)
+    x_grid = lax.stop_gradient(jnp.asarray(profile_params.x))
     shape_grid = jnp.exp(jnp.asarray(profile_params.log_shape))
     rmax = lax.stop_gradient(jnp.asarray(rmax_mpc_h))
     rmax_safe = jnp.maximum(rmax, 1.0e-30)

@@ -21,7 +21,100 @@ from geppetto.io import (
     read_pinocchio_nz,
     read_pinocchio_parameter_file,
     read_pinocchio_snapshot_catalog,
+    validate_tabulated_projected_profile_params,
 )
+from geppetto.profiles import TabulatedProjectedProfileParams
+
+
+def test_validate_tabulated_projected_profile_params_accepts_valid_params():
+    validate_tabulated_projected_profile_params(
+        TabulatedProjectedProfileParams(
+            x=np.array([0.0, 0.5, 1.0]),
+            log_shape=np.array([0.0, -0.1, -0.2]),
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    ("profile_params", "match"),
+    [
+        (
+            TabulatedProjectedProfileParams(
+                x=np.array([[0.0, 1.0]]),
+                log_shape=np.array([0.0, 0.0]),
+            ),
+            "x must be one-dimensional",
+        ),
+        (
+            TabulatedProjectedProfileParams(
+                x=np.array([0.0, 1.0]),
+                log_shape=np.array([[0.0, 0.0]]),
+            ),
+            "log_shape must be one-dimensional",
+        ),
+        (
+            TabulatedProjectedProfileParams(
+                x=np.array([0.0, 0.5, 1.0]),
+                log_shape=np.array([0.0, 0.0]),
+            ),
+            "matching shapes",
+        ),
+        (
+            TabulatedProjectedProfileParams(
+                x=np.array([0.0]),
+                log_shape=np.array([0.0]),
+            ),
+            "at least two",
+        ),
+        (
+            TabulatedProjectedProfileParams(
+                x=np.array([0.0, np.nan, 1.0]),
+                log_shape=np.array([0.0, 0.0, 0.0]),
+            ),
+            "x values must be finite",
+        ),
+        (
+            TabulatedProjectedProfileParams(
+                x=np.array([0.0, 0.5, 1.0]),
+                log_shape=np.array([0.0, np.inf, 0.0]),
+            ),
+            "log_shape values must be finite",
+        ),
+        (
+            TabulatedProjectedProfileParams(
+                x=np.array([0.0, 0.5, 0.5, 1.0]),
+                log_shape=np.array([0.0, 0.0, 0.0, 0.0]),
+            ),
+            "strictly increasing",
+        ),
+        (
+            TabulatedProjectedProfileParams(
+                x=np.array([0.0, 0.8, 0.7, 1.0]),
+                log_shape=np.array([0.0, 0.0, 0.0, 0.0]),
+            ),
+            "strictly increasing",
+        ),
+        (
+            TabulatedProjectedProfileParams(
+                x=np.array([0.1, 0.5, 1.0]),
+                log_shape=np.array([0.0, 0.0, 0.0]),
+            ),
+            r"\[0, 1\]",
+        ),
+        (
+            TabulatedProjectedProfileParams(
+                x=np.array([0.0, 0.5, 0.9]),
+                log_shape=np.array([0.0, 0.0, 0.0]),
+            ),
+            r"\[0, 1\]",
+        ),
+    ],
+)
+def test_validate_tabulated_projected_profile_params_rejects_invalid_params(
+    profile_params, match
+):
+    with pytest.raises(PinocchioCatalogError, match=match):
+        validate_tabulated_projected_profile_params(profile_params)
 
 
 def test_read_pinocchio_snapshot_catalog_and_convert(tmp_path):

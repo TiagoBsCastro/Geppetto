@@ -96,9 +96,15 @@ Sigma(R) = M_halo * shape(R / Rmax) /
 unconstrained `log_shape` values. The JAX kernel exponentiates `log_shape`,
 linearly interpolates the positive template, sets values outside the fixed
 support to zero, and normalizes the projected mass inside `Rmax` to the halo
-mass. `Rmax` is supplied as scalar or per-halo geometry and is stopped from
-participating in gradients. Dense PLC and box-grid painters remain NFW-only in
-this first tabulated-profile release.
+mass. `x` and `Rmax` are fixed geometry and are stopped from participating in
+gradients. Call `validate_tabulated_projected_profile_params` outside JAX paths
+for manually constructed tabulated profiles. Dense PLC and box-grid painters
+remain NFW-only in this first tabulated-profile release.
+
+This normalization is continuous: exact discrete mass conservation after
+HEALPix/pixel-center sampling is not enforced. The current `exp(log_shape)`
+parameterization represents positive projected profiles only; compensated signed
+profiles require a later parameterization.
 
 For PINOCCHIO mass-map integration, the HEALPix-facing painter returns a
 count-equivalent one-halo collector:

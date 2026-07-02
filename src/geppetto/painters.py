@@ -357,7 +357,9 @@ def paint_lightcone_surface_density_tabulated_sparse(
     -----
     HEALPix indexing, stencil construction, and stencil validation belong
     outside this JAX kernel. Use ``validate_lightcone_sparse_stencil`` before
-    JIT-compiled paths when stencils are manually constructed.
+    JIT-compiled paths when stencils are manually constructed. Use
+    ``validate_tabulated_projected_profile_params`` outside JAX paths for
+    manually constructed tabulated profile parameters.
     """
 
     if return_mass_per_pixel and pixel_area_sr is None:
