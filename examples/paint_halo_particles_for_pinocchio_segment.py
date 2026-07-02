@@ -155,6 +155,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--nfw-paint",
+        action="store_true",
+        help=(
+            "Save an NFW one-halo particle-count map on the same selected halos "
+            "and pixel domain without computing gradients. Implied by "
+            "--nfw-gradient-demo."
+        ),
+    )
+    parser.add_argument(
         "--nfw-concentration-amplitude",
         type=float,
         default=5.71,
@@ -599,6 +608,7 @@ def nfw_gradient_demo(
     taper_radius_factor: float = 10.0,
     dense_demo: bool = False,
     validate_sum_only: bool = False,
+    compute_gradients: bool = True,
     profile: bool = False,
     profile_jax_repeat: bool = False,
 ) -> dict[str, float | int | str | np.ndarray]:
@@ -616,6 +626,8 @@ def nfw_gradient_demo(
         raise ValueError("particle_mass_msun_h must be positive")
     if dense_demo and validate_sum_only:
         raise ValueError("--nfw-validate-sum-only is only supported for sparse NFW demos")
+    if validate_sum_only and not compute_gradients:
+        raise ValueError("--nfw-validate-sum-only requires --nfw-gradient-demo")
     if chunk_size is not None and chunk_size <= 0:
         chunk_size = None
 
@@ -668,7 +680,10 @@ def nfw_gradient_demo(
         [concentration_amplitude, truncation_width_fraction],
         dtype=selected_catalog.mass.dtype,
     )
-    nfw_objective_mode = "dense_map_sum" if dense_demo else "sum_only_sparse"
+    nfw_paint_mode = "dense" if dense_demo else "sparse"
+    nfw_objective_mode = (
+        "dense_map_sum" if dense_demo else "sum_only_sparse"
+    ) if compute_gradients else "not_computed"
 
     def objective(theta):
         concentration_params = ConcentrationParams(amplitude=theta[0])
@@ -698,43 +713,52 @@ def nfw_gradient_demo(
             profile_params=profile_params,
         )
 
-    grad_fn = jax.value_and_grad(objective)
-    with timed_stage("NFW objective value_and_grad", profile):
-        total_counts, grad = grad_fn(theta)
-        total_counts.block_until_ready()
-        grad.block_until_ready()
+    if compute_gradients:
+        grad_fn = jax.value_and_grad(objective)
+        with timed_stage("NFW objective value_and_grad", profile):
+            total_counts, grad = grad_fn(theta)
+            total_counts.block_until_ready()
+            grad.block_until_ready()
 
-    if profile and profile_jax_repeat:
-        with timed_stage("NFW objective cached value_and_grad", profile):
-            total_counts_repeat, grad_repeat = grad_fn(theta)
-            total_counts_repeat.block_until_ready()
-            grad_repeat.block_until_ready()
+        if profile and profile_jax_repeat:
+            with timed_stage("NFW objective cached value_and_grad", profile):
+                total_counts_repeat, grad_repeat = grad_fn(theta)
+                total_counts_repeat.block_until_ready()
+                grad_repeat.block_until_ready()
+    else:
+        total_counts = None
+        grad = None
 
     output_concentration_params = ConcentrationParams(amplitude=theta[0])
     output_profile_params = NFWProfileParams(truncation_width_fraction=theta[1])
-    if dense_demo:
-        assert pixel_unit_vectors is not None
-        nfw_particle_counts = paint_lightcone_particle_count_map(
-            pixel_unit_vectors,
-            selected_catalog,
-            particle_mass_msun_h=particle_mass_msun_h,
-            pixel_area_sr=pixel_area_sr,
-            cosmology=metadata.cosmology,
-            concentration_params=output_concentration_params,
-            profile_params=output_profile_params,
-            chunk_size=chunk_size,
-        )
-    else:
-        assert stencil is not None
-        nfw_particle_counts = paint_lightcone_particle_count_map_sparse(
-            stencil,
-            selected_catalog,
-            particle_mass_msun_h=particle_mass_msun_h,
-            pixel_area_sr=pixel_area_sr,
-            cosmology=metadata.cosmology,
-            concentration_params=output_concentration_params,
-            profile_params=output_profile_params,
-        )
+    with timed_stage("NFW particle map", profile):
+        if dense_demo:
+            assert pixel_unit_vectors is not None
+            nfw_particle_counts = paint_lightcone_particle_count_map(
+                pixel_unit_vectors,
+                selected_catalog,
+                particle_mass_msun_h=particle_mass_msun_h,
+                pixel_area_sr=pixel_area_sr,
+                cosmology=metadata.cosmology,
+                concentration_params=output_concentration_params,
+                profile_params=output_profile_params,
+                chunk_size=chunk_size,
+            )
+        else:
+            assert stencil is not None
+            nfw_particle_counts = paint_lightcone_particle_count_map_sparse(
+                stencil,
+                selected_catalog,
+                particle_mass_msun_h=particle_mass_msun_h,
+                pixel_area_sr=pixel_area_sr,
+                cosmology=metadata.cosmology,
+                concentration_params=output_concentration_params,
+                profile_params=output_profile_params,
+            )
+        nfw_particle_counts.block_until_ready()
+
+    if total_counts is None:
+        total_counts = jnp.sum(nfw_particle_counts)
 
     if validate_sum_only:
         validation_sum = jnp.sum(nfw_particle_counts)
@@ -747,11 +771,10 @@ def nfw_gradient_demo(
                 f"map_sum={float(validation_sum):.17g}"
             )
 
-    grad_concentration = grad[0]
-    grad_truncation_width = grad[1]
-    return {
+    diagnostics: dict[str, float | int | str | np.ndarray] = {
         "nfw_particle_counts": np.asarray(nfw_particle_counts),
-        "nfw_gradient_mode": "dense" if dense_demo else "sparse",
+        "nfw_paint_mode": nfw_paint_mode,
+        "nfw_gradient_mode": nfw_paint_mode if compute_gradients else "not_computed",
         "nfw_objective_mode": nfw_objective_mode,
         "nfw_gradient_demo_n_halos": int(selected_catalog.mass.shape[0]),
         "nfw_compact_pixel_count": n_pix,
@@ -762,10 +785,18 @@ def nfw_gradient_demo(
         ),
         "nfw_sum_particle_counts": float(total_counts),
         "nfw_concentration_amplitude": float(concentration_amplitude),
-        "nfw_d_sum_d_concentration_amplitude": float(grad_concentration),
         "nfw_truncation_width_fraction": float(truncation_width_fraction),
-        "nfw_d_sum_d_truncation_width_fraction": float(grad_truncation_width),
     }
+    if grad is not None:
+        grad_concentration = grad[0]
+        grad_truncation_width = grad[1]
+        diagnostics.update(
+            {
+                "nfw_d_sum_d_concentration_amplitude": float(grad_concentration),
+                "nfw_d_sum_d_truncation_width_fraction": float(grad_truncation_width),
+            }
+        )
+    return diagnostics
 
 
 def diagnostics_for_map(
@@ -944,10 +975,14 @@ def print_nfw_gradient_summary(
 ) -> None:
     """Print the optional NFW differentiability tutorial summary."""
 
-    print("NFW differentiability demo:")
-    print("  Objective: sum of NFW one-halo particle-count map on the same compact pixels")
-    print(f"  Painter mode: {nfw_diagnostics['nfw_gradient_mode']}")
-    print(f"  Objective mode: {nfw_diagnostics['nfw_objective_mode']}")
+    print("NFW one-halo map:")
+    print(f"  Painter mode: {nfw_diagnostics['nfw_paint_mode']}")
+    if nfw_diagnostics["nfw_objective_mode"] != "not_computed":
+        print("  Objective: sum of NFW one-halo particle-count map on the same compact pixels")
+        print(f"  Gradient mode: {nfw_diagnostics['nfw_gradient_mode']}")
+        print(f"  Objective mode: {nfw_diagnostics['nfw_objective_mode']}")
+    else:
+        print("  Gradients: not computed")
     print(f"  Selected halos painted: {nfw_diagnostics['nfw_gradient_demo_n_halos']}")
     print(f"  Compact pixels: {nfw_diagnostics['nfw_compact_pixel_count']}")
     print(f"  Sparse halo-pixel pairs: {nfw_diagnostics['nfw_sparse_pair_count']}")
@@ -957,14 +992,15 @@ def print_nfw_gradient_summary(
         f"{nfw_diagnostics['nfw_sparse_compression_factor']:.12g}"
     )
     print(f"  NFW sum particle counts: {nfw_diagnostics['nfw_sum_particle_counts']:.12g}")
-    print(
-        "  d(sum) / d concentration amplitude: "
-        f"{nfw_diagnostics['nfw_d_sum_d_concentration_amplitude']:.12g}"
-    )
-    print(
-        "  d(sum) / d truncation width fraction: "
-        f"{nfw_diagnostics['nfw_d_sum_d_truncation_width_fraction']:.12g}"
-    )
+    if "nfw_d_sum_d_concentration_amplitude" in nfw_diagnostics:
+        print(
+            "  d(sum) / d concentration amplitude: "
+            f"{nfw_diagnostics['nfw_d_sum_d_concentration_amplitude']:.12g}"
+        )
+        print(
+            "  d(sum) / d truncation width fraction: "
+            f"{nfw_diagnostics['nfw_d_sum_d_truncation_width_fraction']:.12g}"
+        )
 
 
 def main() -> None:
@@ -1025,8 +1061,10 @@ def main() -> None:
             inside_pixel_domain,
         )
     nfw_diagnostics = None
-    if args.nfw_gradient_demo:
-        with timed_stage("NFW gradient demo", args.profile):
+    run_nfw = args.nfw_paint or args.nfw_gradient_demo
+    if run_nfw:
+        nfw_stage_name = "NFW gradient demo" if args.nfw_gradient_demo else "NFW particle paint"
+        with timed_stage(nfw_stage_name, args.profile):
             nfw_diagnostics = nfw_gradient_demo(
                 catalog,
                 mask,
@@ -1039,6 +1077,7 @@ def main() -> None:
                 taper_radius_factor=args.nfw_taper_radius_factor,
                 dense_demo=args.nfw_dense_demo,
                 validate_sum_only=args.nfw_validate_sum_only,
+                compute_gradients=args.nfw_gradient_demo,
                 profile=args.profile,
                 profile_jax_repeat=args.profile_jax_repeat,
             )

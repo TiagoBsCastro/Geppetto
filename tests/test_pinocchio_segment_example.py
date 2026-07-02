@@ -122,6 +122,7 @@ def test_example_script_help_runs():
     assert "--mass-map" in result.stdout
     assert "--sheet-index" in result.stdout
     assert "--nfw-gradient-demo" in result.stdout
+    assert "--nfw-paint" in result.stdout
     assert "--nfw-dense-demo" in result.stdout
     assert "--nfw-taper-radius-factor" in result.stdout
     assert "--nfw-validate-sum-only" in result.stdout
@@ -510,6 +511,77 @@ def test_nfw_gradient_demo_sparse_sum_only_validation_matches_sparse_map_sum():
         diagnostics["nfw_sum_particle_counts"],
         rtol=1.0e-5,
     )
+
+
+def test_nfw_paint_only_outputs_map_without_gradients():
+    hp = pytest.importorskip("healpy")
+    module = _load_example_module()
+
+    halo_pixels = np.array([0], dtype=np.int64)
+    unit_vector = np.stack(hp.pix2vec(1, halo_pixels), axis=-1)
+    catalog = _catalog(
+        unit_vector=unit_vector,
+        mass=np.array([1.0e13]),
+        redshift=np.array([0.2]),
+        chi=np.array([1000.0]),
+    )
+    mass_map = _mass_map(
+        np.array([0], dtype=np.int64),
+        temperature=np.array([100.0]),
+        nside=1,
+    )
+    metadata = SimpleNamespace(cosmology=Cosmology())
+
+    diagnostics = module.nfw_gradient_demo(
+        catalog,
+        np.array([True]),
+        mass_map,
+        metadata,
+        particle_mass_msun_h=1.0e10,
+        concentration_amplitude=5.71,
+        truncation_width_fraction=0.05,
+        chunk_size=1,
+        compute_gradients=False,
+    )
+
+    assert diagnostics["nfw_paint_mode"] == "sparse"
+    assert diagnostics["nfw_gradient_mode"] == "not_computed"
+    assert diagnostics["nfw_objective_mode"] == "not_computed"
+    assert diagnostics["nfw_particle_counts"].shape == (1,)
+    assert "nfw_d_sum_d_concentration_amplitude" not in diagnostics
+    assert "nfw_d_sum_d_truncation_width_fraction" not in diagnostics
+    np.testing.assert_allclose(
+        np.sum(diagnostics["nfw_particle_counts"]),
+        diagnostics["nfw_sum_particle_counts"],
+        rtol=1.0e-5,
+    )
+
+
+def test_nfw_paint_only_rejects_sum_only_validation():
+    module = _load_example_module()
+    catalog = _catalog(
+        unit_vector=np.array([[1.0, 0.0, 0.0]]),
+        mass=np.array([1.0e13]),
+        redshift=np.array([0.2]),
+        chi=np.array([1000.0]),
+    )
+    mass_map = _mass_map(
+        np.array([0], dtype=np.int64),
+        temperature=np.array([100.0]),
+        nside=1,
+    )
+    metadata = SimpleNamespace(cosmology=Cosmology())
+
+    with pytest.raises(ValueError, match="requires --nfw-gradient-demo"):
+        module.nfw_gradient_demo(
+            catalog,
+            np.array([True]),
+            mass_map,
+            metadata,
+            particle_mass_msun_h=1.0e10,
+            compute_gradients=False,
+            validate_sum_only=True,
+        )
 
 
 def test_nfw_gradient_demo_profile_prints_sparse_stage_labels(capsys):
