@@ -125,6 +125,29 @@ def test_example_script_help_runs():
     assert "--nfw-dense-demo" in result.stdout
     assert "--nfw-taper-radius-factor" in result.stdout
     assert "--nfw-validate-sum-only" in result.stdout
+    assert "--profile" in result.stdout
+    assert "--profile-jax-repeat" in result.stdout
+
+
+def test_timed_stage_disabled_does_not_print(capsys):
+    module = _load_example_module()
+
+    with module.timed_stage("quiet stage", enabled=False):
+        pass
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+
+
+def test_timed_stage_enabled_prints_profile_line(capsys):
+    module = _load_example_module()
+
+    with module.timed_stage("visible stage", enabled=True):
+        pass
+
+    captured = capsys.readouterr()
+    assert "[profile]" in captured.out
+    assert "visible stage" in captured.out
 
 
 def test_segment_bounds_sort_redshift_chi_and_compute_scale_factor():
@@ -306,6 +329,7 @@ def test_save_npz_can_include_nfw_gradient_diagnostics(tmp_path):
         "sum_pinocchio_mass_map_values": 300.0,
     }
     nfw_diagnostics = {
+        "nfw_particle_counts": np.array([0.75, 0.5]),
         "nfw_gradient_mode": "sparse",
         "nfw_objective_mode": "sum_only_sparse",
         "nfw_gradient_demo_n_halos": 2,
@@ -331,6 +355,7 @@ def test_save_npz_can_include_nfw_gradient_diagnostics(tmp_path):
     )
 
     with np.load(args.output) as data:
+        np.testing.assert_allclose(data["nfw_particle_counts"], [0.75, 0.5])
         assert str(data["nfw_gradient_mode"]) == "sparse"
         assert str(data["nfw_objective_mode"]) == "sum_only_sparse"
         assert int(data["nfw_gradient_demo_n_halos"]) == 2
@@ -400,7 +425,6 @@ def test_nfw_gradient_demo_default_sparse_does_not_call_bruteforce(monkeypatch):
 
     monkeypatch.setattr(module, "build_lightcone_sparse_stencil_bruteforce", fail_if_called)
     monkeypatch.setattr(module, "healpix_pixel_unit_vectors", fail_if_called)
-    monkeypatch.setattr(module, "paint_lightcone_particle_count_map_sparse", fail_if_called)
 
     halo_pixels = np.array([0, 5], dtype=np.int64)
     unit_vector = np.stack(hp.pix2vec(1, halo_pixels), axis=-1)
@@ -430,6 +454,8 @@ def test_nfw_gradient_demo_default_sparse_does_not_call_bruteforce(monkeypatch):
 
     assert diagnostics["nfw_gradient_mode"] == "sparse"
     assert diagnostics["nfw_objective_mode"] == "sum_only_sparse"
+    assert diagnostics["nfw_particle_counts"].shape == (2,)
+    assert np.all(np.isfinite(diagnostics["nfw_particle_counts"]))
     assert diagnostics["nfw_gradient_demo_n_halos"] == 2
     assert diagnostics["nfw_compact_pixel_count"] == 2
     assert diagnostics["nfw_sparse_pair_count"] == 2
@@ -438,6 +464,11 @@ def test_nfw_gradient_demo_default_sparse_does_not_call_bruteforce(monkeypatch):
     assert np.isfinite(diagnostics["nfw_sum_particle_counts"])
     assert np.isfinite(diagnostics["nfw_d_sum_d_concentration_amplitude"])
     assert np.isfinite(diagnostics["nfw_d_sum_d_truncation_width_fraction"])
+    np.testing.assert_allclose(
+        np.sum(diagnostics["nfw_particle_counts"]),
+        diagnostics["nfw_sum_particle_counts"],
+        rtol=1.0e-5,
+    )
 
 
 def test_nfw_gradient_demo_sparse_sum_only_validation_matches_sparse_map_sum():
@@ -473,6 +504,84 @@ def test_nfw_gradient_demo_sparse_sum_only_validation_matches_sparse_map_sum():
 
     assert diagnostics["nfw_gradient_mode"] == "sparse"
     assert diagnostics["nfw_objective_mode"] == "sum_only_sparse"
+    assert diagnostics["nfw_particle_counts"].shape == (1,)
+    np.testing.assert_allclose(
+        np.sum(diagnostics["nfw_particle_counts"]),
+        diagnostics["nfw_sum_particle_counts"],
+        rtol=1.0e-5,
+    )
+
+
+def test_nfw_gradient_demo_profile_prints_sparse_stage_labels(capsys):
+    hp = pytest.importorskip("healpy")
+    module = _load_example_module()
+
+    halo_pixels = np.array([0], dtype=np.int64)
+    unit_vector = np.stack(hp.pix2vec(1, halo_pixels), axis=-1)
+    catalog = _catalog(
+        unit_vector=unit_vector,
+        mass=np.array([1.0e13]),
+        redshift=np.array([0.2]),
+        chi=np.array([1000.0]),
+    )
+    mass_map = _mass_map(
+        np.array([0], dtype=np.int64),
+        temperature=np.array([100.0]),
+        nside=1,
+    )
+    metadata = SimpleNamespace(cosmology=Cosmology())
+
+    module.nfw_gradient_demo(
+        catalog,
+        np.array([True]),
+        mass_map,
+        metadata,
+        particle_mass_msun_h=1.0e10,
+        concentration_amplitude=5.71,
+        truncation_width_fraction=0.05,
+        chunk_size=1,
+        profile=True,
+    )
+
+    captured = capsys.readouterr()
+    assert "NFW local sparse stencil" in captured.out
+    assert "NFW objective value_and_grad" in captured.out
+
+
+def test_nfw_gradient_demo_profile_jax_repeat_prints_cached_label(capsys):
+    hp = pytest.importorskip("healpy")
+    module = _load_example_module()
+
+    halo_pixels = np.array([0], dtype=np.int64)
+    unit_vector = np.stack(hp.pix2vec(1, halo_pixels), axis=-1)
+    catalog = _catalog(
+        unit_vector=unit_vector,
+        mass=np.array([1.0e13]),
+        redshift=np.array([0.2]),
+        chi=np.array([1000.0]),
+    )
+    mass_map = _mass_map(
+        np.array([0], dtype=np.int64),
+        temperature=np.array([100.0]),
+        nside=1,
+    )
+    metadata = SimpleNamespace(cosmology=Cosmology())
+
+    module.nfw_gradient_demo(
+        catalog,
+        np.array([True]),
+        mass_map,
+        metadata,
+        particle_mass_msun_h=1.0e10,
+        concentration_amplitude=5.71,
+        truncation_width_fraction=0.05,
+        chunk_size=1,
+        profile=True,
+        profile_jax_repeat=True,
+    )
+
+    captured = capsys.readouterr()
+    assert "NFW objective cached value_and_grad" in captured.out
 
 
 def test_local_sparse_stencil_uses_compact_rows_not_global_pixels():
@@ -538,9 +647,15 @@ def test_nfw_gradient_demo_dense_reports_dense_map_sum_objective():
 
     assert diagnostics["nfw_gradient_mode"] == "dense"
     assert diagnostics["nfw_objective_mode"] == "dense_map_sum"
+    assert diagnostics["nfw_particle_counts"].shape == (1,)
     assert np.isfinite(diagnostics["nfw_sum_particle_counts"])
     assert np.isfinite(diagnostics["nfw_d_sum_d_concentration_amplitude"])
     assert np.isfinite(diagnostics["nfw_d_sum_d_truncation_width_fraction"])
+    np.testing.assert_allclose(
+        np.sum(diagnostics["nfw_particle_counts"]),
+        diagnostics["nfw_sum_particle_counts"],
+        rtol=1.0e-5,
+    )
 
 
 def test_nfw_gradient_demo_sparse_matches_dense_when_stencil_contains_all_pairs():
@@ -590,6 +705,11 @@ def test_nfw_gradient_demo_sparse_matches_dense_when_stencil_contains_all_pairs(
     assert dense["nfw_gradient_mode"] == "dense"
     assert sparse["nfw_objective_mode"] == "sum_only_sparse"
     assert dense["nfw_objective_mode"] == "dense_map_sum"
+    np.testing.assert_allclose(
+        sparse["nfw_particle_counts"],
+        dense["nfw_particle_counts"],
+        rtol=1.0e-5,
+    )
     assert sparse["nfw_sparse_pair_count"] == sparse["nfw_dense_pair_count"]
     np.testing.assert_allclose(
         sparse["nfw_sum_particle_counts"],
@@ -640,6 +760,7 @@ def test_nfw_gradient_demo_sparse_uses_fewer_pairs_for_local_stencil():
 
     assert diagnostics["nfw_sparse_pair_count"] < diagnostics["nfw_dense_pair_count"]
     assert diagnostics["nfw_sparse_compression_factor"] > 1.0
+    assert diagnostics["nfw_particle_counts"].shape == (2,)
 
 
 def test_write_output_fits_preserves_compact_pixel_table(tmp_path):
