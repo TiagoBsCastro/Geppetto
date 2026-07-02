@@ -85,6 +85,21 @@ queries outside JAX. The sparse painter remains differentiable with respect to
 concentration and profile parameters because it only gathers halo fields,
 evaluates the projected profile, and scatter-adds into the output map.
 
+The first non-NFW profile path is sparse-PLC only:
+
+```text
+Sigma(R) = M_halo * shape(R / Rmax) /
+           [Rmax^2 * 2 pi integral x shape(x) dx]
+```
+
+`TabulatedProjectedProfileParams` stores a shared dimensionless radius grid and
+unconstrained `log_shape` values. The JAX kernel exponentiates `log_shape`,
+linearly interpolates the positive template, sets values outside the fixed
+support to zero, and normalizes the projected mass inside `Rmax` to the halo
+mass. `Rmax` is supplied as scalar or per-halo geometry and is stopped from
+participating in gradients. Dense PLC and box-grid painters remain NFW-only in
+this first tabulated-profile release.
+
 For PINOCCHIO mass-map integration, the HEALPix-facing painter returns a
 count-equivalent one-halo collector:
 
@@ -98,7 +113,9 @@ controlling whether the box size is already in `Mpc/h`. HEALPix pixel-to-vector
 conversion remains in `geppetto.io`; the JAX painter only sees fixed unit
 vectors and a pixel area. The sparse equivalent,
 `paint_lightcone_particle_count_map_sparse`, uses the same mass-per-pixel divided
-by particle-mass convention on a precomputed stencil.
+by particle-mass convention on a precomputed stencil. The tabulated sparse
+equivalent follows the same count convention with the tabulated projected
+profile replacing `Sigma_NFW`.
 
 ## Box mode
 
@@ -126,4 +143,5 @@ The painter should dispatch on the profile function or receive a callable profil
   targets and do not enter JAX kernels.
 - No exact mass-conserving smooth truncation yet.
 - Projected NFW uses a tapered untruncated analytic projected profile rather than the full truncated projected NFW expression.
+- Tabulated projected profiles are currently wired only to sparse PLC painters.
 - Baryonification is a documented extension point, not implemented physics.

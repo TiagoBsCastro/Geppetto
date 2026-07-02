@@ -11,6 +11,7 @@ from typing import Literal, NamedTuple
 
 import jax.nn as jnn
 import jax.numpy as jnp
+from jax import lax
 
 from geppetto.concentration import ConcentrationParams, concentration_power_law
 from geppetto.cosmology import Cosmology, halo_radius_delta_comoving
@@ -28,6 +29,26 @@ class NFWProfileParams(NamedTuple):
 
 
 DEFAULT_NFW_PROFILE_PARAMS = NFWProfileParams()
+
+
+class TabulatedProjectedProfileParams(NamedTuple):
+    """Dimensionless projected-profile template parameters.
+
+    Parameters
+    ----------
+    x:
+        Dimensionless projected radius grid ``R / Rmax``, shape
+        ``(n_radius,)``. The JAX kernel assumes this grid is finite, increasing,
+        and covers ``[0, 1]``.
+    log_shape:
+        Unconstrained log projected-profile shape values at ``x``, shape
+        ``(n_radius,)``. The kernel exponentiates these values and normalizes
+        the resulting template so the projected mass inside fixed ``Rmax``
+        equals the supplied halo mass.
+    """
+
+    x: Array
+    log_shape: Array
 
 
 def nfw_shape_function(c: Array) -> Array:
@@ -137,3 +158,71 @@ def nfw_projected_surface_density(
         width = jnp.maximum(profile_params.truncation_width_fraction * r_delta, 1.0e-12)
         return sigma * smooth_taper(r_safe, r_delta, width)
     return jnp.where(r_safe <= r_delta, sigma, 0.0)
+
+
+def _linear_interpolate(x_eval: Array, x_grid: Array, y_grid: Array) -> Array:
+    """Evaluate a one-dimensional linear interpolant on a fixed grid."""
+
+    x_clipped = jnp.clip(x_eval, x_grid[0], x_grid[-1])
+    idx = jnp.searchsorted(x_grid, x_clipped, side="right") - 1
+    idx = jnp.clip(idx, 0, x_grid.shape[0] - 2)
+    x0 = x_grid[idx]
+    x1 = x_grid[idx + 1]
+    y0 = y_grid[idx]
+    y1 = y_grid[idx + 1]
+    t = (x_clipped - x0) / jnp.maximum(x1 - x0, 1.0e-30)
+    return y0 + t * (y1 - y0)
+
+
+def _trapezoid_integral(y: Array, x: Array) -> Array:
+    """Integrate ``y(x)`` with the trapezoid rule along the only axis."""
+
+    return jnp.sum(0.5 * (y[1:] + y[:-1]) * (x[1:] - x[:-1]))
+
+
+def tabulated_projected_surface_density(
+    r_perp: Array,
+    mass: Array,
+    rmax_mpc_h: Array | float,
+    profile_params: TabulatedProjectedProfileParams,
+) -> Array:
+    """Evaluate a mass-normalized tabulated projected profile.
+
+    Parameters
+    ----------
+    r_perp:
+        Projected comoving radius in ``Mpc/h``.
+    mass:
+        Halo mass in ``Msun/h``.
+    rmax_mpc_h:
+        Fixed projected support radius in comoving ``Mpc/h``. This value is
+        treated as non-differentiable geometry by applying
+        :func:`jax.lax.stop_gradient` inside the kernel.
+    profile_params:
+        Shared dimensionless template. ``log_shape`` is differentiable; ``x``
+        is treated as a fixed grid by convention.
+
+    Returns
+    -------
+    Array
+        Projected surface density in comoving ``(Msun/h)/(Mpc/h)^2`` units.
+
+    Notes
+    -----
+    The projected template is normalized with
+    ``2*pi*integral_0^1 x*shape(x) dx`` so the mass inside ``Rmax`` equals
+    ``mass``. Values outside the last tabulated radius are set to zero.
+    """
+
+    x_grid = jnp.asarray(profile_params.x)
+    shape_grid = jnp.exp(jnp.asarray(profile_params.log_shape))
+    rmax = lax.stop_gradient(jnp.asarray(rmax_mpc_h))
+    rmax_safe = jnp.maximum(rmax, 1.0e-30)
+    x_eval = jnp.asarray(r_perp) / rmax_safe
+
+    shape = _linear_interpolate(x_eval, x_grid, shape_grid)
+    shape = jnp.where((x_eval >= x_grid[0]) & (x_eval <= x_grid[-1]), shape, 0.0)
+
+    integral = _trapezoid_integral(x_grid * shape_grid, x_grid)
+    norm = jnp.maximum(2.0 * jnp.pi * integral, 1.0e-30)
+    return jnp.asarray(mass) * shape / (rmax_safe**2 * norm)

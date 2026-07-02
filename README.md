@@ -107,6 +107,38 @@ separation matrix before filtering, so it is meant for validation, examples, and
 small maps. Production HEALPix-local stencil construction belongs outside the
 JAX painter and should pass the same `LightconeSparseStencil` container.
 
+## Tabulated sparse lightcone profiles
+
+For sparse PLC maps, GEPPETTO also supports a positive mass-normalized projected
+profile template. The template is tabulated in dimensionless radius
+`x = R / Rmax`; `Rmax` is fixed geometry and is not differentiated.
+
+```python
+import jax.numpy as jnp
+
+from geppetto import (
+    TabulatedProjectedProfileParams,
+    paint_lightcone_surface_density_tabulated_sparse,
+)
+
+profile = TabulatedProjectedProfileParams(
+    x=jnp.linspace(0.0, 1.0, 32),
+    log_shape=jnp.zeros(32),  # differentiable unconstrained amplitudes
+)
+
+sigma_tabulated = paint_lightcone_surface_density_tabulated_sparse(
+    stencil,
+    catalog,
+    rmax_mpc_h=5.0,  # scalar or one value per halo
+    profile_params=profile,
+)
+```
+
+The tabulated sparse painter uses JAX interpolation, exponentiates `log_shape`
+for positivity, and normalizes the disk integral inside `Rmax` to the halo mass.
+It is differentiable with respect to `log_shape`, masses, and catalogue
+distances used for mass-per-pixel conversion.
+
 ## HEALPix one-halo particle-count map
 
 For PINOCCHIO mass-map integration, GEPPETTO can paint an NFW one-halo mass
@@ -118,6 +150,7 @@ the PINOCCHIO parameter file to compute the grid-element particle mass.
 from geppetto import (
     paint_lightcone_particle_count_map,
     paint_lightcone_particle_count_map_sparse,
+    paint_lightcone_particle_count_map_tabulated_sparse,
 )
 from geppetto.io import (
     healpix_pixel_area_sr,
@@ -144,11 +177,20 @@ sparse_counts = paint_lightcone_particle_count_map_sparse(
     pixel_area_sr=healpix_pixel_area_sr(256),
     cosmology=metadata.cosmology,
 )
+
+tabulated_sparse_counts = paint_lightcone_particle_count_map_tabulated_sparse(
+    stencil,
+    lightcone_catalog,
+    rmax_mpc_h=rmax_per_halo,
+    profile_params=profile,
+    particle_mass_msun_h=metadata.particle_mass_msun_h,
+    pixel_area_sr=healpix_pixel_area_sr(256),
+)
 ```
 
-`one_halo_counts` and `sparse_counts` are projected NFW one-halo mass per pixel
-divided by the PINOCCHIO particle mass. They do not include PINOCCHIO's two-halo
-map.
+`one_halo_counts`, `sparse_counts`, and `tabulated_sparse_counts` are one-halo
+mass per pixel divided by the PINOCCHIO particle mass. They do not include
+PINOCCHIO's two-halo map.
 
 ## Reading PINOCCHIO outputs
 

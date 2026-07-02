@@ -18,8 +18,10 @@ from geppetto.geometry import (
 from geppetto.profiles import (
     DEFAULT_NFW_PROFILE_PARAMS,
     NFWProfileParams,
+    TabulatedProjectedProfileParams,
     nfw_density,
     nfw_projected_surface_density,
+    tabulated_projected_surface_density,
 )
 from geppetto.types import Array
 
@@ -281,7 +283,9 @@ def paint_lightcone_surface_density_sparse(
     -----
     The sparse map is differentiable with respect to halo/profile quantities and
     profile/concentration parameters. The stencil geometry and retained pair set
-    are fixed inputs and are not differentiated.
+    are fixed inputs and are not differentiated. Use
+    ``validate_lightcone_sparse_stencil`` before entering JIT-compiled paths
+    when stencils are manually constructed.
     """
 
     if return_mass_per_pixel and pixel_area_sr is None:
@@ -304,6 +308,128 @@ def paint_lightcone_surface_density_sparse(
         sigma = sigma * (chi**2) * pixel_area_sr
 
     return jnp.zeros((stencil.n_pix,), dtype=sigma.dtype).at[pix_id].add(sigma)
+
+
+def _rmax_for_sparse_pairs(rmax_mpc_h: Array | float, halo_id: Array) -> Array:
+    rmax = jnp.asarray(rmax_mpc_h)
+    if rmax.ndim == 0:
+        return rmax
+    return rmax[halo_id]
+
+
+def paint_lightcone_surface_density_tabulated_sparse(
+    stencil: LightconeSparseStencil,
+    catalog: LightconeHaloCatalog,
+    rmax_mpc_h: Array | float,
+    profile_params: TabulatedProjectedProfileParams,
+    pixel_area_sr: float | None = None,
+    return_mass_per_pixel: bool = False,
+) -> Array:
+    """Paint sparse lightcone surface density from a tabulated projected profile.
+
+    Parameters
+    ----------
+    stencil:
+        Precomputed sparse halo-pixel geometry. ``stencil.r_perp`` is in
+        comoving ``Mpc/h`` and ``stencil.pix_id`` indexes the output map.
+    catalog:
+        Lightcone halo catalogue with distances in comoving ``Mpc/h`` and masses
+        in ``Msun/h``.
+    rmax_mpc_h:
+        Fixed projected support radius in comoving ``Mpc/h``. May be scalar or
+        per-halo with shape ``(n_halo,)``. It is treated as non-differentiable
+        geometry inside the tabulated profile kernel.
+    profile_params:
+        Shared dimensionless projected-profile template. The painter is
+        differentiable with respect to ``profile_params.log_shape``.
+    pixel_area_sr:
+        Pixel solid angle. Required only when ``return_mass_per_pixel=True``.
+    return_mass_per_pixel:
+        If true, convert each pair contribution to projected mass per pixel
+        using ``Sigma * chi_h**2 * pixel_area_sr`` before scatter-add.
+
+    Returns
+    -------
+    Array
+        One-dimensional map with shape ``(stencil.n_pix,)``.
+
+    Notes
+    -----
+    HEALPix indexing, stencil construction, and stencil validation belong
+    outside this JAX kernel. Use ``validate_lightcone_sparse_stencil`` before
+    JIT-compiled paths when stencils are manually constructed.
+    """
+
+    if return_mass_per_pixel and pixel_area_sr is None:
+        raise ValueError("pixel_area_sr is required when return_mass_per_pixel=True")
+
+    halo_id = jnp.asarray(stencil.halo_id, dtype=jnp.int32)
+    pix_id = jnp.asarray(stencil.pix_id, dtype=jnp.int32)
+    mass = catalog.mass[halo_id]
+    rmax = _rmax_for_sparse_pairs(rmax_mpc_h, halo_id)
+    sigma = tabulated_projected_surface_density(
+        stencil.r_perp,
+        mass,
+        rmax,
+        profile_params,
+    )
+    if return_mass_per_pixel:
+        chi = catalog.chi[halo_id]
+        sigma = sigma * (chi**2) * pixel_area_sr
+
+    return jnp.zeros((stencil.n_pix,), dtype=sigma.dtype).at[pix_id].add(sigma)
+
+
+def paint_lightcone_particle_count_map_tabulated_sparse(
+    stencil: LightconeSparseStencil,
+    catalog: LightconeHaloCatalog,
+    rmax_mpc_h: Array | float,
+    profile_params: TabulatedProjectedProfileParams,
+    particle_mass_msun_h: float,
+    pixel_area_sr: float,
+) -> Array:
+    """Paint a sparse tabulated one-halo map in PINOCCHIO count units.
+
+    Parameters
+    ----------
+    stencil:
+        Precomputed sparse halo-pixel geometry. ``stencil.r_perp`` is in
+        comoving ``Mpc/h`` and ``stencil.pix_id`` indexes the output map.
+    catalog:
+        Lightcone halo catalogue with distances in comoving ``Mpc/h`` and masses
+        in ``Msun/h``.
+    rmax_mpc_h:
+        Fixed projected support radius in comoving ``Mpc/h``. May be scalar or
+        per-halo with shape ``(n_halo,)`` and is not differentiated.
+    profile_params:
+        Shared dimensionless projected-profile template.
+    particle_mass_msun_h:
+        PINOCCHIO particle mass in ``Msun/h``.
+    pixel_area_sr:
+        Pixel solid angle in steradians.
+
+    Notes
+    -----
+    The returned map is projected one-halo mass per pixel divided by
+    ``particle_mass_msun_h``. ``particle_mass_msun_h`` and ``pixel_area_sr`` are
+    Python-side scalar checks and should remain ordinary Python floats when this
+    wrapper is directly JIT-compiled.
+    """
+
+    if particle_mass_msun_h <= 0.0:
+        raise ValueError("particle_mass_msun_h must be positive")
+    if pixel_area_sr <= 0.0:
+        raise ValueError("pixel_area_sr must be positive")
+
+    mass_per_pixel = paint_lightcone_surface_density_tabulated_sparse(
+        stencil,
+        catalog,
+        rmax_mpc_h,
+        profile_params,
+        pixel_area_sr=pixel_area_sr,
+        return_mass_per_pixel=True,
+    )
+    return mass_per_pixel / particle_mass_msun_h
 
 
 def paint_lightcone_particle_count_map_sparse(
@@ -337,6 +463,9 @@ def paint_lightcone_particle_count_map_sparse(
     The result is differentiable with respect to halo/profile quantities and
     profile/concentration parameters. Pixel identities, HEALPix geometry, and
     the retained stencil pair set are fixed inputs outside this JAX kernel.
+    ``particle_mass_msun_h`` and ``pixel_area_sr`` are Python-side scalar checks
+    and should remain ordinary Python floats when this wrapper is directly
+    JIT-compiled.
     """
 
     if particle_mass_msun_h <= 0.0:

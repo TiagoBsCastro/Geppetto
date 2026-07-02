@@ -14,10 +14,12 @@ from geppetto.painters import (
     paint_box_density_grid,
     paint_lightcone_particle_count_map,
     paint_lightcone_particle_count_map_sparse,
+    paint_lightcone_particle_count_map_tabulated_sparse,
     paint_lightcone_surface_density,
     paint_lightcone_surface_density_sparse,
+    paint_lightcone_surface_density_tabulated_sparse,
 )
-from geppetto.profiles import NFWProfileParams
+from geppetto.profiles import NFWProfileParams, TabulatedProjectedProfileParams
 
 __all__ = [
     "ConcentrationParams",
@@ -26,6 +28,7 @@ __all__ = [
     "LightconeHaloCatalog",
     "LightconeSparseStencil",
     "NFWProfileParams",
+    "TabulatedProjectedProfileParams",
     "density_at_points",
     "density_at_points_chunked",
     "duffy08_all_200c",
@@ -34,8 +37,10 @@ __all__ = [
     "paint_box_density_grid",
     "paint_lightcone_particle_count_map",
     "paint_lightcone_particle_count_map_sparse",
+    "paint_lightcone_particle_count_map_tabulated_sparse",
     "paint_lightcone_surface_density",
     "paint_lightcone_surface_density_sparse",
+    "paint_lightcone_surface_density_tabulated_sparse",
 ]
 
 __version__ = "0.1.0"

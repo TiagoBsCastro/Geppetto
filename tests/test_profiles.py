@@ -3,7 +3,13 @@ import jax.numpy as jnp
 
 from geppetto.concentration import ConcentrationParams, concentration_power_law, duffy08_all_200c
 from geppetto.cosmology import Cosmology
-from geppetto.profiles import NFWProfileParams, nfw_density, nfw_projected_surface_density
+from geppetto.profiles import (
+    NFWProfileParams,
+    TabulatedProjectedProfileParams,
+    nfw_density,
+    nfw_projected_surface_density,
+    tabulated_projected_surface_density,
+)
 
 
 def test_duffy_like_concentration_shape_and_gradient():
@@ -43,3 +49,67 @@ def test_projected_nfw_surface_density_is_finite():
     )
     assert sigma.shape == (3,)
     assert jnp.all(jnp.isfinite(sigma))
+
+
+def test_tabulated_projected_surface_density_shape_support_and_normalization():
+    x_grid = jnp.linspace(0.0, 1.0, 8)
+    params = TabulatedProjectedProfileParams(
+        x=x_grid,
+        log_shape=jnp.zeros_like(x_grid),
+    )
+    mass = jnp.array([1.0e14])
+    rmax = jnp.array([2.0])
+    r = jnp.linspace(0.0, 2.0, 256)
+
+    sigma = tabulated_projected_surface_density(r, mass, rmax, params)
+    outside = tabulated_projected_surface_density(
+        jnp.array([2.01, 3.0]),
+        mass,
+        rmax,
+        params,
+    )
+    mass_integrand = 2.0 * jnp.pi * r * sigma
+    recovered_mass = jnp.sum(
+        0.5 * (mass_integrand[1:] + mass_integrand[:-1]) * (r[1:] - r[:-1])
+    )
+
+    assert sigma.shape == (256,)
+    assert jnp.all(jnp.isfinite(sigma))
+    assert jnp.all(sigma >= 0.0)
+    assert jnp.all(outside == 0.0)
+    assert jnp.allclose(recovered_mass, mass[0], rtol=5.0e-4)
+
+
+def test_tabulated_projected_surface_density_gradient_wrt_log_shape_is_finite():
+    x_grid = jnp.linspace(0.0, 1.0, 6)
+    r = jnp.array([0.0, 0.2, 0.6, 1.0])
+    mass = jnp.array([1.0e14])
+    rmax = jnp.array([1.5])
+
+    def objective(log_shape):
+        params = TabulatedProjectedProfileParams(x=x_grid, log_shape=log_shape)
+        return jnp.sum(tabulated_projected_surface_density(r, mass, rmax, params))
+
+    grad = jax.grad(objective)(jnp.linspace(0.0, -1.0, x_grid.shape[0]))
+    assert grad.shape == x_grid.shape
+    assert jnp.all(jnp.isfinite(grad))
+
+
+def test_tabulated_projected_surface_density_stops_rmax_gradient():
+    x_grid = jnp.linspace(0.0, 1.0, 6)
+    params = TabulatedProjectedProfileParams(
+        x=x_grid,
+        log_shape=jnp.zeros_like(x_grid),
+    )
+
+    def objective(rmax):
+        return jnp.sum(
+            tabulated_projected_surface_density(
+                jnp.array([0.1, 0.2]),
+                jnp.array([1.0e14]),
+                rmax,
+                params,
+            )
+        )
+
+    assert jax.grad(objective)(2.0) == 0.0

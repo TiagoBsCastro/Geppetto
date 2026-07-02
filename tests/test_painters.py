@@ -9,13 +9,16 @@ from geppetto import (
     LightconeHaloCatalog,
     LightconeSparseStencil,
     NFWProfileParams,
+    TabulatedProjectedProfileParams,
     density_at_points,
     density_at_points_chunked,
     paint_box_density_grid,
     paint_lightcone_particle_count_map,
     paint_lightcone_particle_count_map_sparse,
+    paint_lightcone_particle_count_map_tabulated_sparse,
     paint_lightcone_surface_density,
     paint_lightcone_surface_density_sparse,
+    paint_lightcone_surface_density_tabulated_sparse,
 )
 from geppetto.io import (
     PinocchioCatalogError,
@@ -315,6 +318,102 @@ def test_validate_lightcone_sparse_stencil_rejects_invalid_inputs():
             ),
             catalog,
         )
+
+
+def test_lightcone_tabulated_sparse_shape_mass_and_counts():
+    pixel_unit_vectors = jnp.array(
+        [[1.0, 0.0, 0.0], [0.999, 0.045, 0.0], [0.0, 1.0, 0.0]]
+    )
+    pixel_unit_vectors = pixel_unit_vectors / jnp.linalg.norm(pixel_unit_vectors, axis=1)[:, None]
+    catalog = LightconeHaloCatalog(
+        unit_vector=jnp.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]),
+        chi=jnp.array([1000.0, 900.0]),
+        mass=jnp.array([1.0e14, 5.0e13]),
+        redshift=jnp.array([0.3, 0.35]),
+    )
+    rmax = jnp.array([50.0, 10.0])
+    stencil = build_lightcone_sparse_stencil_bruteforce(pixel_unit_vectors, catalog, rmax)
+    profile_params = TabulatedProjectedProfileParams(
+        x=jnp.linspace(0.0, 1.0, 8),
+        log_shape=jnp.zeros(8),
+    )
+    pixel_area_sr = 0.01
+    particle_mass_msun_h = 1.0e10
+
+    sigma = paint_lightcone_surface_density_tabulated_sparse(
+        stencil,
+        catalog,
+        rmax,
+        profile_params,
+    )
+    mass_per_pixel = paint_lightcone_surface_density_tabulated_sparse(
+        stencil,
+        catalog,
+        rmax,
+        profile_params,
+        pixel_area_sr=pixel_area_sr,
+        return_mass_per_pixel=True,
+    )
+    counts = paint_lightcone_particle_count_map_tabulated_sparse(
+        stencil,
+        catalog,
+        rmax,
+        profile_params,
+        particle_mass_msun_h=particle_mass_msun_h,
+        pixel_area_sr=pixel_area_sr,
+    )
+
+    assert sigma.shape == (stencil.n_pix,)
+    assert mass_per_pixel.shape == (stencil.n_pix,)
+    assert counts.shape == (stencil.n_pix,)
+    assert jnp.all(jnp.isfinite(sigma))
+    assert jnp.all(sigma >= 0.0)
+    assert jnp.allclose(counts, mass_per_pixel / particle_mass_msun_h, rtol=1.0e-6)
+
+
+def test_lightcone_tabulated_sparse_is_jit_safe_and_differentiable():
+    pixel_unit_vectors = jnp.array([[1.0, 0.0, 0.0], [0.999, 0.045, 0.0]])
+    pixel_unit_vectors = pixel_unit_vectors / jnp.linalg.norm(pixel_unit_vectors, axis=1)[:, None]
+    catalog = LightconeHaloCatalog(
+        unit_vector=jnp.array([[1.0, 0.0, 0.0]]),
+        chi=jnp.array([1000.0]),
+        mass=jnp.array([1.0e14]),
+        redshift=jnp.array([0.3]),
+    )
+    rmax = jnp.array([50.0])
+    stencil = build_lightcone_sparse_stencil_bruteforce(pixel_unit_vectors, catalog, rmax)
+    x_grid = jnp.linspace(0.0, 1.0, 6)
+    profile_params = TabulatedProjectedProfileParams(
+        x=x_grid,
+        log_shape=jnp.linspace(0.0, -0.5, x_grid.shape[0]),
+    )
+
+    direct = paint_lightcone_surface_density_tabulated_sparse(
+        stencil,
+        catalog,
+        rmax,
+        profile_params,
+    )
+    jitted = jax.jit(paint_lightcone_surface_density_tabulated_sparse)
+    compiled = jitted(stencil, catalog, rmax, profile_params)
+
+    def objective(log_shape):
+        params = TabulatedProjectedProfileParams(x=x_grid, log_shape=log_shape)
+        return jnp.sum(
+            paint_lightcone_surface_density_tabulated_sparse(
+                stencil,
+                catalog,
+                rmax,
+                params,
+            )
+        )
+
+    grad = jax.grad(objective)(profile_params.log_shape)
+
+    assert compiled.shape == (stencil.n_pix,)
+    assert jnp.allclose(compiled, direct, rtol=1.0e-5, atol=1.0e-5)
+    assert grad.shape == profile_params.log_shape.shape
+    assert jnp.all(jnp.isfinite(grad))
 
 
 def test_lightcone_particle_count_map_shape_grad_and_normalization():
