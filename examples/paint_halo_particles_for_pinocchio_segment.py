@@ -52,7 +52,7 @@ from geppetto import (
     paint_lightcone_particle_count_map,
     paint_lightcone_particle_count_map_sparse,
 )
-from geppetto.catalog import LightconeHaloCatalog
+from geppetto.catalog import LightconeHaloCatalog, LightconeSparseStencil
 from geppetto.io import (
     PinocchioMassMap,
     PinocchioRunMetadata,
@@ -67,6 +67,10 @@ from geppetto.io import (
     read_pinocchio_parameter_file,
 )
 from geppetto.profiles import nfw_scale_radius_and_density
+
+# Kept as a module attribute for regression tests proving the default sparse
+# tutorial path never calls the dense validation builder.
+_BRUTE_FORCE_STENCIL_BUILDER_REGRESSION_SENTINEL = build_lightcone_sparse_stencil_bruteforce
 
 
 def parse_args() -> argparse.Namespace:
@@ -402,6 +406,108 @@ def _compression_factor(dense_pair_count: int, sparse_pair_count: int) -> float:
     return 1.0
 
 
+def build_lightcone_sparse_stencil_for_mass_map_local(
+    mass_map: PinocchioMassMap,
+    catalog: LightconeHaloCatalog,
+    rmax_mpc_h: np.ndarray,
+) -> LightconeSparseStencil:
+    """Build a HEALPix-local sparse stencil on a compact PINOCCHIO map domain.
+
+    The returned ``pix_id`` values are compact row indices into
+    ``mass_map.pixel``, not global HEALPix pixel numbers. Geometry is fixed
+    outside JAX; the differentiable sparse painter receives only the retained
+    local halo-pixel pairs.
+    """
+
+    try:
+        import healpy as hp
+    except ImportError as exc:  # pragma: no cover - exercised only without io extra
+        raise RuntimeError("local sparse NFW stencil construction requires healpy") from exc
+
+    validate_mass_map(mass_map)
+    validate_catalog_for_binning(catalog)
+
+    pixels = np.asarray(mass_map.pixel, dtype=np.int64)
+    n_pix = int(pixels.shape[0])
+    pixel_to_row = {int(pixel): row for row, pixel in enumerate(pixels)}
+
+    halo_unit_vectors = np.asarray(catalog.unit_vector)
+    if not np.issubdtype(halo_unit_vectors.dtype, np.floating):
+        halo_unit_vectors = halo_unit_vectors.astype(np.float64)
+    geometry_dtype = halo_unit_vectors.dtype
+    halo_chi = np.asarray(catalog.chi, dtype=geometry_dtype)
+    n_halo = int(halo_chi.shape[0])
+    if np.any(halo_chi <= 0.0):
+        raise ValueError("catalog.chi values must be positive for local stencil construction")
+
+    rmax = np.asarray(rmax_mpc_h, dtype=np.float64)
+    if rmax.shape != (n_halo,):
+        raise ValueError("rmax_mpc_h must have shape (n_halo,)")
+    if not np.all(np.isfinite(rmax)) or np.any(rmax < 0.0):
+        raise ValueError("rmax_mpc_h values must be finite and non-negative")
+
+    pix_id_chunks: list[np.ndarray] = []
+    halo_id_chunks: list[np.ndarray] = []
+    r_perp_chunks: list[np.ndarray] = []
+
+    for halo_id, (halo_vector, chi_i, rmax_i) in enumerate(
+        zip(halo_unit_vectors, halo_chi, rmax, strict=True)
+    ):
+        alpha_max = 2.0 * np.arcsin(min(1.0, float(rmax_i) / (2.0 * float(chi_i))))
+        queried_pixels = np.asarray(
+            hp.query_disc(
+                mass_map.nside,
+                halo_vector.astype(np.float64, copy=False),
+                alpha_max,
+                inclusive=True,
+                nest=False,
+            ),
+            dtype=np.int64,
+        )
+        if queried_pixels.size == 0:
+            continue
+
+        rows = np.array(
+            [pixel_to_row.get(int(pixel), -1) for pixel in queried_pixels],
+            dtype=np.int64,
+        )
+        inside_domain = rows >= 0
+        if not np.any(inside_domain):
+            continue
+
+        local_pixels = queried_pixels[inside_domain]
+        local_rows = rows[inside_domain]
+        x, y, z = hp.pix2vec(mass_map.nside, local_pixels, nest=False)
+        pixel_vectors = np.stack([x, y, z], axis=-1).astype(geometry_dtype, copy=False)
+        cosang = np.clip(pixel_vectors @ halo_vector, -1.0, 1.0)
+        chord = np.sqrt(np.maximum(2.0 * (1.0 - cosang), 0.0))
+        r_perp = chi_i * chord
+        keep = r_perp <= float(rmax_i)
+        if not np.any(keep):
+            continue
+
+        n_keep = int(np.count_nonzero(keep))
+        pix_id_chunks.append(local_rows[keep])
+        halo_id_chunks.append(np.full(n_keep, halo_id, dtype=np.int64))
+        r_perp_chunks.append(r_perp[keep])
+
+    if pix_id_chunks:
+        pix_id = np.concatenate(pix_id_chunks)
+        halo_id = np.concatenate(halo_id_chunks)
+        r_perp = np.concatenate(r_perp_chunks)
+    else:
+        pix_id = np.empty((0,), dtype=np.int64)
+        halo_id = np.empty((0,), dtype=np.int64)
+        r_perp = np.empty((0,), dtype=np.float64)
+
+    return LightconeSparseStencil(
+        pix_id=jnp.asarray(pix_id, dtype=jnp.int32),
+        halo_id=jnp.asarray(halo_id, dtype=jnp.int32),
+        r_perp=jnp.asarray(r_perp, dtype=jnp.asarray(catalog.chi).dtype),
+        n_pix=n_pix,
+    )
+
+
 def nfw_gradient_demo(
     catalog: LightconeHaloCatalog,
     mask: np.ndarray,
@@ -429,14 +535,11 @@ def nfw_gradient_demo(
         chunk_size = None
 
     selected_catalog = selected_lightcone_catalog(catalog, mask)
-    pixel_unit_vectors_np = healpix_pixel_unit_vectors(
-        mass_map.nside, np.asarray(mass_map.pixel), nest=False
-    )
-    pixel_unit_vectors = jnp.asarray(pixel_unit_vectors_np)
     pixel_area_sr = healpix_pixel_area_sr(mass_map.nside)
     n_halo = int(selected_catalog.mass.shape[0])
     n_pix = int(np.asarray(mass_map.pixel).shape[0])
     dense_pair_count = n_halo * n_pix
+    pixel_unit_vectors = None
 
     fiducial_concentration_params = ConcentrationParams(amplitude=concentration_amplitude)
     fiducial_profile_params = NFWProfileParams(
@@ -452,12 +555,25 @@ def nfw_gradient_demo(
             fiducial_profile_params,
             taper_radius_factor,
         )
-        stencil = build_lightcone_sparse_stencil_bruteforce(
-            pixel_unit_vectors_np,
+        stencil = build_lightcone_sparse_stencil_for_mass_map_local(
+            mass_map,
             selected_catalog,
             rmax,
         )
         sparse_pair_count = int(stencil.size)
+        print("NFW sparse stencil:")
+        print(f"  Selected halos: {n_halo}")
+        print(f"  Compact pixels: {n_pix}")
+        print(f"  Sparse halo-pixel pairs: {sparse_pair_count}")
+        print(f"  Dense pair count: {dense_pair_count}")
+        print(
+            "  Sparse compression factor: "
+            f"{_compression_factor(dense_pair_count, sparse_pair_count):.12g}"
+        )
+    else:
+        pixel_unit_vectors = jnp.asarray(
+            healpix_pixel_unit_vectors(mass_map.nside, np.asarray(mass_map.pixel), nest=False)
+        )
 
     def total_for_concentration_amplitude(amplitude: float):
         concentration_params = ConcentrationParams(amplitude=amplitude)
@@ -465,6 +581,7 @@ def nfw_gradient_demo(
             truncation_width_fraction=truncation_width_fraction
         )
         if dense_demo:
+            assert pixel_unit_vectors is not None
             counts = paint_lightcone_particle_count_map(
                 pixel_unit_vectors,
                 selected_catalog,
@@ -493,6 +610,7 @@ def nfw_gradient_demo(
             truncation_width_fraction=width_fraction
         )
         if dense_demo:
+            assert pixel_unit_vectors is not None
             counts = paint_lightcone_particle_count_map(
                 pixel_unit_vectors,
                 selected_catalog,

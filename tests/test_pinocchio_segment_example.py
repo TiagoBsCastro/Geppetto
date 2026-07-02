@@ -339,10 +339,18 @@ def test_save_npz_can_include_nfw_gradient_diagnostics(tmp_path):
         assert float(data["nfw_d_sum_d_truncation_width_fraction"]) == -0.25
 
 
-def test_nfw_gradient_demo_returns_finite_gradients_on_compact_pixel_domain(monkeypatch):
+def test_nfw_gradient_demo_default_sparse_does_not_call_bruteforce(monkeypatch):
+    hp = pytest.importorskip("healpy")
     module = _load_example_module()
 
-    unit_vector = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("The sparse tutorial must not allocate an N_pix x N_halo matrix")
+
+    monkeypatch.setattr(module, "build_lightcone_sparse_stencil_bruteforce", fail_if_called)
+    monkeypatch.setattr(module, "healpix_pixel_unit_vectors", fail_if_called)
+
+    halo_pixels = np.array([0, 5], dtype=np.int64)
+    unit_vector = np.stack(hp.pix2vec(1, halo_pixels), axis=-1)
     catalog = _catalog(
         unit_vector=unit_vector,
         mass=np.array([1.0e13, 2.0e13]),
@@ -355,11 +363,6 @@ def test_nfw_gradient_demo_returns_finite_gradients_on_compact_pixel_domain(monk
         nside=1,
     )
     metadata = SimpleNamespace(cosmology=Cosmology())
-    monkeypatch.setattr(
-        module,
-        "healpix_pixel_unit_vectors",
-        lambda nside, pixels, nest=False: unit_vector[::-1],
-    )
 
     diagnostics = module.nfw_gradient_demo(
         catalog,
@@ -383,12 +386,42 @@ def test_nfw_gradient_demo_returns_finite_gradients_on_compact_pixel_domain(monk
     assert np.isfinite(diagnostics["nfw_d_sum_d_truncation_width_fraction"])
 
 
-def test_nfw_gradient_demo_sparse_matches_dense_when_stencil_contains_all_pairs(
-    monkeypatch,
-):
+def test_local_sparse_stencil_uses_compact_rows_not_global_pixels():
+    hp = pytest.importorskip("healpy")
     module = _load_example_module()
 
-    pixel_unit_vectors = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+    halo_pixels = np.array([0, 5, 8], dtype=np.int64)
+    unit_vector = np.stack(hp.pix2vec(1, halo_pixels), axis=-1)
+    catalog = _catalog(
+        unit_vector=unit_vector,
+        mass=np.array([1.0e13, 2.0e13, 3.0e13]),
+        redshift=np.array([0.2, 0.25, 0.3]),
+        chi=np.array([1000.0, 1100.0, 1200.0]),
+    )
+    mass_map = _mass_map(
+        np.array([5, 0], dtype=np.int64),
+        temperature=np.array([100.0, 200.0]),
+        nside=1,
+    )
+
+    stencil = module.build_lightcone_sparse_stencil_for_mass_map_local(
+        mass_map,
+        catalog,
+        rmax_mpc_h=np.array([1.0, 1.0, 1.0]),
+    )
+
+    assert stencil.n_pix == 2
+    np.testing.assert_array_equal(np.asarray(stencil.pix_id), [1, 0])
+    np.testing.assert_array_equal(np.asarray(stencil.halo_id), [0, 1])
+    assert np.all(np.asarray(stencil.r_perp) <= 1.0)
+
+
+def test_nfw_gradient_demo_sparse_matches_dense_when_stencil_contains_all_pairs():
+    hp = pytest.importorskip("healpy")
+    module = _load_example_module()
+
+    pixels = np.array([5, 0], dtype=np.int64)
+    pixel_unit_vectors = np.stack(hp.pix2vec(1, pixels), axis=-1)
     catalog = _catalog(
         unit_vector=pixel_unit_vectors,
         mass=np.array([1.0e13, 2.0e13]),
@@ -396,16 +429,11 @@ def test_nfw_gradient_demo_sparse_matches_dense_when_stencil_contains_all_pairs(
         chi=np.array([1000.0, 1100.0]),
     )
     mass_map = _mass_map(
-        np.array([5, 0], dtype=np.int64),
+        pixels,
         temperature=np.array([100.0, 200.0]),
         nside=1,
     )
     metadata = SimpleNamespace(cosmology=Cosmology())
-    monkeypatch.setattr(
-        module,
-        "healpix_pixel_unit_vectors",
-        lambda nside, pixels, nest=False: pixel_unit_vectors,
-    )
 
     sparse = module.nfw_gradient_demo(
         catalog,
@@ -451,27 +479,24 @@ def test_nfw_gradient_demo_sparse_matches_dense_when_stencil_contains_all_pairs(
     )
 
 
-def test_nfw_gradient_demo_sparse_uses_fewer_pairs_for_local_stencil(monkeypatch):
+def test_nfw_gradient_demo_sparse_uses_fewer_pairs_for_local_stencil():
+    hp = pytest.importorskip("healpy")
     module = _load_example_module()
 
-    pixel_unit_vectors = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+    pixels = np.array([0, 5], dtype=np.int64)
+    unit_vector = np.stack(hp.pix2vec(1, np.array([0], dtype=np.int64)), axis=-1)
     catalog = _catalog(
-        unit_vector=np.array([[1.0, 0.0, 0.0]]),
+        unit_vector=unit_vector,
         mass=np.array([1.0e13]),
         redshift=np.array([0.2]),
         chi=np.array([1000.0]),
     )
     mass_map = _mass_map(
-        np.array([5, 0], dtype=np.int64),
+        pixels,
         temperature=np.array([100.0, 200.0]),
         nside=1,
     )
     metadata = SimpleNamespace(cosmology=Cosmology())
-    monkeypatch.setattr(
-        module,
-        "healpix_pixel_unit_vectors",
-        lambda nside, pixels, nest=False: pixel_unit_vectors,
-    )
 
     diagnostics = module.nfw_gradient_demo(
         catalog,
