@@ -121,6 +121,8 @@ def test_example_script_help_runs():
     assert "--mass-map" in result.stdout
     assert "--sheet-index" in result.stdout
     assert "--nfw-gradient-demo" in result.stdout
+    assert "--nfw-dense-demo" in result.stdout
+    assert "--nfw-taper-radius-factor" in result.stdout
 
 
 def test_segment_bounds_sort_redshift_chi_and_compute_scale_factor():
@@ -302,7 +304,12 @@ def test_save_npz_can_include_nfw_gradient_diagnostics(tmp_path):
         "sum_pinocchio_mass_map_values": 300.0,
     }
     nfw_diagnostics = {
+        "nfw_gradient_mode": "sparse",
         "nfw_gradient_demo_n_halos": 2,
+        "nfw_compact_pixel_count": 2,
+        "nfw_sparse_pair_count": 2,
+        "nfw_dense_pair_count": 4,
+        "nfw_sparse_compression_factor": 2.0,
         "nfw_sum_particle_counts": 1.25,
         "nfw_concentration_amplitude": 5.71,
         "nfw_d_sum_d_concentration_amplitude": 0.5,
@@ -321,7 +328,12 @@ def test_save_npz_can_include_nfw_gradient_diagnostics(tmp_path):
     )
 
     with np.load(args.output) as data:
+        assert str(data["nfw_gradient_mode"]) == "sparse"
         assert int(data["nfw_gradient_demo_n_halos"]) == 2
+        assert int(data["nfw_compact_pixel_count"]) == 2
+        assert int(data["nfw_sparse_pair_count"]) == 2
+        assert int(data["nfw_dense_pair_count"]) == 4
+        assert float(data["nfw_sparse_compression_factor"]) == 2.0
         assert float(data["nfw_sum_particle_counts"]) == 1.25
         assert float(data["nfw_d_sum_d_concentration_amplitude"]) == 0.5
         assert float(data["nfw_d_sum_d_truncation_width_fraction"]) == -0.25
@@ -360,10 +372,120 @@ def test_nfw_gradient_demo_returns_finite_gradients_on_compact_pixel_domain(monk
         chunk_size=1,
     )
 
+    assert diagnostics["nfw_gradient_mode"] == "sparse"
     assert diagnostics["nfw_gradient_demo_n_halos"] == 2
+    assert diagnostics["nfw_compact_pixel_count"] == 2
+    assert diagnostics["nfw_sparse_pair_count"] == 2
+    assert diagnostics["nfw_dense_pair_count"] == 4
+    assert diagnostics["nfw_sparse_compression_factor"] == 2.0
     assert np.isfinite(diagnostics["nfw_sum_particle_counts"])
     assert np.isfinite(diagnostics["nfw_d_sum_d_concentration_amplitude"])
     assert np.isfinite(diagnostics["nfw_d_sum_d_truncation_width_fraction"])
+
+
+def test_nfw_gradient_demo_sparse_matches_dense_when_stencil_contains_all_pairs(
+    monkeypatch,
+):
+    module = _load_example_module()
+
+    pixel_unit_vectors = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+    catalog = _catalog(
+        unit_vector=pixel_unit_vectors,
+        mass=np.array([1.0e13, 2.0e13]),
+        redshift=np.array([0.2, 0.25]),
+        chi=np.array([1000.0, 1100.0]),
+    )
+    mass_map = _mass_map(
+        np.array([5, 0], dtype=np.int64),
+        temperature=np.array([100.0, 200.0]),
+        nside=1,
+    )
+    metadata = SimpleNamespace(cosmology=Cosmology())
+    monkeypatch.setattr(
+        module,
+        "healpix_pixel_unit_vectors",
+        lambda nside, pixels, nest=False: pixel_unit_vectors,
+    )
+
+    sparse = module.nfw_gradient_demo(
+        catalog,
+        np.array([True, True]),
+        mass_map,
+        metadata,
+        particle_mass_msun_h=1.0e10,
+        concentration_amplitude=5.71,
+        truncation_width_fraction=0.05,
+        chunk_size=1,
+        taper_radius_factor=1.0e6,
+    )
+    dense = module.nfw_gradient_demo(
+        catalog,
+        np.array([True, True]),
+        mass_map,
+        metadata,
+        particle_mass_msun_h=1.0e10,
+        concentration_amplitude=5.71,
+        truncation_width_fraction=0.05,
+        chunk_size=1,
+        taper_radius_factor=1.0e6,
+        dense_demo=True,
+    )
+
+    assert sparse["nfw_gradient_mode"] == "sparse"
+    assert dense["nfw_gradient_mode"] == "dense"
+    assert sparse["nfw_sparse_pair_count"] == sparse["nfw_dense_pair_count"]
+    np.testing.assert_allclose(
+        sparse["nfw_sum_particle_counts"],
+        dense["nfw_sum_particle_counts"],
+        rtol=1.0e-5,
+    )
+    np.testing.assert_allclose(
+        sparse["nfw_d_sum_d_concentration_amplitude"],
+        dense["nfw_d_sum_d_concentration_amplitude"],
+        rtol=1.0e-5,
+    )
+    np.testing.assert_allclose(
+        sparse["nfw_d_sum_d_truncation_width_fraction"],
+        dense["nfw_d_sum_d_truncation_width_fraction"],
+        rtol=1.0e-5,
+    )
+
+
+def test_nfw_gradient_demo_sparse_uses_fewer_pairs_for_local_stencil(monkeypatch):
+    module = _load_example_module()
+
+    pixel_unit_vectors = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+    catalog = _catalog(
+        unit_vector=np.array([[1.0, 0.0, 0.0]]),
+        mass=np.array([1.0e13]),
+        redshift=np.array([0.2]),
+        chi=np.array([1000.0]),
+    )
+    mass_map = _mass_map(
+        np.array([5, 0], dtype=np.int64),
+        temperature=np.array([100.0, 200.0]),
+        nside=1,
+    )
+    metadata = SimpleNamespace(cosmology=Cosmology())
+    monkeypatch.setattr(
+        module,
+        "healpix_pixel_unit_vectors",
+        lambda nside, pixels, nest=False: pixel_unit_vectors,
+    )
+
+    diagnostics = module.nfw_gradient_demo(
+        catalog,
+        np.array([True]),
+        mass_map,
+        metadata,
+        particle_mass_msun_h=1.0e10,
+        concentration_amplitude=5.71,
+        truncation_width_fraction=0.05,
+        chunk_size=1,
+    )
+
+    assert diagnostics["nfw_sparse_pair_count"] < diagnostics["nfw_dense_pair_count"]
+    assert diagnostics["nfw_sparse_compression_factor"] > 1.0
 
 
 def test_write_output_fits_preserves_compact_pixel_table(tmp_path):

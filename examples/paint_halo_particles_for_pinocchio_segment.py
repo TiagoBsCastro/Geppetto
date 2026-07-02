@@ -10,9 +10,9 @@ particle-count-equivalent units:
 
 The mandatory ``halo_particle_counts`` output does not paint NFW or tabulated
 profiles. For tutorial use, ``--nfw-gradient-demo`` separately paints an NFW
-one-halo map on the same selected segment and compact pixel domain, then reports
-gradients of the total NFW particle-count map with respect to selected NFW
-parameters.
+one-halo map on the same selected segment and compact pixel domain with the
+sparse NFW painter, then reports gradients of the total NFW particle-count map
+with respect to selected NFW parameters.
 
 Coordinate-basis warning
 ------------------------
@@ -50,11 +50,13 @@ from geppetto import (
     ConcentrationParams,
     NFWProfileParams,
     paint_lightcone_particle_count_map,
+    paint_lightcone_particle_count_map_sparse,
 )
 from geppetto.catalog import LightconeHaloCatalog
 from geppetto.io import (
     PinocchioMassMap,
     PinocchioRunMetadata,
+    build_lightcone_sparse_stencil_bruteforce,
     healpix_pixel_area_sr,
     healpix_pixel_unit_vectors,
     read_pinocchio_hubble_table,
@@ -64,6 +66,7 @@ from geppetto.io import (
     read_pinocchio_mass_sheets,
     read_pinocchio_parameter_file,
 )
+from geppetto.profiles import nfw_scale_radius_and_density
 
 
 def parse_args() -> argparse.Namespace:
@@ -145,7 +148,24 @@ def parse_args() -> argparse.Namespace:
         "--nfw-chunk-size",
         type=int,
         default=1024,
-        help="Static halo chunk size for --nfw-gradient-demo; use 0 to disable chunking",
+        help="Static halo chunk size for --nfw-dense-demo; use 0 to disable chunking",
+    )
+    parser.add_argument(
+        "--nfw-taper-radius-factor",
+        type=float,
+        default=10.0,
+        help=(
+            "Sparse NFW stencil cutoff factor beyond R_delta in units of the "
+            "smooth truncation width"
+        ),
+    )
+    parser.add_argument(
+        "--nfw-dense-demo",
+        action="store_true",
+        help=(
+            "Use the dense NFW gradient demo for comparison/debugging. "
+            "By default --nfw-gradient-demo uses the sparse painter."
+        ),
     )
     return parser.parse_args()
 
@@ -347,6 +367,41 @@ def selected_lightcone_catalog(catalog: LightconeHaloCatalog, mask: np.ndarray) 
     )
 
 
+def nfw_stencil_rmax_mpc_h(
+    catalog: LightconeHaloCatalog,
+    metadata: PinocchioRunMetadata,
+    concentration_params: ConcentrationParams,
+    profile_params: NFWProfileParams,
+    taper_radius_factor: float,
+) -> np.ndarray:
+    """Return fixed sparse-stencil NFW support radii in comoving ``Mpc/h``."""
+
+    if taper_radius_factor < 0.0:
+        raise ValueError("taper_radius_factor must be non-negative")
+
+    r_delta, _, _, _ = nfw_scale_radius_and_density(
+        catalog.mass,
+        catalog.redshift,
+        metadata.cosmology,
+        concentration_params,
+        profile_params,
+    )
+    r_delta_np = np.asarray(r_delta, dtype=np.float64)
+    if not profile_params.smooth_truncation:
+        return r_delta_np
+
+    width = float(profile_params.truncation_width_fraction) * r_delta_np
+    return r_delta_np + float(taper_radius_factor) * width
+
+
+def _compression_factor(dense_pair_count: int, sparse_pair_count: int) -> float:
+    if sparse_pair_count > 0:
+        return float(dense_pair_count) / float(sparse_pair_count)
+    if dense_pair_count > 0:
+        return float("inf")
+    return 1.0
+
+
 def nfw_gradient_demo(
     catalog: LightconeHaloCatalog,
     mask: np.ndarray,
@@ -357,12 +412,15 @@ def nfw_gradient_demo(
     concentration_amplitude: float = 5.71,
     truncation_width_fraction: float = 0.05,
     chunk_size: int | None = 1024,
-) -> dict[str, float | int]:
+    taper_radius_factor: float = 10.0,
+    dense_demo: bool = False,
+) -> dict[str, float | int | str]:
     """Paint an NFW map and differentiate its total count with respect to parameters.
 
     This tutorial helper uses the same selected segment and compact
     ``mass_map.pixel`` domain as the point-count diagnostic, but it is separate
-    from the mandatory ``halo_particle_counts`` output.
+    from the mandatory ``halo_particle_counts`` output. The default path uses a
+    sparse halo-pixel stencil; set ``dense_demo=True`` only for comparison.
     """
 
     if particle_mass_msun_h <= 0.0:
@@ -371,39 +429,90 @@ def nfw_gradient_demo(
         chunk_size = None
 
     selected_catalog = selected_lightcone_catalog(catalog, mask)
-    pixel_unit_vectors = jnp.asarray(
-        healpix_pixel_unit_vectors(mass_map.nside, np.asarray(mass_map.pixel), nest=False)
+    pixel_unit_vectors_np = healpix_pixel_unit_vectors(
+        mass_map.nside, np.asarray(mass_map.pixel), nest=False
     )
+    pixel_unit_vectors = jnp.asarray(pixel_unit_vectors_np)
     pixel_area_sr = healpix_pixel_area_sr(mass_map.nside)
+    n_halo = int(selected_catalog.mass.shape[0])
+    n_pix = int(np.asarray(mass_map.pixel).shape[0])
+    dense_pair_count = n_halo * n_pix
+
+    fiducial_concentration_params = ConcentrationParams(amplitude=concentration_amplitude)
+    fiducial_profile_params = NFWProfileParams(
+        truncation_width_fraction=truncation_width_fraction
+    )
+    stencil = None
+    sparse_pair_count = dense_pair_count
+    if not dense_demo:
+        rmax = nfw_stencil_rmax_mpc_h(
+            selected_catalog,
+            metadata,
+            fiducial_concentration_params,
+            fiducial_profile_params,
+            taper_radius_factor,
+        )
+        stencil = build_lightcone_sparse_stencil_bruteforce(
+            pixel_unit_vectors_np,
+            selected_catalog,
+            rmax,
+        )
+        sparse_pair_count = int(stencil.size)
 
     def total_for_concentration_amplitude(amplitude: float):
-        counts = paint_lightcone_particle_count_map(
-            pixel_unit_vectors,
-            selected_catalog,
-            particle_mass_msun_h=particle_mass_msun_h,
-            pixel_area_sr=pixel_area_sr,
-            cosmology=metadata.cosmology,
-            concentration_params=ConcentrationParams(amplitude=amplitude),
-            profile_params=NFWProfileParams(
-                truncation_width_fraction=truncation_width_fraction
-            ),
-            chunk_size=chunk_size,
+        concentration_params = ConcentrationParams(amplitude=amplitude)
+        profile_params = NFWProfileParams(
+            truncation_width_fraction=truncation_width_fraction
         )
+        if dense_demo:
+            counts = paint_lightcone_particle_count_map(
+                pixel_unit_vectors,
+                selected_catalog,
+                particle_mass_msun_h=particle_mass_msun_h,
+                pixel_area_sr=pixel_area_sr,
+                cosmology=metadata.cosmology,
+                concentration_params=concentration_params,
+                profile_params=profile_params,
+                chunk_size=chunk_size,
+            )
+        else:
+            counts = paint_lightcone_particle_count_map_sparse(
+                stencil,
+                selected_catalog,
+                particle_mass_msun_h=particle_mass_msun_h,
+                pixel_area_sr=pixel_area_sr,
+                cosmology=metadata.cosmology,
+                concentration_params=concentration_params,
+                profile_params=profile_params,
+            )
         return jnp.sum(counts)
 
     def total_for_truncation_width_fraction(width_fraction: float):
-        counts = paint_lightcone_particle_count_map(
-            pixel_unit_vectors,
-            selected_catalog,
-            particle_mass_msun_h=particle_mass_msun_h,
-            pixel_area_sr=pixel_area_sr,
-            cosmology=metadata.cosmology,
-            concentration_params=ConcentrationParams(amplitude=concentration_amplitude),
-            profile_params=NFWProfileParams(
-                truncation_width_fraction=width_fraction
-            ),
-            chunk_size=chunk_size,
+        concentration_params = ConcentrationParams(amplitude=concentration_amplitude)
+        profile_params = NFWProfileParams(
+            truncation_width_fraction=width_fraction
         )
+        if dense_demo:
+            counts = paint_lightcone_particle_count_map(
+                pixel_unit_vectors,
+                selected_catalog,
+                particle_mass_msun_h=particle_mass_msun_h,
+                pixel_area_sr=pixel_area_sr,
+                cosmology=metadata.cosmology,
+                concentration_params=concentration_params,
+                profile_params=profile_params,
+                chunk_size=chunk_size,
+            )
+        else:
+            counts = paint_lightcone_particle_count_map_sparse(
+                stencil,
+                selected_catalog,
+                particle_mass_msun_h=particle_mass_msun_h,
+                pixel_area_sr=pixel_area_sr,
+                cosmology=metadata.cosmology,
+                concentration_params=concentration_params,
+                profile_params=profile_params,
+            )
         return jnp.sum(counts)
 
     total_counts = total_for_concentration_amplitude(concentration_amplitude)
@@ -412,7 +521,14 @@ def nfw_gradient_demo(
         truncation_width_fraction
     )
     return {
+        "nfw_gradient_mode": "dense" if dense_demo else "sparse",
         "nfw_gradient_demo_n_halos": int(selected_catalog.mass.shape[0]),
+        "nfw_compact_pixel_count": n_pix,
+        "nfw_sparse_pair_count": sparse_pair_count,
+        "nfw_dense_pair_count": dense_pair_count,
+        "nfw_sparse_compression_factor": _compression_factor(
+            dense_pair_count, sparse_pair_count
+        ),
         "nfw_sum_particle_counts": float(total_counts),
         "nfw_concentration_amplitude": float(concentration_amplitude),
         "nfw_d_sum_d_concentration_amplitude": float(grad_concentration),
@@ -448,7 +564,7 @@ def save_npz(
     bounds: dict[str, float],
     metadata: PinocchioRunMetadata,
     diagnostics: dict[str, float | int],
-    nfw_diagnostics: dict[str, float | int] | None = None,
+    nfw_diagnostics: dict[str, float | int | str] | None = None,
 ) -> None:
     """Save the diagnostic map and metadata to the requested ``.npz`` file."""
 
@@ -592,12 +708,20 @@ def print_output_summary(
     )
 
 
-def print_nfw_gradient_summary(nfw_diagnostics: dict[str, float | int]) -> None:
+def print_nfw_gradient_summary(nfw_diagnostics: dict[str, float | int | str]) -> None:
     """Print the optional NFW differentiability tutorial summary."""
 
     print("NFW differentiability demo:")
     print("  Objective: sum of NFW one-halo particle-count map on the same compact pixels")
+    print(f"  Painter mode: {nfw_diagnostics['nfw_gradient_mode']}")
     print(f"  Selected halos painted: {nfw_diagnostics['nfw_gradient_demo_n_halos']}")
+    print(f"  Compact pixels: {nfw_diagnostics['nfw_compact_pixel_count']}")
+    print(f"  Sparse halo-pixel pairs: {nfw_diagnostics['nfw_sparse_pair_count']}")
+    print(f"  Dense pair count: {nfw_diagnostics['nfw_dense_pair_count']}")
+    print(
+        "  Sparse compression factor: "
+        f"{nfw_diagnostics['nfw_sparse_compression_factor']:.12g}"
+    )
     print(f"  NFW sum particle counts: {nfw_diagnostics['nfw_sum_particle_counts']:.12g}")
     print(
         "  d(sum) / d concentration amplitude: "
@@ -668,6 +792,8 @@ def main() -> None:
             concentration_amplitude=args.nfw_concentration_amplitude,
             truncation_width_fraction=args.nfw_truncation_width_fraction,
             chunk_size=args.nfw_chunk_size,
+            taper_radius_factor=args.nfw_taper_radius_factor,
+            dense_demo=args.nfw_dense_demo,
         )
 
     save_npz(args, out, mass_map, bounds, metadata, diagnostics, nfw_diagnostics)
