@@ -34,6 +34,19 @@ python examples/paint_halo_particles_for_pinocchio_segment.py \\
 
 Add ``--nfw-gradient-demo`` to also print and save a differentiability tutorial
 for an NFW one-halo map evaluated on the same segment and pixel domain.
+
+To compare NFW painting with and without derivatives, run:
+
+  python examples/paint_halo_particles_for_pinocchio_segment.py ... --nfw-paint --profile
+
+and:
+
+  python examples/paint_halo_particles_for_pinocchio_segment.py ... \\
+    --nfw-gradient-demo --profile --profile-jax-repeat
+
+The incremental derivative cost is the difference between
+``NFW paint + derivatives`` and ``NFW paint only``, with detailed derivative
+cost shown by ``NFW derivatives value_and_grad``.
 """
 
 from __future__ import annotations
@@ -611,7 +624,7 @@ def nfw_gradient_demo(
     compute_gradients: bool = True,
     profile: bool = False,
     profile_jax_repeat: bool = False,
-) -> dict[str, float | int | str | np.ndarray]:
+) -> dict[str, bool | float | int | str | np.ndarray]:
     """Paint an NFW map and differentiate its total count with respect to parameters.
 
     This tutorial helper uses the same selected segment and compact
@@ -681,6 +694,7 @@ def nfw_gradient_demo(
         dtype=selected_catalog.mass.dtype,
     )
     nfw_paint_mode = "dense" if dense_demo else "sparse"
+    nfw_operation_mode = "paint_plus_derivatives" if compute_gradients else "paint_only"
     nfw_objective_mode = (
         "dense_map_sum" if dense_demo else "sum_only_sparse"
     ) if compute_gradients else "not_computed"
@@ -715,13 +729,13 @@ def nfw_gradient_demo(
 
     if compute_gradients:
         grad_fn = jax.value_and_grad(objective)
-        with timed_stage("NFW objective value_and_grad", profile):
+        with timed_stage("NFW derivatives value_and_grad", profile):
             total_counts, grad = grad_fn(theta)
             total_counts.block_until_ready()
             grad.block_until_ready()
 
         if profile and profile_jax_repeat:
-            with timed_stage("NFW objective cached value_and_grad", profile):
+            with timed_stage("NFW derivatives cached value_and_grad", profile):
                 total_counts_repeat, grad_repeat = grad_fn(theta)
                 total_counts_repeat.block_until_ready()
                 grad_repeat.block_until_ready()
@@ -771,8 +785,13 @@ def nfw_gradient_demo(
                 f"map_sum={float(validation_sum):.17g}"
             )
 
-    diagnostics: dict[str, float | int | str | np.ndarray] = {
-        "nfw_particle_counts": np.asarray(nfw_particle_counts),
+    with timed_stage("NFW particle map to numpy", profile):
+        nfw_particle_counts_np = np.asarray(nfw_particle_counts)
+
+    diagnostics: dict[str, bool | float | int | str | np.ndarray] = {
+        "nfw_particle_counts": nfw_particle_counts_np,
+        "nfw_derivatives_computed": bool(compute_gradients),
+        "nfw_operation_mode": nfw_operation_mode,
         "nfw_paint_mode": nfw_paint_mode,
         "nfw_gradient_mode": nfw_paint_mode if compute_gradients else "not_computed",
         "nfw_objective_mode": nfw_objective_mode,
@@ -826,7 +845,7 @@ def save_npz(
     bounds: dict[str, float],
     metadata: PinocchioRunMetadata,
     diagnostics: dict[str, float | int],
-    nfw_diagnostics: dict[str, float | int | str | np.ndarray] | None = None,
+    nfw_diagnostics: dict[str, bool | float | int | str | np.ndarray] | None = None,
 ) -> None:
     """Save the diagnostic map and metadata to the requested ``.npz`` file."""
 
@@ -971,13 +990,17 @@ def print_output_summary(
 
 
 def print_nfw_gradient_summary(
-    nfw_diagnostics: dict[str, float | int | str | np.ndarray],
+    nfw_diagnostics: dict[str, bool | float | int | str | np.ndarray],
 ) -> None:
     """Print the optional NFW differentiability tutorial summary."""
 
-    print("NFW one-halo map:")
+    if nfw_diagnostics["nfw_derivatives_computed"]:
+        print("NFW one-halo map + derivatives:")
+    else:
+        print("NFW one-halo map:")
     print(f"  Painter mode: {nfw_diagnostics['nfw_paint_mode']}")
-    if nfw_diagnostics["nfw_objective_mode"] != "not_computed":
+    print(f"  Operation mode: {nfw_diagnostics['nfw_operation_mode']}")
+    if nfw_diagnostics["nfw_derivatives_computed"]:
         print("  Objective: sum of NFW one-halo particle-count map on the same compact pixels")
         print(f"  Gradient mode: {nfw_diagnostics['nfw_gradient_mode']}")
         print(f"  Objective mode: {nfw_diagnostics['nfw_objective_mode']}")
@@ -1063,7 +1086,9 @@ def main() -> None:
     nfw_diagnostics = None
     run_nfw = args.nfw_paint or args.nfw_gradient_demo
     if run_nfw:
-        nfw_stage_name = "NFW gradient demo" if args.nfw_gradient_demo else "NFW particle paint"
+        nfw_stage_name = (
+            "NFW paint + derivatives" if args.nfw_gradient_demo else "NFW paint only"
+        )
         with timed_stage(nfw_stage_name, args.profile):
             nfw_diagnostics = nfw_gradient_demo(
                 catalog,

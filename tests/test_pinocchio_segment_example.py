@@ -331,6 +331,9 @@ def test_save_npz_can_include_nfw_gradient_diagnostics(tmp_path):
     }
     nfw_diagnostics = {
         "nfw_particle_counts": np.array([0.75, 0.5]),
+        "nfw_derivatives_computed": True,
+        "nfw_operation_mode": "paint_plus_derivatives",
+        "nfw_paint_mode": "sparse",
         "nfw_gradient_mode": "sparse",
         "nfw_objective_mode": "sum_only_sparse",
         "nfw_gradient_demo_n_halos": 2,
@@ -357,6 +360,9 @@ def test_save_npz_can_include_nfw_gradient_diagnostics(tmp_path):
 
     with np.load(args.output) as data:
         np.testing.assert_allclose(data["nfw_particle_counts"], [0.75, 0.5])
+        assert bool(data["nfw_derivatives_computed"])
+        assert str(data["nfw_operation_mode"]) == "paint_plus_derivatives"
+        assert str(data["nfw_paint_mode"]) == "sparse"
         assert str(data["nfw_gradient_mode"]) == "sparse"
         assert str(data["nfw_objective_mode"]) == "sum_only_sparse"
         assert int(data["nfw_gradient_demo_n_halos"]) == 2
@@ -454,6 +460,9 @@ def test_nfw_gradient_demo_default_sparse_does_not_call_bruteforce(monkeypatch):
     )
 
     assert diagnostics["nfw_gradient_mode"] == "sparse"
+    assert diagnostics["nfw_derivatives_computed"] is True
+    assert diagnostics["nfw_operation_mode"] == "paint_plus_derivatives"
+    assert diagnostics["nfw_paint_mode"] == "sparse"
     assert diagnostics["nfw_objective_mode"] == "sum_only_sparse"
     assert diagnostics["nfw_particle_counts"].shape == (2,)
     assert np.all(np.isfinite(diagnostics["nfw_particle_counts"]))
@@ -545,6 +554,8 @@ def test_nfw_paint_only_outputs_map_without_gradients():
     )
 
     assert diagnostics["nfw_paint_mode"] == "sparse"
+    assert diagnostics["nfw_derivatives_computed"] is False
+    assert diagnostics["nfw_operation_mode"] == "paint_only"
     assert diagnostics["nfw_gradient_mode"] == "not_computed"
     assert diagnostics["nfw_objective_mode"] == "not_computed"
     assert diagnostics["nfw_particle_counts"].shape == (1,)
@@ -584,7 +595,7 @@ def test_nfw_paint_only_rejects_sum_only_validation():
         )
 
 
-def test_nfw_gradient_demo_profile_prints_sparse_stage_labels(capsys):
+def test_nfw_paint_only_profile_prints_map_labels_without_derivatives(capsys):
     hp = pytest.importorskip("healpy")
     module = _load_example_module()
 
@@ -612,15 +623,17 @@ def test_nfw_gradient_demo_profile_prints_sparse_stage_labels(capsys):
         concentration_amplitude=5.71,
         truncation_width_fraction=0.05,
         chunk_size=1,
+        compute_gradients=False,
         profile=True,
     )
 
     captured = capsys.readouterr()
-    assert "NFW local sparse stencil" in captured.out
-    assert "NFW objective value_and_grad" in captured.out
+    assert "NFW particle map" in captured.out
+    assert "NFW particle map to numpy" in captured.out
+    assert "NFW derivatives value_and_grad" not in captured.out
 
 
-def test_nfw_gradient_demo_profile_jax_repeat_prints_cached_label(capsys):
+def test_nfw_gradient_demo_profile_prints_derivative_and_map_labels(capsys):
     hp = pytest.importorskip("healpy")
     module = _load_example_module()
 
@@ -653,7 +666,53 @@ def test_nfw_gradient_demo_profile_jax_repeat_prints_cached_label(capsys):
     )
 
     captured = capsys.readouterr()
-    assert "NFW objective cached value_and_grad" in captured.out
+    assert "NFW derivatives value_and_grad" in captured.out
+    assert "NFW derivatives cached value_and_grad" in captured.out
+    assert "NFW particle map" in captured.out
+    assert "NFW particle map to numpy" in captured.out
+
+
+def test_print_nfw_summary_distinguishes_operation_modes(capsys):
+    module = _load_example_module()
+    common = {
+        "nfw_paint_mode": "sparse",
+        "nfw_gradient_demo_n_halos": 1,
+        "nfw_compact_pixel_count": 1,
+        "nfw_sparse_pair_count": 1,
+        "nfw_dense_pair_count": 1,
+        "nfw_sparse_compression_factor": 1.0,
+        "nfw_sum_particle_counts": 1.25,
+    }
+
+    module.print_nfw_gradient_summary(
+        {
+            **common,
+            "nfw_derivatives_computed": False,
+            "nfw_operation_mode": "paint_only",
+            "nfw_gradient_mode": "not_computed",
+            "nfw_objective_mode": "not_computed",
+        }
+    )
+    paint_only = capsys.readouterr().out
+    assert "NFW one-halo map:" in paint_only
+    assert "Operation mode: paint_only" in paint_only
+    assert "Gradients: not computed" in paint_only
+
+    module.print_nfw_gradient_summary(
+        {
+            **common,
+            "nfw_derivatives_computed": True,
+            "nfw_operation_mode": "paint_plus_derivatives",
+            "nfw_gradient_mode": "sparse",
+            "nfw_objective_mode": "sum_only_sparse",
+            "nfw_d_sum_d_concentration_amplitude": 0.5,
+            "nfw_d_sum_d_truncation_width_fraction": -0.25,
+        }
+    )
+    with_derivatives = capsys.readouterr().out
+    assert "NFW one-halo map + derivatives:" in with_derivatives
+    assert "Operation mode: paint_plus_derivatives" in with_derivatives
+    assert "Objective mode: sum_only_sparse" in with_derivatives
 
 
 def test_local_sparse_stencil_uses_compact_rows_not_global_pixels():
