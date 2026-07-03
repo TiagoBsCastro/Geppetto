@@ -145,6 +145,7 @@ def test_example_script_help_runs():
         capture_output=True,
         text=True,
     )
+    normalized_help = " ".join(result.stdout.split())
     assert "--mass-map" in result.stdout
     assert "--mass-map-glob" in result.stdout
     assert "--output-dir" in result.stdout
@@ -156,6 +157,8 @@ def test_example_script_help_runs():
     assert "--concentration-redshift-slope" in result.stdout
     assert "--concentration-mass-pivot" in result.stdout
     assert "--truncation-width-fraction" in result.stdout
+    assert "In single-segment mode, use an inclusive upper segment bound." in normalized_help
+    assert "the final discovered segment is inclusive automatically." in normalized_help
     assert "--nfw-paint" not in result.stdout
     assert "--nfw-gradient-demo" not in result.stdout
     assert "--nfw-map-derivatives" not in result.stdout

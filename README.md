@@ -27,14 +27,39 @@ The long-run target is to support an Aricò-style baryonification prescription t
 
 ## Installation
 
-From the repository root:
+GEPPETTO is currently installed from the GitHub repository. The recommended
+development setup uses Miniforge/Mambaforge plus an editable pip install:
 
 ```bash
-python -m pip install -e '.[dev]'
-pytest
+git clone git@github.com:TiagoBsCastro/Geppetto.git
+cd Geppetto
+
+mamba create -n geppetto-dev python=3.12
+mamba activate geppetto-dev
+
+python -m pip install -e '.[io,dev]'
 ```
 
-For GPU use, install the JAX build appropriate for your CUDA stack before installing GEPPETTO.
+Use the extras according to the workflow:
+
+- `python -m pip install -e .` installs the differentiable JAX/NumPy core.
+- `python -m pip install -e '.[io]'` also installs FITS, HEALPix, HDF5, and
+  PINOCCHIO reader dependencies: `astropy`, `healpy`, and `h5py`.
+- `python -m pip install -e '.[dev]'` installs test, lint, and type-check tools.
+- `python -m pip install -e '.[io,dev]'` is recommended for developing and
+  running the PINOCCHIO examples.
+
+Verify the installation:
+
+```bash
+python -c "import geppetto; print(geppetto.__version__)"
+pytest
+ruff check .
+```
+
+For GPU use, install the JAX build appropriate for your CUDA stack before
+installing GEPPETTO. Follow the official JAX installation selector rather than
+pinning a CUDA command from this README.
 
 ## Minimal comoving-box example
 

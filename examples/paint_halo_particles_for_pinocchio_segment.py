@@ -177,7 +177,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--last-segment-inclusive",
         action="store_true",
-        help="Use an inclusive upper segment bound",
+        help=(
+            "In single-segment mode, use an inclusive upper segment bound. "
+            "In all-segments mode, intermediate segments are half-open and the final "
+            "discovered segment is inclusive automatically."
+        ),
     )
     parser.add_argument(
         "--mode",
