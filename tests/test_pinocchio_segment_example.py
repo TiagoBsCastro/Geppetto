@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -121,17 +122,21 @@ def test_example_script_help_runs():
     )
     assert "--mass-map" in result.stdout
     assert "--sheet-index" in result.stdout
-    assert "--nfw-gradient-demo" in result.stdout
-    assert "--nfw-paint" in result.stdout
-    assert "--nfw-dense-demo" in result.stdout
-    assert "--nfw-taper-radius-factor" in result.stdout
-    assert "--nfw-validate-sum-only" in result.stdout
-    assert "--nfw-map-derivatives" in result.stdout
-    assert "--nfw-concentration-mass-slope" in result.stdout
-    assert "--nfw-concentration-redshift-slope" in result.stdout
-    assert "--nfw-concentration-mass-pivot" in result.stdout
-    assert "--profile" in result.stdout
-    assert "--profile-jax-repeat" in result.stdout
+    assert "--mode" in result.stdout
+    assert "--concentration-amplitude" in result.stdout
+    assert "--concentration-mass-slope" in result.stdout
+    assert "--concentration-redshift-slope" in result.stdout
+    assert "--concentration-mass-pivot" in result.stdout
+    assert "--truncation-width-fraction" in result.stdout
+    assert "--nfw-paint" not in result.stdout
+    assert "--nfw-gradient-demo" not in result.stdout
+    assert "--nfw-map-derivatives" not in result.stdout
+    assert "--profile" not in result.stdout
+    assert "--profile-jax-repeat" not in result.stdout
+    assert "--nfw-dense-demo" not in result.stdout
+    assert "--nfw-validate-sum-only" not in result.stdout
+    assert "--nfw-chunk-size" not in result.stdout
+    assert "--nfw-taper-radius-factor" not in result.stdout
 
 
 def test_timed_stage_disabled_does_not_print(capsys):
@@ -312,7 +317,7 @@ def test_save_npz_preserves_pixel_array_and_diagnostics(tmp_path):
         assert float(data["sum_halo_particle_counts"]) == 6.0
 
 
-def test_save_npz_can_include_nfw_gradient_diagnostics(tmp_path):
+def test_save_npz_can_include_nfw_calibration_diagnostics(tmp_path):
     module = _load_example_module()
     mass_map = _mass_map(np.array([5, 0]), temperature=np.array([100.0, 200.0]))
     args = SimpleNamespace(output=tmp_path / "halo_particles.seg000.npz")
@@ -334,6 +339,7 @@ def test_save_npz_can_include_nfw_gradient_diagnostics(tmp_path):
         "sum_pinocchio_mass_map_values": 300.0,
     }
     nfw_diagnostics = {
+        "pipeline_mode": "derivatives",
         "nfw_particle_counts": np.array([0.75, 0.5]),
         "nfw_map_derivatives": "concentration",
         "d_nfw_particle_counts_d_concentration_amplitude": np.array([0.1, 0.2]),
@@ -342,21 +348,18 @@ def test_save_npz_can_include_nfw_gradient_diagnostics(tmp_path):
         "sum_d_nfw_particle_counts_d_concentration_amplitude": 0.3,
         "sum_d_nfw_particle_counts_d_concentration_mass_slope": 0.7,
         "sum_d_nfw_particle_counts_d_concentration_redshift_slope": 1.1,
-        "nfw_derivatives_computed": True,
-        "nfw_operation_mode": "paint_plus_derivatives",
         "nfw_paint_mode": "sparse",
-        "nfw_gradient_mode": "sparse",
-        "nfw_objective_mode": "sum_only_sparse",
-        "nfw_gradient_demo_n_halos": 2,
+        "nfw_selected_halo_count": 2,
         "nfw_compact_pixel_count": 2,
         "nfw_sparse_pair_count": 2,
         "nfw_dense_pair_count": 4,
         "nfw_sparse_compression_factor": 2.0,
         "nfw_sum_particle_counts": 1.25,
         "nfw_concentration_amplitude": 5.71,
-        "nfw_d_sum_d_concentration_amplitude": 0.5,
+        "nfw_concentration_mass_slope": -0.084,
+        "nfw_concentration_redshift_slope": -0.47,
+        "nfw_concentration_mass_pivot": 2.0e12,
         "nfw_truncation_width_fraction": 0.05,
-        "nfw_d_sum_d_truncation_width_fraction": -0.25,
     }
 
     module.save_npz(
@@ -370,6 +373,7 @@ def test_save_npz_can_include_nfw_gradient_diagnostics(tmp_path):
     )
 
     with np.load(args.output) as data:
+        assert str(data["pipeline_mode"]) == "derivatives"
         np.testing.assert_allclose(data["nfw_particle_counts"], [0.75, 0.5])
         assert str(data["nfw_map_derivatives"]) == "concentration"
         np.testing.assert_allclose(
@@ -384,19 +388,18 @@ def test_save_npz_can_include_nfw_gradient_diagnostics(tmp_path):
         assert float(data["sum_d_nfw_particle_counts_d_concentration_amplitude"]) == 0.3
         assert float(data["sum_d_nfw_particle_counts_d_concentration_mass_slope"]) == 0.7
         assert float(data["sum_d_nfw_particle_counts_d_concentration_redshift_slope"]) == 1.1
-        assert bool(data["nfw_derivatives_computed"])
-        assert str(data["nfw_operation_mode"]) == "paint_plus_derivatives"
         assert str(data["nfw_paint_mode"]) == "sparse"
-        assert str(data["nfw_gradient_mode"]) == "sparse"
-        assert str(data["nfw_objective_mode"]) == "sum_only_sparse"
-        assert int(data["nfw_gradient_demo_n_halos"]) == 2
+        assert int(data["nfw_selected_halo_count"]) == 2
         assert int(data["nfw_compact_pixel_count"]) == 2
         assert int(data["nfw_sparse_pair_count"]) == 2
         assert int(data["nfw_dense_pair_count"]) == 4
         assert float(data["nfw_sparse_compression_factor"]) == 2.0
         assert float(data["nfw_sum_particle_counts"]) == 1.25
-        assert float(data["nfw_d_sum_d_concentration_amplitude"]) == 0.5
-        assert float(data["nfw_d_sum_d_truncation_width_fraction"]) == -0.25
+        assert float(data["nfw_concentration_amplitude"]) == 5.71
+        assert float(data["nfw_concentration_mass_slope"]) == -0.084
+        assert float(data["nfw_concentration_redshift_slope"]) == -0.47
+        assert float(data["nfw_concentration_mass_pivot"]) == 2.0e12
+        assert float(data["nfw_truncation_width_fraction"]) == 0.05
 
 
 def test_nfw_sparse_total_particle_count_matches_sparse_map_sum():
@@ -447,12 +450,31 @@ def test_nfw_sparse_total_particle_count_matches_sparse_map_sum():
     )
 
 
-def test_nfw_gradient_demo_default_sparse_does_not_call_bruteforce(monkeypatch):
+def _single_pixel_pipeline_case():
+    hp = pytest.importorskip("healpy")
+    halo_pixels = np.array([0], dtype=np.int64)
+    unit_vector = np.stack(hp.pix2vec(1, halo_pixels), axis=-1)
+    catalog = _catalog(
+        unit_vector=unit_vector,
+        mass=np.array([1.0e13]),
+        redshift=np.array([0.2]),
+        chi=np.array([1000.0]),
+    )
+    mass_map = _mass_map(
+        np.array([0], dtype=np.int64),
+        temperature=np.array([100.0]),
+        nside=1,
+    )
+    metadata = SimpleNamespace(cosmology=Cosmology())
+    return catalog, np.array([True]), mass_map, metadata
+
+
+def test_run_nfw_calibration_pipeline_default_sparse_does_not_call_bruteforce(monkeypatch):
     hp = pytest.importorskip("healpy")
     module = _load_example_module()
 
     def fail_if_called(*args, **kwargs):
-        raise AssertionError("The sparse tutorial must not allocate an N_pix x N_halo matrix")
+        raise AssertionError("The sparse pipeline must not allocate an N_pix x N_halo matrix")
 
     monkeypatch.setattr(module, "build_lightcone_sparse_stencil_bruteforce", fail_if_called)
     monkeypatch.setattr(module, "healpix_pixel_unit_vectors", fail_if_called)
@@ -472,32 +494,30 @@ def test_nfw_gradient_demo_default_sparse_does_not_call_bruteforce(monkeypatch):
     )
     metadata = SimpleNamespace(cosmology=Cosmology())
 
-    diagnostics = module.nfw_gradient_demo(
+    diagnostics = module.run_nfw_calibration_pipeline(
         catalog,
         np.array([True, True]),
         mass_map,
         metadata,
         particle_mass_msun_h=1.0e10,
+        pipeline_mode="paint",
         concentration_amplitude=5.71,
         truncation_width_fraction=0.05,
         chunk_size=1,
     )
 
-    assert diagnostics["nfw_gradient_mode"] == "sparse"
-    assert diagnostics["nfw_derivatives_computed"] is True
-    assert diagnostics["nfw_operation_mode"] == "paint_plus_derivatives"
+    assert diagnostics["pipeline_mode"] == "paint"
     assert diagnostics["nfw_paint_mode"] == "sparse"
-    assert diagnostics["nfw_objective_mode"] == "sum_only_sparse"
+    assert diagnostics["nfw_map_derivatives"] == "none"
     assert diagnostics["nfw_particle_counts"].shape == (2,)
     assert np.all(np.isfinite(diagnostics["nfw_particle_counts"]))
-    assert diagnostics["nfw_gradient_demo_n_halos"] == 2
+    assert diagnostics["nfw_selected_halo_count"] == 2
     assert diagnostics["nfw_compact_pixel_count"] == 2
     assert diagnostics["nfw_sparse_pair_count"] == 2
     assert diagnostics["nfw_dense_pair_count"] == 4
     assert diagnostics["nfw_sparse_compression_factor"] == 2.0
     assert np.isfinite(diagnostics["nfw_sum_particle_counts"])
-    assert np.isfinite(diagnostics["nfw_d_sum_d_concentration_amplitude"])
-    assert np.isfinite(diagnostics["nfw_d_sum_d_truncation_width_fraction"])
+    assert "d_nfw_particle_counts_d_concentration_amplitude" not in diagnostics
     np.testing.assert_allclose(
         np.sum(diagnostics["nfw_particle_counts"]),
         diagnostics["nfw_sum_particle_counts"],
@@ -505,81 +525,22 @@ def test_nfw_gradient_demo_default_sparse_does_not_call_bruteforce(monkeypatch):
     )
 
 
-def test_nfw_gradient_demo_sparse_sum_only_validation_matches_sparse_map_sum():
-    hp = pytest.importorskip("healpy")
+def test_run_nfw_calibration_pipeline_derivative_mode_saves_map_derivatives():
     module = _load_example_module()
+    catalog, mask, mass_map, metadata = _single_pixel_pipeline_case()
 
-    halo_pixels = np.array([0], dtype=np.int64)
-    unit_vector = np.stack(hp.pix2vec(1, halo_pixels), axis=-1)
-    catalog = _catalog(
-        unit_vector=unit_vector,
-        mass=np.array([1.0e13]),
-        redshift=np.array([0.2]),
-        chi=np.array([1000.0]),
-    )
-    mass_map = _mass_map(
-        np.array([0], dtype=np.int64),
-        temperature=np.array([100.0]),
-        nside=1,
-    )
-    metadata = SimpleNamespace(cosmology=Cosmology())
-
-    diagnostics = module.nfw_gradient_demo(
+    diagnostics = module.run_nfw_calibration_pipeline(
         catalog,
-        np.array([True]),
+        mask,
         mass_map,
         metadata,
         particle_mass_msun_h=1.0e10,
-        concentration_amplitude=5.71,
-        truncation_width_fraction=0.05,
+        pipeline_mode="derivatives",
         chunk_size=1,
-        validate_sum_only=True,
+        compute_map_derivatives=True,
     )
 
-    assert diagnostics["nfw_gradient_mode"] == "sparse"
-    assert diagnostics["nfw_objective_mode"] == "sum_only_sparse"
-    assert diagnostics["nfw_particle_counts"].shape == (1,)
-    np.testing.assert_allclose(
-        np.sum(diagnostics["nfw_particle_counts"]),
-        diagnostics["nfw_sum_particle_counts"],
-        rtol=1.0e-5,
-    )
-
-
-def test_nfw_map_concentration_derivatives_have_map_shape_and_match_scalar_gradient():
-    hp = pytest.importorskip("healpy")
-    module = _load_example_module()
-
-    halo_pixels = np.array([0, 5], dtype=np.int64)
-    unit_vector = np.stack(hp.pix2vec(1, halo_pixels), axis=-1)
-    catalog = _catalog(
-        unit_vector=unit_vector,
-        mass=np.array([1.0e13, 2.0e13]),
-        redshift=np.array([0.2, 0.25]),
-        chi=np.array([1000.0, 1100.0]),
-    )
-    mass_map = _mass_map(
-        np.array([5, 0], dtype=np.int64),
-        temperature=np.array([100.0, 200.0]),
-        nside=1,
-    )
-    metadata = SimpleNamespace(cosmology=Cosmology())
-
-    diagnostics = module.nfw_gradient_demo(
-        catalog,
-        np.array([True, True]),
-        mass_map,
-        metadata,
-        particle_mass_msun_h=1.0e10,
-        concentration_amplitude=5.71,
-        concentration_mass_slope=-0.084,
-        concentration_redshift_slope=-0.47,
-        concentration_mass_pivot=2.0e12,
-        truncation_width_fraction=0.05,
-        chunk_size=1,
-        map_derivatives="concentration",
-    )
-
+    assert diagnostics["pipeline_mode"] == "derivatives"
     assert diagnostics["nfw_map_derivatives"] == "concentration"
     for key in (
         "d_nfw_particle_counts_d_concentration_amplitude",
@@ -589,12 +550,10 @@ def test_nfw_map_concentration_derivatives_have_map_shape_and_match_scalar_gradi
         assert diagnostics[key].shape == diagnostics["nfw_particle_counts"].shape
         assert np.all(np.isfinite(diagnostics[key]))
 
-    scalar_amp_grad = diagnostics["nfw_d_sum_d_concentration_amplitude"]
     np.testing.assert_allclose(
         np.sum(diagnostics["d_nfw_particle_counts_d_concentration_amplitude"]),
-        scalar_amp_grad,
+        diagnostics["sum_d_nfw_particle_counts_d_concentration_amplitude"],
         rtol=1.0e-5,
-        atol=1.0e-5 * max(1.0, abs(scalar_amp_grad)),
     )
     np.testing.assert_allclose(
         np.sum(diagnostics["d_nfw_particle_counts_d_concentration_mass_slope"]),
@@ -605,6 +564,79 @@ def test_nfw_map_concentration_derivatives_have_map_shape_and_match_scalar_gradi
         np.sum(diagnostics["d_nfw_particle_counts_d_concentration_redshift_slope"]),
         diagnostics["sum_d_nfw_particle_counts_d_concentration_redshift_slope"],
         rtol=1.0e-5,
+    )
+
+
+def test_concentration_map_derivative_sum_matches_internal_scalar_gradient():
+    module = _load_example_module()
+    catalog, mask, mass_map, metadata = _single_pixel_pipeline_case()
+    selected_catalog = module.selected_lightcone_catalog(catalog, mask)
+    concentration_mass_slope = -0.084
+    concentration_redshift_slope = -0.47
+    concentration_mass_pivot = 2.0e12
+    truncation_width_fraction = 0.05
+    particle_mass = 1.0e10
+    profile_params = module.NFWProfileParams(
+        truncation_width_fraction=truncation_width_fraction
+    )
+    rmax = module.nfw_stencil_rmax_mpc_h(
+        selected_catalog,
+        metadata,
+        module.ConcentrationParams(
+            amplitude=5.71,
+            mass_slope=concentration_mass_slope,
+            redshift_slope=concentration_redshift_slope,
+            mass_pivot=concentration_mass_pivot,
+        ),
+        profile_params,
+        taper_radius_factor=10.0,
+    )
+    stencil = module.build_lightcone_sparse_stencil_for_mass_map_local(
+        mass_map,
+        selected_catalog,
+        rmax,
+    )
+    pixel_area_sr = module.healpix_pixel_area_sr(mass_map.nside)
+
+    def scalar_sum(amplitude):
+        concentration_params = module.ConcentrationParams(
+            amplitude=amplitude,
+            mass_slope=concentration_mass_slope,
+            redshift_slope=concentration_redshift_slope,
+            mass_pivot=concentration_mass_pivot,
+        )
+        counts = module.paint_lightcone_particle_count_map_sparse(
+            stencil,
+            selected_catalog,
+            particle_mass_msun_h=particle_mass,
+            pixel_area_sr=pixel_area_sr,
+            cosmology=metadata.cosmology,
+            concentration_params=concentration_params,
+            profile_params=profile_params,
+        )
+        return jnp.sum(counts)
+
+    scalar_grad = jax.grad(scalar_sum)(
+        jnp.asarray(5.71, dtype=selected_catalog.mass.dtype)
+    )
+    diagnostics = module.nfw_concentration_map_derivatives(
+        stencil,
+        selected_catalog,
+        mass_map,
+        metadata,
+        particle_mass,
+        concentration_amplitude=5.71,
+        concentration_mass_slope=concentration_mass_slope,
+        concentration_redshift_slope=concentration_redshift_slope,
+        concentration_mass_pivot=concentration_mass_pivot,
+        truncation_width_fraction=truncation_width_fraction,
+    )
+
+    np.testing.assert_allclose(
+        diagnostics["sum_d_nfw_particle_counts_d_concentration_amplitude"],
+        np.asarray(scalar_grad),
+        rtol=1.0e-5,
+        atol=1.0e-5 * max(1.0, abs(float(scalar_grad))),
     )
 
 
@@ -624,43 +656,29 @@ def test_nfw_map_concentration_derivatives_are_sparse_only():
     metadata = SimpleNamespace(cosmology=Cosmology())
 
     with pytest.raises(ValueError, match="only supported for sparse"):
-        module.nfw_gradient_demo(
+        module.run_nfw_calibration_pipeline(
             catalog,
             np.array([True]),
             mass_map,
             metadata,
             particle_mass_msun_h=1.0e10,
             dense_demo=True,
-            map_derivatives="concentration",
+            compute_map_derivatives=True,
         )
 
 
 def test_nfw_map_concentration_derivative_profile_labels(capsys):
-    hp = pytest.importorskip("healpy")
     module = _load_example_module()
+    catalog, mask, mass_map, metadata = _single_pixel_pipeline_case()
 
-    halo_pixels = np.array([0], dtype=np.int64)
-    unit_vector = np.stack(hp.pix2vec(1, halo_pixels), axis=-1)
-    catalog = _catalog(
-        unit_vector=unit_vector,
-        mass=np.array([1.0e13]),
-        redshift=np.array([0.2]),
-        chi=np.array([1000.0]),
-    )
-    mass_map = _mass_map(
-        np.array([0], dtype=np.int64),
-        temperature=np.array([100.0]),
-        nside=1,
-    )
-    metadata = SimpleNamespace(cosmology=Cosmology())
-
-    module.nfw_gradient_demo(
+    module.run_nfw_calibration_pipeline(
         catalog,
-        np.array([True]),
+        mask,
         mass_map,
         metadata,
         particle_mass_msun_h=1.0e10,
-        map_derivatives="concentration",
+        pipeline_mode="derivatives-profile",
+        compute_map_derivatives=True,
         profile=True,
     )
 
@@ -669,45 +687,27 @@ def test_nfw_map_concentration_derivative_profile_labels(capsys):
     assert "NFW map concentration derivatives to numpy" in captured.out
 
 
-def test_nfw_paint_only_outputs_map_without_gradients():
-    hp = pytest.importorskip("healpy")
+def test_run_nfw_calibration_pipeline_paint_mode_outputs_map_without_derivatives():
     module = _load_example_module()
+    catalog, mask, mass_map, metadata = _single_pixel_pipeline_case()
 
-    halo_pixels = np.array([0], dtype=np.int64)
-    unit_vector = np.stack(hp.pix2vec(1, halo_pixels), axis=-1)
-    catalog = _catalog(
-        unit_vector=unit_vector,
-        mass=np.array([1.0e13]),
-        redshift=np.array([0.2]),
-        chi=np.array([1000.0]),
-    )
-    mass_map = _mass_map(
-        np.array([0], dtype=np.int64),
-        temperature=np.array([100.0]),
-        nside=1,
-    )
-    metadata = SimpleNamespace(cosmology=Cosmology())
-
-    diagnostics = module.nfw_gradient_demo(
+    diagnostics = module.run_nfw_calibration_pipeline(
         catalog,
-        np.array([True]),
+        mask,
         mass_map,
         metadata,
         particle_mass_msun_h=1.0e10,
+        pipeline_mode="paint",
         concentration_amplitude=5.71,
         truncation_width_fraction=0.05,
         chunk_size=1,
-        compute_gradients=False,
     )
 
+    assert diagnostics["pipeline_mode"] == "paint"
     assert diagnostics["nfw_paint_mode"] == "sparse"
-    assert diagnostics["nfw_derivatives_computed"] is False
-    assert diagnostics["nfw_operation_mode"] == "paint_only"
-    assert diagnostics["nfw_gradient_mode"] == "not_computed"
-    assert diagnostics["nfw_objective_mode"] == "not_computed"
+    assert diagnostics["nfw_map_derivatives"] == "none"
     assert diagnostics["nfw_particle_counts"].shape == (1,)
-    assert "nfw_d_sum_d_concentration_amplitude" not in diagnostics
-    assert "nfw_d_sum_d_truncation_width_fraction" not in diagnostics
+    assert "d_nfw_particle_counts_d_concentration_amplitude" not in diagnostics
     np.testing.assert_allclose(
         np.sum(diagnostics["nfw_particle_counts"]),
         diagnostics["nfw_sum_particle_counts"],
@@ -715,130 +715,81 @@ def test_nfw_paint_only_outputs_map_without_gradients():
     )
 
 
-def test_nfw_paint_only_rejects_sum_only_validation():
+def test_run_nfw_calibration_pipeline_profile_mode_prints_timing(capsys):
     module = _load_example_module()
-    catalog = _catalog(
-        unit_vector=np.array([[1.0, 0.0, 0.0]]),
-        mass=np.array([1.0e13]),
-        redshift=np.array([0.2]),
-        chi=np.array([1000.0]),
-    )
-    mass_map = _mass_map(
-        np.array([0], dtype=np.int64),
-        temperature=np.array([100.0]),
-        nside=1,
-    )
-    metadata = SimpleNamespace(cosmology=Cosmology())
+    catalog, mask, mass_map, metadata = _single_pixel_pipeline_case()
 
-    with pytest.raises(ValueError, match="requires --nfw-gradient-demo"):
-        module.nfw_gradient_demo(
+    with module.timed_stage(module.nfw_stage_label("profile"), True):
+        diagnostics = module.run_nfw_calibration_pipeline(
             catalog,
-            np.array([True]),
+            mask,
             mass_map,
             metadata,
             particle_mass_msun_h=1.0e10,
-            compute_gradients=False,
-            validate_sum_only=True,
+            pipeline_mode="profile",
+            concentration_amplitude=5.71,
+            truncation_width_fraction=0.05,
+            chunk_size=1,
+            profile=True,
         )
 
-
-def test_nfw_paint_only_profile_prints_map_labels_without_derivatives(capsys):
-    hp = pytest.importorskip("healpy")
-    module = _load_example_module()
-
-    halo_pixels = np.array([0], dtype=np.int64)
-    unit_vector = np.stack(hp.pix2vec(1, halo_pixels), axis=-1)
-    catalog = _catalog(
-        unit_vector=unit_vector,
-        mass=np.array([1.0e13]),
-        redshift=np.array([0.2]),
-        chi=np.array([1000.0]),
-    )
-    mass_map = _mass_map(
-        np.array([0], dtype=np.int64),
-        temperature=np.array([100.0]),
-        nside=1,
-    )
-    metadata = SimpleNamespace(cosmology=Cosmology())
-
-    module.nfw_gradient_demo(
-        catalog,
-        np.array([True]),
-        mass_map,
-        metadata,
-        particle_mass_msun_h=1.0e10,
-        concentration_amplitude=5.71,
-        truncation_width_fraction=0.05,
-        chunk_size=1,
-        compute_gradients=False,
-        profile=True,
-    )
-
     captured = capsys.readouterr()
+    assert diagnostics["pipeline_mode"] == "profile"
+    assert module.nfw_stage_label("profile") in captured.out
     assert "NFW particle map" in captured.out
     assert "NFW particle map to numpy" in captured.out
-    assert "NFW derivatives value_and_grad" not in captured.out
+    assert "NFW map concentration JVPs" not in captured.out
 
 
-def test_nfw_gradient_demo_profile_prints_derivative_and_map_labels(capsys):
-    hp = pytest.importorskip("healpy")
+def test_run_nfw_calibration_pipeline_derivatives_profile_mode_does_both(capsys):
     module = _load_example_module()
+    catalog, mask, mass_map, metadata = _single_pixel_pipeline_case()
 
-    halo_pixels = np.array([0], dtype=np.int64)
-    unit_vector = np.stack(hp.pix2vec(1, halo_pixels), axis=-1)
-    catalog = _catalog(
-        unit_vector=unit_vector,
-        mass=np.array([1.0e13]),
-        redshift=np.array([0.2]),
-        chi=np.array([1000.0]),
-    )
-    mass_map = _mass_map(
-        np.array([0], dtype=np.int64),
-        temperature=np.array([100.0]),
-        nside=1,
-    )
-    metadata = SimpleNamespace(cosmology=Cosmology())
-
-    module.nfw_gradient_demo(
-        catalog,
-        np.array([True]),
-        mass_map,
-        metadata,
-        particle_mass_msun_h=1.0e10,
-        concentration_amplitude=5.71,
-        truncation_width_fraction=0.05,
-        chunk_size=1,
-        profile=True,
-        profile_jax_repeat=True,
-    )
+    with module.timed_stage(module.nfw_stage_label("derivatives-profile"), True):
+        diagnostics = module.run_nfw_calibration_pipeline(
+            catalog,
+            mask,
+            mass_map,
+            metadata,
+            particle_mass_msun_h=1.0e10,
+            pipeline_mode="derivatives-profile",
+            concentration_amplitude=5.71,
+            truncation_width_fraction=0.05,
+            chunk_size=1,
+            compute_map_derivatives=True,
+            profile=True,
+        )
 
     captured = capsys.readouterr()
-    assert "NFW derivatives value_and_grad" in captured.out
-    assert "NFW derivatives cached value_and_grad" in captured.out
+    assert diagnostics["pipeline_mode"] == "derivatives-profile"
+    assert diagnostics["nfw_map_derivatives"] == "concentration"
+    assert module.nfw_stage_label("derivatives-profile") in captured.out
+    assert "NFW map concentration JVPs" in captured.out
     assert "NFW particle map" in captured.out
     assert "NFW particle map to numpy" in captured.out
 
 
-def test_nfw_stage_label_distinguishes_scalar_and_map_derivatives():
+def test_nfw_stage_label_uses_pipeline_mode():
     module = _load_example_module()
 
-    assert module.nfw_stage_label(False, "none") == "NFW paint only"
+    assert module.nfw_stage_label("paint") == "NFW calibration pipeline: paint"
     assert (
-        module.nfw_stage_label(False, "concentration")
-        == "NFW paint + map derivatives"
+        module.nfw_stage_label("derivatives")
+        == "NFW calibration pipeline: derivatives"
     )
-    assert module.nfw_stage_label(True, "none") == "NFW paint + scalar derivatives"
+    assert module.nfw_stage_label("profile") == "NFW calibration pipeline: profile"
     assert (
-        module.nfw_stage_label(True, "concentration")
-        == "NFW paint + scalar and map derivatives"
+        module.nfw_stage_label("derivatives-profile")
+        == "NFW calibration pipeline: derivatives-profile"
     )
 
 
-def test_print_nfw_summary_distinguishes_operation_modes(capsys):
+def test_print_nfw_calibration_summary_reports_map_derivatives(capsys):
     module = _load_example_module()
     common = {
+        "pipeline_mode": "paint",
         "nfw_paint_mode": "sparse",
-        "nfw_gradient_demo_n_halos": 1,
+        "nfw_selected_halo_count": 1,
         "nfw_compact_pixel_count": 1,
         "nfw_sparse_pair_count": 1,
         "nfw_dense_pair_count": 1,
@@ -846,27 +797,21 @@ def test_print_nfw_summary_distinguishes_operation_modes(capsys):
         "nfw_sum_particle_counts": 1.25,
     }
 
-    module.print_nfw_gradient_summary(
+    module.print_nfw_calibration_summary(
         {
             **common,
-            "nfw_derivatives_computed": False,
-            "nfw_operation_mode": "paint_only",
-            "nfw_gradient_mode": "not_computed",
-            "nfw_objective_mode": "not_computed",
+            "nfw_map_derivatives": "none",
         }
     )
     paint_only = capsys.readouterr().out
-    assert "NFW one-halo map:" in paint_only
-    assert "Operation mode: paint_only" in paint_only
-    assert "Scalar gradients: not computed" in paint_only
+    assert "NFW calibration map:" in paint_only
+    assert "Pipeline mode: paint" in paint_only
+    assert "Map derivatives: concentration" not in paint_only
 
-    module.print_nfw_gradient_summary(
+    module.print_nfw_calibration_summary(
         {
             **common,
-            "nfw_derivatives_computed": False,
-            "nfw_operation_mode": "paint_only",
-            "nfw_gradient_mode": "not_computed",
-            "nfw_objective_mode": "not_computed",
+            "pipeline_mode": "derivatives",
             "nfw_map_derivatives": "concentration",
             "sum_d_nfw_particle_counts_d_concentration_amplitude": 0.5,
             "sum_d_nfw_particle_counts_d_concentration_mass_slope": 1.5,
@@ -874,34 +819,12 @@ def test_print_nfw_summary_distinguishes_operation_modes(capsys):
         }
     )
     map_only = capsys.readouterr().out
-    assert "NFW one-halo map + derivatives:" in map_only
-    assert "Operation mode: paint_only" in map_only
-    assert "Scalar gradients: not computed" in map_only
+    assert "NFW calibration map + derivatives:" in map_only
+    assert "Pipeline mode: derivatives" in map_only
     assert "Map derivatives: concentration" in map_only
-
-    module.print_nfw_gradient_summary(
-        {
-            **common,
-            "nfw_derivatives_computed": True,
-            "nfw_operation_mode": "paint_plus_derivatives",
-            "nfw_gradient_mode": "sparse",
-            "nfw_objective_mode": "sum_only_sparse",
-            "nfw_d_sum_d_concentration_amplitude": 0.5,
-            "nfw_d_sum_d_truncation_width_fraction": -0.25,
-            "nfw_map_derivatives": "concentration",
-            "sum_d_nfw_particle_counts_d_concentration_amplitude": 0.5,
-            "sum_d_nfw_particle_counts_d_concentration_mass_slope": 1.5,
-            "sum_d_nfw_particle_counts_d_concentration_redshift_slope": -2.5,
-        }
-    )
-    with_derivatives = capsys.readouterr().out
-    assert "NFW one-halo map + derivatives:" in with_derivatives
-    assert "Operation mode: paint_plus_derivatives" in with_derivatives
-    assert "Objective mode: sum_only_sparse" in with_derivatives
-    assert "Map derivatives: concentration" in with_derivatives
-    assert "Sum d(map)/d concentration amplitude" in with_derivatives
-    assert "Sum d(map)/d concentration mass slope" in with_derivatives
-    assert "Sum d(map)/d concentration redshift slope" in with_derivatives
+    assert "Sum d(map)/d concentration amplitude" in map_only
+    assert "Sum d(map)/d concentration mass slope" in map_only
+    assert "Sum d(map)/d concentration redshift slope" in map_only
 
 
 def test_local_sparse_stencil_uses_compact_rows_not_global_pixels():
@@ -934,7 +857,7 @@ def test_local_sparse_stencil_uses_compact_rows_not_global_pixels():
     assert np.all(np.asarray(stencil.r_perp) <= 1.0)
 
 
-def test_nfw_gradient_demo_dense_reports_dense_map_sum_objective():
+def test_run_nfw_calibration_pipeline_dense_debug_path_paints_map():
     hp = pytest.importorskip("healpy")
     module = _load_example_module()
 
@@ -953,24 +876,24 @@ def test_nfw_gradient_demo_dense_reports_dense_map_sum_objective():
     )
     metadata = SimpleNamespace(cosmology=Cosmology())
 
-    diagnostics = module.nfw_gradient_demo(
+    diagnostics = module.run_nfw_calibration_pipeline(
         catalog,
         np.array([True]),
         mass_map,
         metadata,
         particle_mass_msun_h=1.0e10,
+        pipeline_mode="paint",
         concentration_amplitude=5.71,
         truncation_width_fraction=0.05,
         chunk_size=1,
         dense_demo=True,
     )
 
-    assert diagnostics["nfw_gradient_mode"] == "dense"
-    assert diagnostics["nfw_objective_mode"] == "dense_map_sum"
+    assert diagnostics["pipeline_mode"] == "paint"
+    assert diagnostics["nfw_paint_mode"] == "dense"
+    assert diagnostics["nfw_map_derivatives"] == "none"
     assert diagnostics["nfw_particle_counts"].shape == (1,)
     assert np.isfinite(diagnostics["nfw_sum_particle_counts"])
-    assert np.isfinite(diagnostics["nfw_d_sum_d_concentration_amplitude"])
-    assert np.isfinite(diagnostics["nfw_d_sum_d_truncation_width_fraction"])
     np.testing.assert_allclose(
         np.sum(diagnostics["nfw_particle_counts"]),
         diagnostics["nfw_sum_particle_counts"],
@@ -978,7 +901,7 @@ def test_nfw_gradient_demo_dense_reports_dense_map_sum_objective():
     )
 
 
-def test_nfw_gradient_demo_sparse_matches_dense_when_stencil_contains_all_pairs():
+def test_run_nfw_calibration_pipeline_sparse_matches_dense_when_stencil_contains_all_pairs():
     hp = pytest.importorskip("healpy")
     module = _load_example_module()
 
@@ -997,23 +920,25 @@ def test_nfw_gradient_demo_sparse_matches_dense_when_stencil_contains_all_pairs(
     )
     metadata = SimpleNamespace(cosmology=Cosmology())
 
-    sparse = module.nfw_gradient_demo(
+    sparse = module.run_nfw_calibration_pipeline(
         catalog,
         np.array([True, True]),
         mass_map,
         metadata,
         particle_mass_msun_h=1.0e10,
+        pipeline_mode="paint",
         concentration_amplitude=5.71,
         truncation_width_fraction=0.05,
         chunk_size=1,
         taper_radius_factor=1.0e6,
     )
-    dense = module.nfw_gradient_demo(
+    dense = module.run_nfw_calibration_pipeline(
         catalog,
         np.array([True, True]),
         mass_map,
         metadata,
         particle_mass_msun_h=1.0e10,
+        pipeline_mode="paint",
         concentration_amplitude=5.71,
         truncation_width_fraction=0.05,
         chunk_size=1,
@@ -1021,10 +946,8 @@ def test_nfw_gradient_demo_sparse_matches_dense_when_stencil_contains_all_pairs(
         dense_demo=True,
     )
 
-    assert sparse["nfw_gradient_mode"] == "sparse"
-    assert dense["nfw_gradient_mode"] == "dense"
-    assert sparse["nfw_objective_mode"] == "sum_only_sparse"
-    assert dense["nfw_objective_mode"] == "dense_map_sum"
+    assert sparse["nfw_paint_mode"] == "sparse"
+    assert dense["nfw_paint_mode"] == "dense"
     np.testing.assert_allclose(
         sparse["nfw_particle_counts"],
         dense["nfw_particle_counts"],
@@ -1036,19 +959,9 @@ def test_nfw_gradient_demo_sparse_matches_dense_when_stencil_contains_all_pairs(
         dense["nfw_sum_particle_counts"],
         rtol=1.0e-5,
     )
-    np.testing.assert_allclose(
-        sparse["nfw_d_sum_d_concentration_amplitude"],
-        dense["nfw_d_sum_d_concentration_amplitude"],
-        rtol=1.0e-5,
-    )
-    np.testing.assert_allclose(
-        sparse["nfw_d_sum_d_truncation_width_fraction"],
-        dense["nfw_d_sum_d_truncation_width_fraction"],
-        rtol=1.0e-5,
-    )
 
 
-def test_nfw_gradient_demo_sparse_uses_fewer_pairs_for_local_stencil():
+def test_run_nfw_calibration_pipeline_sparse_uses_fewer_pairs_for_local_stencil():
     hp = pytest.importorskip("healpy")
     module = _load_example_module()
 
@@ -1067,12 +980,13 @@ def test_nfw_gradient_demo_sparse_uses_fewer_pairs_for_local_stencil():
     )
     metadata = SimpleNamespace(cosmology=Cosmology())
 
-    diagnostics = module.nfw_gradient_demo(
+    diagnostics = module.run_nfw_calibration_pipeline(
         catalog,
         np.array([True]),
         mass_map,
         metadata,
         particle_mass_msun_h=1.0e10,
+        pipeline_mode="paint",
         concentration_amplitude=5.71,
         truncation_width_fraction=0.05,
         chunk_size=1,

@@ -201,6 +201,49 @@ tabulated_sparse_counts = paint_lightcone_particle_count_map_tabulated_sparse(
 mass per pixel divided by the PINOCCHIO particle mass. They do not include
 PINOCCHIO's two-halo map.
 
+## PINOCCHIO c-M calibration script
+
+`examples/paint_halo_particles_for_pinocchio_segment.py` runs a compact
+PINOCCHIO-to-NFW painting pipeline for calibrating a concentration--mass
+relation. It reads one PINOCCHIO mass-map segment and PLC halo catalogue,
+bins the resolved halo mass as a point-halo diagnostic, paints an NFW one-halo
+particle-count-equivalent map on the same compact HEALPix pixel domain, and can
+save map-level derivatives with respect to concentration amplitude, mass slope,
+and redshift slope.
+
+The script always saves `nfw_particle_counts` and uses one public execution
+mode flag:
+
+```bash
+python examples/paint_halo_particles_for_pinocchio_segment.py \
+  --params examples/pinocchio_geppetto_case/parameter_file \
+  --sheets examples/pinocchio_geppetto_case/pinocchio.example.sheets.out \
+  --mass-map examples/pinocchio_geppetto_case/pinocchio.example.massmap.seg001.fits \
+  --plc-catalog examples/pinocchio_geppetto_case/pinocchio.example.plc.out \
+  --sheet-index 1 \
+  --output examples/pinocchio_geppetto_case/halo_particles.seg001.paint.npz
+```
+
+Use derivative mode to also save the three derivative maps needed for a c-M
+calibration loop:
+
+```bash
+python examples/paint_halo_particles_for_pinocchio_segment.py \
+  --params examples/pinocchio_geppetto_case/parameter_file \
+  --sheets examples/pinocchio_geppetto_case/pinocchio.example.sheets.out \
+  --mass-map examples/pinocchio_geppetto_case/pinocchio.example.massmap.seg001.fits \
+  --plc-catalog examples/pinocchio_geppetto_case/pinocchio.example.plc.out \
+  --sheet-index 1 \
+  --output examples/pinocchio_geppetto_case/halo_particles.seg001.derivs.npz \
+  --mode derivatives
+```
+
+For timing output, use `--mode profile` or `--mode derivatives-profile`.
+Concentration calibration parameters are exposed as
+`--concentration-amplitude`, `--concentration-mass-slope`,
+`--concentration-redshift-slope`, and `--concentration-mass-pivot`; the pivot is
+fixed when computing derivative maps.
+
 ## Reading PINOCCHIO outputs
 
 PINOCCHIO readers live in `geppetto.io`, outside the differentiable core. They
