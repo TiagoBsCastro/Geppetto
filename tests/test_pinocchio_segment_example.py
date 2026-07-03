@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import importlib.util
 import subprocess
 import sys
@@ -113,6 +114,30 @@ def _sheets() -> PinocchioMassSheetTable:
     )
 
 
+def _workflow_args(**overrides) -> SimpleNamespace:
+    values = {
+        "mass_map": Path("pinocchio.example.massmap.seg000.fits"),
+        "sheet_index": 0,
+        "output": Path("painted.seg000.npz"),
+        "mass_map_glob": None,
+        "output_dir": None,
+        "output_fits": None,
+        "bounds": "z",
+        "last_segment_inclusive": False,
+        "mode": "paint",
+        "concentration_amplitude": 5.71,
+        "concentration_mass_slope": -0.084,
+        "concentration_redshift_slope": -0.47,
+        "concentration_mass_pivot": 2.0e12,
+        "truncation_width_fraction": 0.05,
+        "nfw_chunk_size": 1,
+        "nfw_taper_radius_factor": 10.0,
+        "nfw_dense_demo": False,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
 def test_example_script_help_runs():
     result = subprocess.run(
         [sys.executable, str(EXAMPLE_PATH), "--help"],
@@ -121,7 +146,10 @@ def test_example_script_help_runs():
         text=True,
     )
     assert "--mass-map" in result.stdout
+    assert "--mass-map-glob" in result.stdout
+    assert "--output-dir" in result.stdout
     assert "--sheet-index" in result.stdout
+    assert "--output-fits" in result.stdout
     assert "--mode" in result.stdout
     assert "--concentration-amplitude" in result.stdout
     assert "--concentration-mass-slope" in result.stdout
@@ -137,6 +165,88 @@ def test_example_script_help_runs():
     assert "--nfw-validate-sum-only" not in result.stdout
     assert "--nfw-chunk-size" not in result.stdout
     assert "--nfw-taper-radius-factor" not in result.stdout
+
+
+def test_parse_segment_index_from_mass_map_path():
+    module = _load_example_module()
+
+    assert module.parse_segment_index_from_mass_map_path(
+        Path("pinocchio.massmap.seg000.fits")
+    ) == 0
+    assert module.parse_segment_index_from_mass_map_path(
+        Path("pinocchio.massmap.seg012.fits")
+    ) == 12
+    with pytest.raises(ValueError, match="Cannot parse segment index"):
+        module.parse_segment_index_from_mass_map_path(Path("pinocchio.massmap.fits"))
+
+
+def test_discover_mass_map_segments_sorts_by_segment_index(tmp_path):
+    module = _load_example_module()
+    seg002 = tmp_path / "run.massmap.seg002.fits"
+    seg000 = tmp_path / "run.massmap.seg000.fits"
+    seg001 = tmp_path / "run.massmap.seg001.fits"
+    for path in (seg002, seg000, seg001):
+        path.touch()
+
+    discovered = module.discover_mass_map_segments(str(tmp_path / "*.fits"))
+
+    assert discovered == [(0, seg000), (1, seg001), (2, seg002)]
+
+
+def test_discover_mass_map_segments_rejects_duplicates_and_empty(tmp_path):
+    module = _load_example_module()
+    (tmp_path / "run.massmap.seg001.fits").touch()
+    (tmp_path / "other.massmap.seg001.fits").touch()
+
+    with pytest.raises(ValueError, match="Duplicate mass-map segment index"):
+        module.discover_mass_map_segments(str(tmp_path / "*.fits"))
+    with pytest.raises(ValueError, match="No mass-map segments match glob"):
+        module.discover_mass_map_segments(str(tmp_path / "missing*.fits"))
+
+
+def test_validate_segment_workflow_args_accepts_single_and_all_modes(tmp_path):
+    module = _load_example_module()
+
+    assert module.validate_segment_workflow_args(_workflow_args()) == "single"
+    assert (
+        module.validate_segment_workflow_args(
+            _workflow_args(
+                mass_map=None,
+                sheet_index=None,
+                output=None,
+                mass_map_glob=str(tmp_path / "*.fits"),
+                output_dir=tmp_path / "painted",
+            )
+        )
+        == "all"
+    )
+
+
+def test_validate_segment_workflow_args_rejects_mixed_and_incomplete(tmp_path):
+    module = _load_example_module()
+
+    with pytest.raises(ValueError, match="not both"):
+        module.validate_segment_workflow_args(
+            _workflow_args(
+                mass_map_glob=str(tmp_path / "*.fits"),
+                output_dir=tmp_path / "painted",
+            )
+        )
+    with pytest.raises(ValueError, match="Provide either"):
+        module.validate_segment_workflow_args(
+            _workflow_args(sheet_index=None)
+        )
+    with pytest.raises(ValueError, match="only supported in single-segment"):
+        module.validate_segment_workflow_args(
+            _workflow_args(
+                mass_map=None,
+                sheet_index=None,
+                output=None,
+                mass_map_glob=str(tmp_path / "*.fits"),
+                output_dir=tmp_path / "painted",
+                output_fits=tmp_path / "single.fits",
+            )
+        )
 
 
 def test_timed_stage_disabled_does_not_print(capsys):
@@ -400,6 +510,55 @@ def test_save_npz_can_include_nfw_calibration_diagnostics(tmp_path):
         assert float(data["nfw_concentration_redshift_slope"]) == -0.47
         assert float(data["nfw_concentration_mass_pivot"]) == 2.0e12
         assert float(data["nfw_truncation_width_fraction"]) == 0.05
+
+
+def test_run_calibration_for_segment_writes_npz_with_derivative_arrays(tmp_path, monkeypatch):
+    pytest.importorskip("healpy")
+    module = _load_example_module()
+    catalog, _, mass_map, _ = _single_pixel_pipeline_case()
+    metadata = SimpleNamespace(particle_mass_msun_h=1.0e10, cosmology=Cosmology())
+    output_npz = tmp_path / "painted_nfw.seg000.npz"
+    monkeypatch.setattr(
+        module,
+        "read_pinocchio_mass_map_fits",
+        lambda path: mass_map,
+    )
+
+    row = module.run_calibration_for_segment(
+        segment_index=0,
+        mass_map_path=tmp_path / "pinocchio.example.massmap.seg000.fits",
+        output_npz=output_npz,
+        output_fits=None,
+        catalog=catalog,
+        sheets=_sheets(),
+        metadata=metadata,
+        particle_mass=metadata.particle_mass_msun_h,
+        args=_workflow_args(mode="derivatives"),
+        profile=False,
+        compute_map_derivatives=True,
+        inclusive_upper=False,
+    )
+
+    assert row["segment_index"] == 0
+    assert row["inclusive_upper"] is False
+    assert row["output_npz"] == str(output_npz)
+    with np.load(output_npz) as data:
+        assert "halo_particle_counts" in data
+        assert "pinocchio_mass_map_values" in data
+        assert "nfw_particle_counts" in data
+        assert "pixel" in data
+        assert "sheet_index" in data
+        assert "nfw_sum_particle_counts" in data
+        assert "pipeline_mode" in data
+        assert str(data["pipeline_mode"]) == "derivatives"
+        assert data["nfw_particle_counts"].shape == data["halo_particle_counts"].shape
+        assert "d_nfw_particle_counts_d_concentration_amplitude" in data
+        assert "d_nfw_particle_counts_d_concentration_mass_slope" in data
+        assert "d_nfw_particle_counts_d_concentration_redshift_slope" in data
+        assert (
+            data["d_nfw_particle_counts_d_concentration_amplitude"].shape
+            == data["halo_particle_counts"].shape
+        )
 
 
 def test_nfw_sparse_total_particle_count_matches_sparse_map_sum():
@@ -827,6 +986,96 @@ def test_print_nfw_calibration_summary_reports_map_derivatives(capsys):
     assert "Sum d(map)/d concentration redshift slope" in map_only
 
 
+def test_run_segment_workflow_all_segments_names_outputs_and_sets_inclusive_bounds(
+    tmp_path,
+    monkeypatch,
+):
+    module = _load_example_module()
+    seg001 = tmp_path / "run.massmap.seg001.fits"
+    seg000 = tmp_path / "run.massmap.seg000.fits"
+    seg001.touch()
+    seg000.touch()
+    output_dir = tmp_path / "painted"
+    args = _workflow_args(
+        mass_map=None,
+        sheet_index=None,
+        output=None,
+        mass_map_glob=str(tmp_path / "*.fits"),
+        output_dir=output_dir,
+        mode="derivatives",
+    )
+    calls = []
+
+    def fake_segment_runner(**kwargs):
+        calls.append(kwargs)
+        return {
+            "segment_index": kwargs["segment_index"],
+            "mass_map_path": str(kwargs["mass_map_path"]),
+            "output_npz": str(kwargs["output_npz"]),
+            "output_fits": str(kwargs["output_fits"]),
+            "inclusive_upper": kwargs["inclusive_upper"],
+        }
+
+    manifest_calls = []
+    monkeypatch.setattr(module, "run_calibration_for_segment", fake_segment_runner)
+    monkeypatch.setattr(
+        module,
+        "write_manifest",
+        lambda path, rows: manifest_calls.append((path, rows)),
+    )
+
+    rows = module.run_segment_workflow(
+        args,
+        workflow="all",
+        catalog=_catalog(),
+        sheets=_sheets(),
+        metadata=SimpleNamespace(particle_mass_msun_h=1.0, cosmology=Cosmology()),
+        particle_mass=1.0,
+        profile=False,
+        compute_map_derivatives=True,
+    )
+
+    assert [call["segment_index"] for call in calls] == [0, 1]
+    assert [call["inclusive_upper"] for call in calls] == [False, True]
+    assert calls[0]["output_npz"] == output_dir / "painted_nfw.seg000.npz"
+    assert calls[0]["output_fits"] == output_dir / "painted_nfw.seg000.fits"
+    assert calls[1]["output_npz"] == output_dir / "painted_nfw.seg001.npz"
+    assert calls[1]["output_fits"] == output_dir / "painted_nfw.seg001.fits"
+    assert manifest_calls[0][0] == output_dir / "painted_nfw_manifest.csv"
+    assert rows == manifest_calls[0][1]
+
+
+def test_run_segment_workflow_single_segment_uses_last_segment_flag(monkeypatch):
+    module = _load_example_module()
+    args = _workflow_args(
+        output_fits=Path("painted.seg000.fits"),
+        last_segment_inclusive=True,
+    )
+    calls = []
+
+    def fake_segment_runner(**kwargs):
+        calls.append(kwargs)
+        return {"segment_index": kwargs["segment_index"]}
+
+    monkeypatch.setattr(module, "run_calibration_for_segment", fake_segment_runner)
+
+    rows = module.run_segment_workflow(
+        args,
+        workflow="single",
+        catalog=_catalog(),
+        sheets=_sheets(),
+        metadata=SimpleNamespace(particle_mass_msun_h=1.0, cosmology=Cosmology()),
+        particle_mass=1.0,
+        profile=False,
+        compute_map_derivatives=False,
+    )
+
+    assert rows == [{"segment_index": 0}]
+    assert calls[0]["inclusive_upper"] is True
+    assert calls[0]["output_npz"] == Path("painted.seg000.npz")
+    assert calls[0]["output_fits"] == Path("painted.seg000.fits")
+
+
 def test_local_sparse_stencil_uses_compact_rows_not_global_pixels():
     hp = pytest.importorskip("healpy")
     module = _load_example_module()
@@ -1032,3 +1281,118 @@ def test_write_output_fits_preserves_compact_pixel_table(tmp_path):
         assert table.header["ORDERING"] == "RING"
         assert table.header["MAPTYPE"] == "HALO_PARTICLE_COUNT"
         assert table.header["SHEETIDX"] == 0
+
+
+def test_write_nfw_painted_fits_preserves_compact_pixel_table(tmp_path):
+    fits = pytest.importorskip("astropy.io.fits")
+    module = _load_example_module()
+    mass_map = _mass_map(np.array([5, 0]), temperature=np.array([100.0, 200.0]))
+    bounds = {
+        "sheet_index": 1,
+        "z_lo": 0.1,
+        "z_hi": 0.2,
+        "a_lo": 1.0 / 1.2,
+        "a_hi": 1.0 / 1.1,
+        "chi_lo_mpc_h": 100.0,
+        "chi_hi_mpc_h": 200.0,
+    }
+    nfw_diagnostics = {
+        "particle_mass_msun_h": 5.0,
+        "nfw_concentration_amplitude": 5.71,
+        "nfw_concentration_mass_slope": -0.084,
+        "nfw_concentration_redshift_slope": -0.47,
+        "nfw_concentration_mass_pivot": 2.0e12,
+        "nfw_truncation_width_fraction": 0.05,
+    }
+    path = tmp_path / "painted_nfw.seg001.fits"
+
+    module.write_nfw_painted_fits(
+        path,
+        np.array([0.75, 0.5]),
+        mass_map,
+        bounds,
+        nfw_diagnostics,
+    )
+
+    with fits.open(path) as hdul:
+        table = hdul["HEALPIX"]
+        np.testing.assert_array_equal(table.data["PIXEL"], [5, 0])
+        np.testing.assert_allclose(table.data["TEMPERATURE"], [0.75, 0.5])
+        assert table.header["NSIDE"] == 1
+        assert table.header["ORDERING"] == "RING"
+        assert table.header["MAPTYPE"] == "NFW_PARTICLE_COUNT"
+        assert table.header["SHEETIDX"] == 1
+        assert np.isclose(table.header["CONCAMP"], 5.71)
+
+
+def test_write_nfw_painted_fits_rejects_shape_mismatch(tmp_path):
+    module = _load_example_module()
+    pytest.importorskip("astropy.io.fits")
+    mass_map = _mass_map(np.array([5, 0]), temperature=np.array([100.0, 200.0]))
+    bounds = {
+        "sheet_index": 1,
+        "z_lo": 0.1,
+        "z_hi": 0.2,
+        "a_lo": 1.0 / 1.2,
+        "a_hi": 1.0 / 1.1,
+        "chi_lo_mpc_h": 100.0,
+        "chi_hi_mpc_h": 200.0,
+    }
+    nfw_diagnostics = {
+        "particle_mass_msun_h": 5.0,
+        "nfw_concentration_amplitude": 5.71,
+        "nfw_concentration_mass_slope": -0.084,
+        "nfw_concentration_redshift_slope": -0.47,
+        "nfw_concentration_mass_pivot": 2.0e12,
+        "nfw_truncation_width_fraction": 0.05,
+    }
+
+    with pytest.raises(RuntimeError, match="NFW map shape"):
+        module.write_nfw_painted_fits(
+            tmp_path / "painted_nfw.seg001.fits",
+            np.array([0.75]),
+            mass_map,
+            bounds,
+            nfw_diagnostics,
+        )
+
+
+def test_write_manifest_includes_derivative_columns(tmp_path):
+    module = _load_example_module()
+    path = tmp_path / "painted_nfw_manifest.csv"
+
+    module.write_manifest(
+        path,
+        [
+            {
+                "segment_index": 0,
+                "mass_map_path": "massmap.seg000.fits",
+                "output_npz": "painted_nfw.seg000.npz",
+                "output_fits": "painted_nfw.seg000.fits",
+                "z_lo": 0.1,
+                "z_hi": 0.2,
+                "chi_lo_mpc_h": 100.0,
+                "chi_hi_mpc_h": 200.0,
+                "inclusive_upper": False,
+                "n_halos_in_segment": 2,
+                "n_halos_in_segment_and_pixels": 1,
+                "nfw_selected_halo_count": 2,
+                "nfw_compact_pixel_count": 12,
+                "nfw_sparse_pair_count": 5,
+                "nfw_sum_particle_counts": 1.25,
+                "nfw_map_derivatives": "concentration",
+                "sum_d_nfw_particle_counts_d_concentration_amplitude": 0.3,
+                "sum_d_nfw_particle_counts_d_concentration_mass_slope": 0.7,
+                "sum_d_nfw_particle_counts_d_concentration_redshift_slope": 1.1,
+            }
+        ],
+    )
+
+    with path.open(newline="") as handle:
+        rows = list(csv.DictReader(handle))
+
+    assert len(rows) == 1
+    assert rows[0]["segment_index"] == "0"
+    assert rows[0]["output_npz"] == "painted_nfw.seg000.npz"
+    assert rows[0]["nfw_map_derivatives"] == "concentration"
+    assert rows[0]["sum_d_nfw_particle_counts_d_concentration_amplitude"] == "0.3"

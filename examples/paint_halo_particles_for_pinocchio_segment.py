@@ -1,9 +1,10 @@
-"""Run a PINOCCHIO-to-NFW map calibration pipeline on one mass-map segment.
+"""Run a PINOCCHIO-to-NFW map calibration pipeline on mass-map segments.
 
 This diagnostic script reads a PINOCCHIO parameter file, mass-sheet table,
-on-the-fly HEALPix mass-map FITS file, and PLC halo catalogue. It always writes
-two compact maps with the same pixel domain and row ordering as the selected
-``*.massmap.segXXX.fits`` file:
+on-the-fly HEALPix mass-map FITS files, and a PLC halo catalogue. It can run on
+one selected segment or on all existing segments discovered from a glob. For
+each segment it writes two compact maps with the same pixel domain and row
+ordering as the corresponding ``*.massmap.segXXX.fits`` file:
 
     halo_particle_counts: point-halo resolved mass / particle mass
     nfw_particle_counts: projected NFW one-halo mass / particle mass
@@ -13,6 +14,8 @@ a theoretical prediction while preserving PINOCCHIO's segment bounds and
 compact pixel ordering. In derivative modes the script also saves map-level
 derivatives with respect to concentration amplitude, mass slope, and redshift
 slope. HEALPix stencil construction is fixed geometry and is not differentiated.
+In all-segments mode the output is one segment-local NPZ and one compact NFW
+FITS map per input segment; no global light-cone map is merged in this script.
 
 Coordinate-basis warning
 ------------------------
@@ -43,11 +46,24 @@ Paint only:
 Paint with map-level concentration derivatives:
 
   python examples/paint_halo_particles_for_pinocchio_segment.py ... --mode derivatives
+
+Paint all discovered mass-map segments:
+
+  python examples/paint_halo_particles_for_pinocchio_segment.py \\
+    --params path/to/parameter_file.params \\
+    --sheets path/to/pinocchio.RUN.sheets.out \\
+    --plc-catalog path/to/pinocchio.RUN.plc.out \\
+    --mass-map-glob "path/to/pinocchio.RUN.massmap.seg*.fits" \\
+    --output-dir path/to/painted_segments \\
+    --mode derivatives
 """
 
 from __future__ import annotations
 
 import argparse
+import csv
+import glob
+import re
 from contextlib import contextmanager
 from pathlib import Path
 from time import perf_counter
@@ -82,6 +98,7 @@ from geppetto.profiles import nfw_projected_surface_density, nfw_scale_radius_an
 # Kept as a module attribute for regression tests proving the default sparse
 # calibration path never calls the dense validation builder.
 _BRUTE_FORCE_STENCIL_BUILDER_REGRESSION_SENTINEL = build_lightcone_sparse_stencil_bruteforce
+_SEGMENT_RE = re.compile(r"seg(\d+)")
 
 
 @contextmanager
@@ -114,12 +131,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--mass-map",
         type=Path,
-        required=True,
         help="PINOCCHIO *.massmap.segXXX.fits file",
     )
     parser.add_argument("--plc-catalog", type=Path, required=True, help="PINOCCHIO PLC catalogue")
-    parser.add_argument("--sheet-index", type=int, required=True, help="Mass-sheet row index")
-    parser.add_argument("--output", type=Path, required=True, help="Output .npz file")
+    parser.add_argument("--sheet-index", type=int, help="Mass-sheet row index")
+    parser.add_argument("--output", type=Path, help="Output .npz file")
+    parser.add_argument(
+        "--mass-map-glob",
+        help="Glob matching PINOCCHIO *.massmap.segXXX.fits files for all-segments mode",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        help="Directory for all-segments painted NFW NPZ/FITS outputs and manifest",
+    )
     parser.add_argument(
         "--catalog-format",
         choices=("auto", "ascii", "binary"),
@@ -218,6 +243,77 @@ def parse_args() -> argparse.Namespace:
         help=argparse.SUPPRESS,
     )
     return parser.parse_args()
+
+
+def validate_segment_workflow_args(args: argparse.Namespace) -> str:
+    """Return ``single`` or ``all`` after validating segment workflow arguments."""
+
+    single_segment_args = (
+        args.mass_map is not None,
+        args.sheet_index is not None,
+        args.output is not None,
+    )
+    all_segment_args = (
+        args.mass_map_glob is not None,
+        args.output_dir is not None,
+    )
+
+    if any(single_segment_args) and any(all_segment_args):
+        raise ValueError(
+            "Use either single-segment inputs "
+            "(--mass-map, --sheet-index, --output) or all-segments inputs "
+            "(--mass-map-glob, --output-dir), not both."
+        )
+    if args.output_fits is not None and any(all_segment_args):
+        raise ValueError("--output-fits is only supported in single-segment mode")
+    if all(single_segment_args) and not any(all_segment_args):
+        return "single"
+    if all(all_segment_args) and not any(single_segment_args):
+        return "all"
+    raise ValueError(
+        "Provide either --mass-map, --sheet-index, --output "
+        "or --mass-map-glob, --output-dir."
+    )
+
+
+def parse_segment_index_from_mass_map_path(path: Path) -> int:
+    """Return segment index parsed from a PINOCCHIO mass-map segment filename."""
+
+    match = _SEGMENT_RE.search(path.name)
+    if match is None:
+        raise ValueError(f"Cannot parse segment index from mass-map filename: {path}")
+    return int(match.group(1))
+
+
+def discover_mass_map_segments(pattern: str) -> list[tuple[int, Path]]:
+    """Return sorted ``(segment_index, path)`` pairs matching a mass-map glob."""
+
+    paths = [Path(path) for path in glob.glob(pattern)]
+    if not paths:
+        raise ValueError(f"No mass-map segments match glob: {pattern}")
+
+    segments: list[tuple[int, Path]] = []
+    seen: dict[int, Path] = {}
+    for path in paths:
+        segment_index = parse_segment_index_from_mass_map_path(path)
+        if segment_index in seen:
+            raise ValueError(
+                "Duplicate mass-map segment index "
+                f"{segment_index}: {seen[segment_index]} and {path}"
+            )
+        seen[segment_index] = path
+        segments.append((segment_index, path))
+    return sorted(segments, key=lambda item: item[0])
+
+
+def segment_output_paths(output_dir: Path, segment_index: int) -> dict[str, Path]:
+    """Return all-segments output paths for one segment index."""
+
+    tag = f"seg{segment_index:03d}"
+    return {
+        "npz": output_dir / f"painted_nfw.{tag}.npz",
+        "fits": output_dir / f"painted_nfw.{tag}.fits",
+    }
 
 
 def load_lightcone_catalog(args: argparse.Namespace) -> LightconeHaloCatalog:
@@ -824,6 +920,7 @@ def run_nfw_calibration_pipeline(
 
     diagnostics: dict[str, bool | float | int | str | np.ndarray] = {
         "pipeline_mode": pipeline_mode,
+        "particle_mass_msun_h": float(particle_mass_msun_h),
         "nfw_particle_counts": nfw_particle_counts_np,
         "nfw_paint_mode": "dense" if dense_demo else "sparse",
         "nfw_selected_halo_count": int(selected_catalog.mass.shape[0]),
@@ -864,8 +961,14 @@ def diagnostics_for_map(
     }
 
 
+def _resolve_output_path(output: Path | argparse.Namespace) -> Path:
+    if isinstance(output, Path):
+        return output
+    return Path(output.output)
+
+
 def save_npz(
-    args: argparse.Namespace,
+    output: Path | argparse.Namespace,
     out: np.ndarray,
     mass_map: PinocchioMassMap,
     bounds: dict[str, float],
@@ -898,7 +1001,7 @@ def save_npz(
     if nfw_diagnostics is not None:
         payload.update(nfw_diagnostics)
 
-    np.savez(args.output, **payload)
+    np.savez(_resolve_output_path(output), **payload)
 
 
 def _pixel_column_format(pixels: np.ndarray) -> tuple[str, np.ndarray]:
@@ -975,6 +1078,124 @@ def write_output_fits(
     table.header["COMMENT"] = "TEMPERATURE is halo mass / PINOCCHIO particle mass."
     table.header["COMMENT"] = "This is not the original PINOCCHIO on-the-fly mass map."
     fits.HDUList([fits.PrimaryHDU(), table]).writeto(path, overwrite=True)
+
+
+def write_nfw_painted_fits(
+    path: Path,
+    nfw_particle_counts: np.ndarray,
+    mass_map: PinocchioMassMap,
+    bounds: dict[str, float],
+    nfw_diagnostics: dict[str, bool | float | int | str | np.ndarray],
+) -> None:
+    """Write a compact HEALPix FITS table for the painted NFW map."""
+
+    try:
+        from astropy.io import fits
+    except ImportError as exc:  # pragma: no cover - exercised only without io extra
+        raise RuntimeError("FITS output requires astropy; install geppetto[io]") from exc
+
+    pixels = np.asarray(mass_map.pixel, dtype=np.int64)
+    nfw_particle_counts = np.asarray(nfw_particle_counts, dtype=np.float64)
+    if nfw_particle_counts.shape != pixels.shape:
+        raise RuntimeError("NFW map shape does not match mass_map.pixel")
+
+    pixel_format, pixel_values = _pixel_column_format(pixels)
+    table = fits.BinTableHDU.from_columns(
+        [
+            fits.Column(name="PIXEL", format=pixel_format, array=pixel_values),
+            fits.Column(
+                name="TEMPERATURE",
+                format="1D",
+                array=nfw_particle_counts.astype(np.float64),
+            ),
+        ],
+        name="HEALPIX",
+    )
+
+    reserved_keys = {
+        "XTENSION",
+        "BITPIX",
+        "NAXIS",
+        "NAXIS1",
+        "NAXIS2",
+        "PCOUNT",
+        "GCOUNT",
+        "TFIELDS",
+        "EXTNAME",
+        "CHECKSUM",
+        "DATASUM",
+    }
+    reserved_prefixes = ("TTYPE", "TFORM", "TUNIT", "TDIM", "TSCAL", "TZERO", "TNULL", "TDISP")
+    for key, value in mass_map.header.items():
+        key = str(key).upper()
+        if key in reserved_keys or any(key.startswith(prefix) for prefix in reserved_prefixes):
+            continue
+        try:
+            table.header[key] = value
+        except (TypeError, ValueError):
+            continue
+
+    table.header["PIXTYPE"] = "HEALPIX"
+    table.header["ORDERING"] = mass_map.ordering
+    table.header["NSIDE"] = int(mass_map.nside)
+    table.header["INDXSCHM"] = mass_map.index_scheme or "EXPLICIT"
+    table.header["SHEETIDX"] = int(bounds["sheet_index"])
+    table.header["ZLO"] = float(bounds["z_lo"])
+    table.header["ZHI"] = float(bounds["z_hi"])
+    table.header["ALO"] = float(bounds["a_lo"])
+    table.header["AHI"] = float(bounds["a_hi"])
+    table.header["CHILO"] = float(bounds["chi_lo_mpc_h"])
+    table.header["CHIHI"] = float(bounds["chi_hi_mpc_h"])
+    table.header["PMASS"] = float(nfw_diagnostics["particle_mass_msun_h"])
+    table.header["MAPTYPE"] = "NFW_PARTICLE_COUNT"
+    table.header["CONCAMP"] = float(nfw_diagnostics["nfw_concentration_amplitude"])
+    table.header["CONCMSLP"] = float(nfw_diagnostics["nfw_concentration_mass_slope"])
+    table.header["CONCZSLP"] = float(nfw_diagnostics["nfw_concentration_redshift_slope"])
+    table.header["CONCPIV"] = float(nfw_diagnostics["nfw_concentration_mass_pivot"])
+    table.header["TRUNCW"] = float(nfw_diagnostics["nfw_truncation_width_fraction"])
+    table.header["COMMENT"] = "TEMPERATURE contains painted NFW particle-count-equivalent values."
+    table.header["COMMENT"] = (
+        "Compact pixel domain matches the corresponding PINOCCHIO mass-map segment."
+    )
+    fits.HDUList([fits.PrimaryHDU(), table]).writeto(path, overwrite=True)
+
+
+def write_manifest(path: Path, rows: list[dict[str, object]]) -> None:
+    """Write an all-segments CSV manifest."""
+
+    base_columns = [
+        "segment_index",
+        "mass_map_path",
+        "output_npz",
+        "output_fits",
+        "z_lo",
+        "z_hi",
+        "chi_lo_mpc_h",
+        "chi_hi_mpc_h",
+        "inclusive_upper",
+        "n_halos_in_segment",
+        "n_halos_in_segment_and_pixels",
+        "nfw_selected_halo_count",
+        "nfw_compact_pixel_count",
+        "nfw_sparse_pair_count",
+        "nfw_sum_particle_counts",
+        "nfw_map_derivatives",
+    ]
+    derivative_columns = [
+        "sum_d_nfw_particle_counts_d_concentration_amplitude",
+        "sum_d_nfw_particle_counts_d_concentration_mass_slope",
+        "sum_d_nfw_particle_counts_d_concentration_redshift_slope",
+    ]
+    columns = list(base_columns)
+    if any(any(column in row for column in derivative_columns) for row in rows):
+        columns.extend(derivative_columns)
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=columns)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({column: row.get(column, "") for column in columns})
 
 
 def _range_text(lo: float, hi: float, inclusive_upper: bool) -> str:
@@ -1057,46 +1278,40 @@ def print_nfw_calibration_summary(
         )
 
 
-def main() -> None:
-    """Run the command-line calibration workflow."""
+def run_calibration_for_segment(
+    *,
+    segment_index: int,
+    mass_map_path: Path,
+    output_npz: Path,
+    output_fits: Path | None,
+    catalog: LightconeHaloCatalog,
+    sheets: Any,
+    metadata: PinocchioRunMetadata,
+    particle_mass: float,
+    args: argparse.Namespace,
+    profile: bool,
+    compute_map_derivatives: bool,
+    inclusive_upper: bool,
+) -> dict[str, object]:
+    """Run the complete NFW calibration pipeline for one mass-map segment."""
 
-    args = parse_args()
-    profile = args.mode in ("profile", "derivatives-profile")
-    compute_map_derivatives = args.mode in ("derivatives", "derivatives-profile")
-
-    with timed_stage("read parameter file", profile):
-        metadata = read_pinocchio_parameter_file(args.params)
-    particle_mass = float(metadata.particle_mass_msun_h)
-    if particle_mass <= 0.0:
-        raise ValueError("particle_mass_msun_h must be positive")
-    if args.concentration_amplitude <= 0.0:
-        raise ValueError("--concentration-amplitude must be positive")
-    if args.concentration_mass_pivot <= 0.0:
-        raise ValueError("--concentration-mass-pivot must be positive")
-    if args.truncation_width_fraction <= 0.0:
-        raise ValueError("--truncation-width-fraction must be positive")
-
-    with timed_stage("read sheets", profile):
-        sheets = read_pinocchio_mass_sheets(args.sheets)
+    print(f"Processing segment {segment_index}: {mass_map_path}")
     with timed_stage("segment bounds", profile):
-        bounds = segment_bounds(sheets, args.sheet_index)
+        bounds = segment_bounds(sheets, segment_index)
 
     with timed_stage("read mass map", profile):
-        mass_map = read_pinocchio_mass_map_fits(args.mass_map)
+        mass_map = read_pinocchio_mass_map_fits(mass_map_path)
         validate_mass_map(mass_map)
 
-    with timed_stage("load PLC catalogue", profile):
-        catalog = load_lightcone_catalog(args)
-        validate_catalog_for_binning(catalog)
     with timed_stage("select segment mask", profile):
         mask = select_segment_mask(
             catalog,
             bounds,
             mode=args.bounds,
-            inclusive_upper=args.last_segment_inclusive,
+            inclusive_upper=inclusive_upper,
         )
 
-    print_segment_summary(bounds, args.last_segment_inclusive)
+    print_segment_summary(bounds, inclusive_upper)
     with timed_stage("point-halo rows", profile):
         rows, inside_pixel_domain = halo_rows_in_mass_map(catalog, mask, mass_map)
     with timed_stage("point-halo accumulation", profile):
@@ -1144,16 +1359,150 @@ def main() -> None:
         )
 
     with timed_stage("save NPZ", profile):
-        save_npz(args, out, mass_map, bounds, metadata, diagnostics, nfw_diagnostics)
-    if args.output_fits is not None:
-        with timed_stage("write FITS", profile):
-            write_output_fits(args.output_fits, out, mass_map, bounds, diagnostics)
+        save_npz(output_npz, out, mass_map, bounds, metadata, diagnostics, nfw_diagnostics)
+    if output_fits is not None:
+        with timed_stage("write NFW FITS", profile):
+            write_nfw_painted_fits(
+                output_fits,
+                np.asarray(nfw_diagnostics["nfw_particle_counts"]),
+                mass_map,
+                bounds,
+                nfw_diagnostics,
+            )
 
     print_output_summary(diagnostics, out, mass_map)
     print_nfw_calibration_summary(nfw_diagnostics)
-    print(f"Wrote NPZ: {args.output}")
-    if args.output_fits is not None:
-        print(f"Wrote FITS: {args.output_fits}")
+    print(f"Wrote NPZ: {output_npz}")
+    if output_fits is not None:
+        print(f"Wrote NFW FITS: {output_fits}")
+
+    row: dict[str, object] = {
+        "segment_index": int(segment_index),
+        "mass_map_path": str(mass_map_path),
+        "output_npz": str(output_npz),
+        "output_fits": "" if output_fits is None else str(output_fits),
+        "z_lo": float(bounds["z_lo"]),
+        "z_hi": float(bounds["z_hi"]),
+        "chi_lo_mpc_h": float(bounds["chi_lo_mpc_h"]),
+        "chi_hi_mpc_h": float(bounds["chi_hi_mpc_h"]),
+        "inclusive_upper": bool(inclusive_upper),
+        "n_halos_in_segment": int(diagnostics["n_halos_in_segment"]),
+        "n_halos_in_segment_and_pixels": int(diagnostics["n_halos_in_segment_and_pixels"]),
+        "nfw_selected_halo_count": int(nfw_diagnostics["nfw_selected_halo_count"]),
+        "nfw_compact_pixel_count": int(nfw_diagnostics["nfw_compact_pixel_count"]),
+        "nfw_sparse_pair_count": int(nfw_diagnostics["nfw_sparse_pair_count"]),
+        "nfw_sum_particle_counts": float(nfw_diagnostics["nfw_sum_particle_counts"]),
+        "nfw_map_derivatives": str(nfw_diagnostics["nfw_map_derivatives"]),
+    }
+    for key in (
+        "sum_d_nfw_particle_counts_d_concentration_amplitude",
+        "sum_d_nfw_particle_counts_d_concentration_mass_slope",
+        "sum_d_nfw_particle_counts_d_concentration_redshift_slope",
+    ):
+        if key in nfw_diagnostics:
+            row[key] = float(nfw_diagnostics[key])
+    return row
+
+
+def run_segment_workflow(
+    args: argparse.Namespace,
+    *,
+    workflow: str,
+    catalog: LightconeHaloCatalog,
+    sheets: Any,
+    metadata: PinocchioRunMetadata,
+    particle_mass: float,
+    profile: bool,
+    compute_map_derivatives: bool,
+) -> list[dict[str, object]]:
+    """Run either the single-segment or all-segments workflow."""
+
+    if workflow == "single":
+        segments = [(int(args.sheet_index), Path(args.mass_map))]
+        output_specs = [(Path(args.output), args.output_fits)]
+        inclusive_values = [bool(args.last_segment_inclusive)]
+    elif workflow == "all":
+        segments = discover_mass_map_segments(str(args.mass_map_glob))
+        output_dir = Path(args.output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        last_segment_index = max(segment_index for segment_index, _ in segments)
+        output_specs = []
+        inclusive_values = []
+        for segment_index, _ in segments:
+            paths = segment_output_paths(output_dir, segment_index)
+            output_specs.append((paths["npz"], paths["fits"]))
+            inclusive_values.append(segment_index == last_segment_index)
+    else:
+        raise ValueError("workflow must be 'single' or 'all'")
+
+    manifest_rows = []
+    for (segment_index, mass_map_path), (output_npz, output_fits), inclusive_upper in zip(
+        segments,
+        output_specs,
+        inclusive_values,
+        strict=True,
+    ):
+        manifest_rows.append(
+            run_calibration_for_segment(
+                segment_index=segment_index,
+                mass_map_path=mass_map_path,
+                output_npz=output_npz,
+                output_fits=output_fits,
+                catalog=catalog,
+                sheets=sheets,
+                metadata=metadata,
+                particle_mass=particle_mass,
+                args=args,
+                profile=profile,
+                compute_map_derivatives=compute_map_derivatives,
+                inclusive_upper=inclusive_upper,
+            )
+        )
+
+    if workflow == "all":
+        manifest_path = Path(args.output_dir) / "painted_nfw_manifest.csv"
+        with timed_stage("write manifest", profile):
+            write_manifest(manifest_path, manifest_rows)
+        print(f"Wrote manifest: {manifest_path}")
+    return manifest_rows
+
+
+def main() -> None:
+    """Run the command-line calibration workflow."""
+
+    args = parse_args()
+    workflow = validate_segment_workflow_args(args)
+    profile = args.mode in ("profile", "derivatives-profile")
+    compute_map_derivatives = args.mode in ("derivatives", "derivatives-profile")
+
+    with timed_stage("read parameter file", profile):
+        metadata = read_pinocchio_parameter_file(args.params)
+    particle_mass = float(metadata.particle_mass_msun_h)
+    if particle_mass <= 0.0:
+        raise ValueError("particle_mass_msun_h must be positive")
+    if args.concentration_amplitude <= 0.0:
+        raise ValueError("--concentration-amplitude must be positive")
+    if args.concentration_mass_pivot <= 0.0:
+        raise ValueError("--concentration-mass-pivot must be positive")
+    if args.truncation_width_fraction <= 0.0:
+        raise ValueError("--truncation-width-fraction must be positive")
+
+    with timed_stage("read sheets", profile):
+        sheets = read_pinocchio_mass_sheets(args.sheets)
+    with timed_stage("load PLC catalogue", profile):
+        catalog = load_lightcone_catalog(args)
+        validate_catalog_for_binning(catalog)
+
+    run_segment_workflow(
+        args,
+        workflow=workflow,
+        catalog=catalog,
+        sheets=sheets,
+        metadata=metadata,
+        particle_mass=particle_mass,
+        profile=profile,
+        compute_map_derivatives=compute_map_derivatives,
+    )
 
 
 if __name__ == "__main__":

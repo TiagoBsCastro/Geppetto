@@ -205,11 +205,14 @@ PINOCCHIO's two-halo map.
 
 `examples/paint_halo_particles_for_pinocchio_segment.py` runs a compact
 PINOCCHIO-to-NFW painting pipeline for calibrating a concentration--mass
-relation. It reads one PINOCCHIO mass-map segment and PLC halo catalogue,
-bins the resolved halo mass as a point-halo diagnostic, paints an NFW one-halo
+relation. It can run on a single PINOCCHIO mass-map segment or on all existing
+segments discovered from a glob. For each segment, it bins the resolved halo
+mass as a point-halo diagnostic, paints an NFW one-halo
 particle-count-equivalent map on the same compact HEALPix pixel domain, and can
 save map-level derivatives with respect to concentration amplitude, mass slope,
-and redshift slope.
+and redshift slope. Segment-local compatibility is preserved: the compact
+`PIXEL` list, row ordering, `NSIDE`, `ORDERING`, and segment bounds match the
+corresponding PINOCCHIO on-the-fly mass-map segment.
 
 The script always saves `nfw_particle_counts` and uses one public execution
 mode flag:
@@ -235,6 +238,20 @@ python examples/paint_halo_particles_for_pinocchio_segment.py \
   --plc-catalog examples/pinocchio_geppetto_case/pinocchio.example.plc.out \
   --sheet-index 1 \
   --output examples/pinocchio_geppetto_case/halo_particles.seg001.derivs.npz \
+  --mode derivatives
+```
+
+To paint all discovered mass-map segments, provide a glob and an output
+directory. This writes one `painted_nfw.segXXX.npz`, one compact
+`painted_nfw.segXXX.fits`, and a `painted_nfw_manifest.csv` summary:
+
+```bash
+python examples/paint_halo_particles_for_pinocchio_segment.py \
+  --params examples/pinocchio_geppetto_case/parameter_file \
+  --sheets examples/pinocchio_geppetto_case/pinocchio.example.sheets.out \
+  --plc-catalog examples/pinocchio_geppetto_case/pinocchio.example.plc.out \
+  --mass-map-glob "examples/pinocchio_geppetto_case/pinocchio.example.massmap.seg*.fits" \
+  --output-dir examples/pinocchio_geppetto_case/painted_nfw \
   --mode derivatives
 ```
 
