@@ -14,7 +14,11 @@ import pytest
 
 from geppetto.catalog import LightconeHaloCatalog, LightconeSparseStencil
 from geppetto.cosmology import Cosmology
-from geppetto.io import PinocchioMassMap, PinocchioMassSheetTable
+from geppetto.io import (
+    PinocchioMassMap,
+    PinocchioMassSheetTable,
+    pinocchio_plc_angle_unit_vectors,
+)
 
 EXAMPLE_PATH = (
     Path(__file__).resolve().parents[1]
@@ -389,6 +393,39 @@ def test_halo_particle_count_map_uses_compact_pixel_order_and_ignores_outside_pi
     np.testing.assert_array_equal(inside, [True, True, False])
     np.testing.assert_allclose(out, [4.0, 2.0])
     assert out.shape == mass_map.temperature.shape
+
+
+def test_pinocchio_plc_angles_bin_to_mass_map_internal_basis():
+    module = _load_example_module()
+
+    unit_vector = pinocchio_plc_angle_unit_vectors(
+        np.array([90.0]),
+        np.array([0.0]),
+    )
+    catalog = _catalog(
+        unit_vector=unit_vector,
+        mass=np.array([10.0]),
+        redshift=np.array([0.2]),
+        chi=np.array([100.0]),
+    )
+    mass_map = _mass_map(
+        np.array([5, 0], dtype=np.int64),
+        temperature=np.array([100.0, 200.0]),
+        nside=1,
+    )
+    mask = np.array([True])
+
+    rows, inside = module.halo_rows_in_mass_map(catalog, mask, mass_map)
+    stencil = module.build_lightcone_sparse_stencil_for_mass_map_local(
+        mass_map,
+        catalog,
+        rmax_mpc_h=np.array([100.0]),
+    )
+
+    np.testing.assert_array_equal(rows, [1])
+    np.testing.assert_array_equal(inside, [True])
+    np.testing.assert_array_equal(np.asarray(stencil.pix_id), [1])
+    np.testing.assert_array_equal(np.asarray(stencil.halo_id), [0])
 
 
 def test_save_npz_preserves_pixel_array_and_diagnostics(tmp_path):

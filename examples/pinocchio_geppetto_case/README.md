@@ -47,6 +47,10 @@ This is a count-equivalent one-halo mass collector. It is not the PINOCCHIO
 two-halo/count map itself; it is the layer intended to be added after the map
 normalization convention is fixed for a production workflow.
 
+PLC halo directions are read from PINOCCHIO's `theta, phi` columns in the same
+internal PLC angular basis used by the mass-map FITS pixels. The full PLC
+Cartesian positions are still used to derive comoving radial distance.
+
 ## Provenance
 
 The PINOCCHIO files come from a local rerun of the PINOCCHIO example using

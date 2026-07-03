@@ -9,6 +9,7 @@ from geppetto.io import (
     PinocchioCatalogError,
     healpix_pixel_area_sr,
     healpix_pixel_unit_vectors,
+    pinocchio_plc_angle_unit_vectors,
     read_pinocchio_binary_lightcone_catalog,
     read_pinocchio_binary_lightcone_light_catalog,
     read_pinocchio_binary_snapshot_catalog,
@@ -24,6 +25,28 @@ from geppetto.io import (
     validate_tabulated_projected_profile_params,
 )
 from geppetto.profiles import TabulatedProjectedProfileParams
+
+
+@pytest.mark.parametrize(
+    ("theta_deg", "phi_deg", "expected"),
+    [
+        (0.0, 0.0, [1.0, 0.0, 0.0]),
+        (0.0, 90.0, [0.0, 1.0, 0.0]),
+        (90.0, 0.0, [0.0, 0.0, 1.0]),
+        (-90.0, 0.0, [0.0, 0.0, -1.0]),
+    ],
+)
+def test_pinocchio_plc_angle_unit_vectors_use_latitude_convention(
+    theta_deg,
+    phi_deg,
+    expected,
+):
+    vectors = pinocchio_plc_angle_unit_vectors(
+        np.array([theta_deg]),
+        np.array([phi_deg]),
+    )
+
+    np.testing.assert_allclose(vectors[0], expected, atol=1.0e-12)
 
 
 def test_validate_tabulated_projected_profile_params_accepts_valid_params():
@@ -261,13 +284,13 @@ def test_read_pinocchio_binary_snapshot_catalog_split_files(tmp_path):
     np.testing.assert_allclose(catalog.final_positions_mpc_h[:, 0], [1.0, 2.0])
 
 
-def test_read_pinocchio_lightcone_catalog_uses_positions_for_unit_vectors(tmp_path):
+def test_read_pinocchio_lightcone_catalog_uses_plc_angles_for_unit_vectors(tmp_path):
     path = tmp_path / "pinocchio.demo.plc.out"
     path.write_text(
         "\n".join(
             [
                 "# Group catalog on the Past Light Cone",
-                "11 0.10 3 4 0 10 20 30 1.0e13 53.13 90.0 100 0.101",
+                "11 0.10 3 4 0 10 20 30 1.0e13 0.0 90.0 100 0.101",
                 "12 0.20 0 0 5 -1 -2 -3 2.0e13 90.00 0.0 -50 0.199",
             ]
         ),
@@ -279,20 +302,25 @@ def test_read_pinocchio_lightcone_catalog_uses_positions_for_unit_vectors(tmp_pa
     assert len(catalog) == 2
     assert catalog.group_ids.tolist() == [11, 12]
     np.testing.assert_allclose(catalog.chi_mpc_h, [5.0, 5.0])
-    np.testing.assert_allclose(catalog.unit_vectors[0], [0.6, 0.8, 0.0])
+    np.testing.assert_allclose(catalog.unit_vectors[0], [0.0, 1.0, 0.0], atol=1.0e-12)
+    np.testing.assert_allclose(catalog.cartesian_unit_vectors[0], [0.6, 0.8, 0.0])
 
     lightcone = catalog.to_lightcone_catalog()
     observed = catalog.to_lightcone_catalog(redshift="observed")
 
     assert isinstance(lightcone, LightconeHaloCatalog)
-    np.testing.assert_allclose(np.asarray(lightcone.unit_vector[1]), [0.0, 0.0, 1.0])
+    np.testing.assert_allclose(
+        np.asarray(lightcone.unit_vector[1]),
+        [0.0, 0.0, 1.0],
+        atol=1.0e-12,
+    )
     np.testing.assert_allclose(np.asarray(lightcone.redshift), [0.10, 0.20])
     np.testing.assert_allclose(np.asarray(observed.redshift), [0.101, 0.199])
 
 
 def test_lightcone_reader_rejects_unknown_redshift_mode(tmp_path):
     path = tmp_path / "pinocchio.demo.plc.out"
-    path.write_text("11 0.10 3 4 0 10 20 30 1.0e13 53.13 90.0 100 0.101\n")
+    path.write_text("11 0.10 3 4 0 10 20 30 1.0e13 0.0 90.0 100 0.101\n")
 
     catalog = read_pinocchio_lightcone_catalog(path)
 
@@ -323,7 +351,7 @@ def test_read_pinocchio_binary_lightcone_catalog_and_auto_detect(tmp_path):
                 [3.0, 4.0, 0.0],
                 [10.0, 20.0, 30.0],
                 1.0e13,
-                53.13,
+                0.0,
                 90.0,
                 100.0,
                 0.101,
@@ -350,7 +378,8 @@ def test_read_pinocchio_binary_lightcone_catalog_and_auto_detect(tmp_path):
     assert len(catalog) == 2
     assert explicit.group_ids.tolist() == [11, 12]
     np.testing.assert_allclose(catalog.chi_mpc_h, [5.0, 5.0])
-    np.testing.assert_allclose(catalog.unit_vectors[0], [0.6, 0.8, 0.0])
+    np.testing.assert_allclose(catalog.unit_vectors[0], [0.0, 1.0, 0.0], atol=1.0e-12)
+    np.testing.assert_allclose(catalog.cartesian_unit_vectors[0], [0.6, 0.8, 0.0])
     np.testing.assert_allclose(catalog.observed_redshift, [0.101, 0.199], rtol=1.0e-6)
 
 
@@ -368,8 +397,8 @@ def test_read_pinocchio_lightcone_light_ascii_and_convert(tmp_path):
         "\n".join(
             [
                 "# Light PLC catalog",
-                "11 0.10 1.0e13 90.0 0.0 0.101",
-                "12 0.20 2.0e13 90.0 90.0 0.199",
+                "11 0.10 1.0e13 0.0 0.0 0.101",
+                "12 0.20 2.0e13 0.0 90.0 0.199",
             ]
         ),
         encoding="utf-8",
@@ -415,8 +444,8 @@ def test_read_pinocchio_binary_lightcone_light_catalog_and_auto_detect(tmp_path)
     )
     data = np.array(
         [
-            (11, 0.10, 1.0e13, 90.0, 0.0, 0.101, 0.0),
-            (12, 0.20, 2.0e13, 90.0, 90.0, 0.199, 0.0),
+            (11, 0.10, 1.0e13, 0.0, 0.0, 0.101, 0.0),
+            (12, 0.20, 2.0e13, 0.0, 90.0, 0.199, 0.0),
         ],
         dtype=dtype,
     )
@@ -428,7 +457,7 @@ def test_read_pinocchio_binary_lightcone_light_catalog_and_auto_detect(tmp_path)
     assert len(catalog) == 2
     assert explicit.group_ids.tolist() == [11, 12]
     np.testing.assert_allclose(catalog.true_redshift, [0.10, 0.20], rtol=1.0e-6)
-    np.testing.assert_allclose(catalog.theta_deg, [90.0, 90.0])
+    np.testing.assert_allclose(catalog.theta_deg, [0.0, 0.0])
     np.testing.assert_allclose(catalog.phi_deg, [0.0, 90.0])
     np.testing.assert_allclose(catalog.observed_redshift, [0.101, 0.199], rtol=1.0e-6)
 

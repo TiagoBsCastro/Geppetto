@@ -39,6 +39,33 @@ LightconeRedshiftMode = Literal["true", "observed"]
 _C_LIGHT_KM_S = 299_792.458
 
 
+def pinocchio_plc_angle_unit_vectors(theta_deg: np.ndarray, phi_deg: np.ndarray) -> np.ndarray:
+    """Return unit vectors from PINOCCHIO PLC angular columns.
+
+    PINOCCHIO PLC ``theta`` is latitude-like in degrees, measured from the PLC
+    equator toward the PLC axis. It is not the HEALPix colatitude. ``phi`` is
+    the longitude in the same internal PLC basis used by PINOCCHIO mass-map
+    HEALPix pixels.
+    """
+
+    theta = np.deg2rad(np.asarray(theta_deg, dtype=np.float64))
+    phi = np.deg2rad(np.asarray(phi_deg, dtype=np.float64))
+    if theta.shape != phi.shape:
+        raise PinocchioCatalogError("theta_deg and phi_deg must have matching shapes")
+    if not np.all(np.isfinite(theta)) or not np.all(np.isfinite(phi)):
+        raise PinocchioCatalogError("PINOCCHIO PLC angles must be finite")
+
+    cos_theta = np.cos(theta)
+    return np.stack(
+        [
+            cos_theta * np.cos(phi),
+            cos_theta * np.sin(phi),
+            np.sin(theta),
+        ],
+        axis=-1,
+    )
+
+
 @dataclass(frozen=True)
 class PinocchioSnapshotCatalog:
     """Raw PINOCCHIO snapshot halo catalogue.
@@ -114,9 +141,9 @@ class PinocchioLightconeCatalog:
     """Raw PINOCCHIO past-light-cone halo catalogue.
 
     Positions are comoving ``Mpc/h``; masses are ``Msun/h``; velocities are
-    ``km/s``. PINOCCHIO angle columns are preserved in degrees, but GEPPETTO
-    unit vectors are built from Cartesian positions to avoid
-    latitude/colatitude convention mistakes.
+    ``km/s``. PINOCCHIO angle columns are latitude-like ``theta`` and longitude
+    ``phi`` in degrees, expressed in the internal PLC basis used by PINOCCHIO
+    mass-map HEALPix pixels.
     """
 
     group_ids: np.ndarray
@@ -141,6 +168,12 @@ class PinocchioLightconeCatalog:
 
     @property
     def unit_vectors(self) -> np.ndarray:
+        """Unit vectors from PINOCCHIO PLC angular columns."""
+
+        return pinocchio_plc_angle_unit_vectors(self.theta_deg, self.phi_deg)
+
+    @property
+    def cartesian_unit_vectors(self) -> np.ndarray:
         """Unit vectors inferred from Cartesian comoving positions."""
 
         chi = self.chi_mpc_h
@@ -214,7 +247,7 @@ class PinocchioLightconeLightCatalog:
     """Raw PINOCCHIO light past-light-cone halo catalogue.
 
     Light PLC output stores group ID, true redshift, mass in ``Msun/h``,
-    colatitude ``theta`` and longitude ``phi`` in degrees, and observed
+    latitude-like ``theta`` and longitude ``phi`` in degrees, and observed
     redshift. It does not store Cartesian positions or radial distances.
     Conversion to ``LightconeHaloCatalog`` therefore requires an explicit
     ``PinocchioDistanceInterpolator`` built from the PINOCCHIO cosmology/Hubble
@@ -236,13 +269,7 @@ class PinocchioLightconeLightCatalog:
     def unit_vectors(self) -> np.ndarray:
         """Unit vectors from PINOCCHIO angular columns."""
 
-        theta = np.deg2rad(self.theta_deg)
-        phi = np.deg2rad(self.phi_deg)
-        sin_theta = np.sin(theta)
-        return np.stack(
-            [sin_theta * np.cos(phi), sin_theta * np.sin(phi), np.cos(theta)],
-            axis=-1,
-        )
+        return pinocchio_plc_angle_unit_vectors(self.theta_deg, self.phi_deg)
 
     def to_lightcone_catalog(
         self,
@@ -498,9 +525,10 @@ def read_pinocchio_lightcone_catalog(
 
     ``format="auto"`` detects PINOCCHIO ASCII tables and binary C-struct output.
     Full ASCII files use 13 columns: group ID, true redshift, Cartesian
-    comoving position, velocity, mass, theta, phi, line-of-sight velocity, and
-    observed redshift. Binary files are the native PINOCCHIO ``plc_write_data``
-    layout, including split files named ``*.plc.out.0``, ``*.plc.out.1``, ...
+    comoving position, velocity, mass, latitude-like theta, longitude phi,
+    line-of-sight velocity, and observed redshift. Binary files are the native
+    PINOCCHIO ``plc_write_data`` layout, including split files named
+    ``*.plc.out.0``, ``*.plc.out.1``, ...
     """
 
     source = Path(path)
@@ -570,12 +598,13 @@ def read_pinocchio_lightcone_light_catalog(
     """Read a PINOCCHIO light PLC catalogue from ``*.plc.out``.
 
     Light ASCII PLC files use 6 columns: group ID, true redshift, mass in
-    ``Msun/h``, ``theta`` and ``phi`` in degrees, and observed redshift. Light
-    binary files are the 32-byte native PINOCCHIO ``plc_write_data`` layout.
-    Because light PLC output does not contain Cartesian positions or radial
-    distances, use ``PinocchioLightconeLightCatalog.to_lightcone_catalog`` with a
-    ``PinocchioDistanceInterpolator`` from ``read_pinocchio_hubble_table`` before
-    passing it to GEPPETTO painters.
+    ``Msun/h``, latitude-like ``theta`` and longitude ``phi`` in degrees, and
+    observed redshift. Light binary files are the 32-byte native PINOCCHIO
+    ``plc_write_data`` layout. Because light PLC output does not contain
+    Cartesian positions or radial distances, use
+    ``PinocchioLightconeLightCatalog.to_lightcone_catalog`` with a
+    ``PinocchioDistanceInterpolator`` from ``read_pinocchio_hubble_table``
+    before passing it to GEPPETTO painters.
     """
 
     source = Path(path)
@@ -608,7 +637,8 @@ def read_pinocchio_binary_lightcone_light_catalog(
     Supports the native 32-byte PINOCCHIO ``plc_write_data`` layout written when
     ``LIGHT_OUTPUT`` is enabled and ``CatalogInAscii`` is disabled, including
     split files named ``*.plc.out.0``, ``*.plc.out.1``, ... Masses are
-    ``Msun/h``; angles are in degrees; redshifts are dimensionless.
+    ``Msun/h``; angles are latitude-like ``theta`` and longitude ``phi`` in
+    degrees; redshifts are dimensionless.
     """
 
     source = Path(path)

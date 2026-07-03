@@ -1,34 +1,40 @@
 # GEPPETTO
 
-**GEPPETTO** is a fully differentiable JAX framework for painting one-halo matter contributions around PINOCCHIO halo catalogues.
+**GEPPETTO** is a differentiable JAX one-halo matter/profile painter for
+PINOCCHIO halo catalogues.
 
-PINOCCHIO remains the halo/lightcone backbone and can already provide the large-scale/two-halo HEALPix density maps. GEPPETTO is the complementary one-halo painter: it adds analytic, differentiable halo-profile contributions on top of catalogues from either past-light-cone outputs or comoving snapshot boxes.
+PINOCCHIO provides the halo catalogue, past-light-cone geometry, and
+large-scale/two-halo HEALPix mass maps. GEPPETTO supplies a local one-halo layer
+that can be painted around catalogued haloes, differentiated with respect to
+profile and concentration parameters, and compared against theoretical
+predictions.
 
-Current status: **pre-alpha repository starter**.
+Current status: **active research prototype**. The repository has working NFW
+box/lightcone painters, PINOCCHIO readers, sparse HEALPix painting, an
+all-segments PINOCCHIO calibration script, and map-level derivatives for
+concentration-mass parameters. APIs and physical models are still evolving.
 
-## First implemented model
+## What GEPPETTO Does
 
-The first profile prescription is NFW with a Duffy-like power-law concentration--mass relation,
+- Paints NFW one-halo density fields in comoving boxes and projected
+  lightcones.
+- Reads PINOCCHIO snapshot catalogues, PLC catalogues, mass-sheet tables,
+  mass-map FITS files, Hubble tables, mass functions, and `nz` tables.
+- Produces PINOCCHIO-compatible one-halo particle-count-equivalent HEALPix maps.
+- Builds differentiable sparse PLC maps from fixed halo-pixel stencils.
+- Computes map-level derivatives with respect to concentration amplitude, mass
+  slope, and redshift slope for c-M calibration workflows.
+- Keeps HEALPix indexing, file I/O, and other discrete geometry outside the JAX
+  kernels.
 
-```text
-c(M, z) = A (M / M_pivot)^B (1 + z)^C
-```
-
-where `A`, `B`, `C`, and `M_pivot` are ordinary JAX parameters and can be varied, differentiated, calibrated, or sampled. The package includes two convenience initializers:
-
-- `duffy08_all_200c()`
-- `duffy08_relaxed_200c()`
-
-The default physical convention is `M_200c`; masses are in `Msun/h`, positions and distances are in comoving `Mpc/h`.
-
-## Long-term goal
-
-The long-run target is to support an Aricò-style baryonification prescription through differentiable profile transforms for dark matter, gas, stars, and ejected gas. This repository intentionally starts with a clean NFW implementation and a documented baryonification extension point rather than a partial baryonic model.
+GEPPETTO does **not** replace PINOCCHIO lightcone generation and does not merge
+one-halo maps with PINOCCHIO's two-halo maps automatically.
 
 ## Installation
 
 GEPPETTO is currently installed from the GitHub repository. The recommended
-development setup uses Miniforge/Mambaforge plus an editable pip install:
+research/development setup uses Miniforge or Mambaforge plus an editable pip
+install:
 
 ```bash
 git clone git@github.com:TiagoBsCastro/Geppetto.git
@@ -40,14 +46,14 @@ mamba activate geppetto-dev
 python -m pip install -e '.[io,dev]'
 ```
 
-Use the extras according to the workflow:
+Installation extras:
 
 - `python -m pip install -e .` installs the differentiable JAX/NumPy core.
-- `python -m pip install -e '.[io]'` also installs FITS, HEALPix, HDF5, and
-  PINOCCHIO reader dependencies: `astropy`, `healpy`, and `h5py`.
-- `python -m pip install -e '.[dev]'` installs test, lint, and type-check tools.
-- `python -m pip install -e '.[io,dev]'` is recommended for developing and
-  running the PINOCCHIO examples.
+- `python -m pip install -e '.[io]'` adds `astropy`, `healpy`, and `h5py` for
+  FITS, HEALPix, HDF5, and PINOCCHIO reader workflows.
+- `python -m pip install -e '.[dev]'` adds `pytest`, `ruff`, and `mypy`.
+- `python -m pip install -e '.[io,dev]'` is recommended for running all
+  examples and tests.
 
 Verify the installation:
 
@@ -61,14 +67,17 @@ For GPU use, install the JAX build appropriate for your CUDA stack before
 installing GEPPETTO. Follow the official JAX installation selector rather than
 pinning a CUDA command from this README.
 
-## Minimal comoving-box example
+## Quick Start: Python Painters
+
+### Comoving Box
 
 ```python
 import jax.numpy as jnp
-from geppetto import HaloCatalog, Cosmology, duffy08_all_200c, paint_box_density_grid
+
+from geppetto import Cosmology, HaloCatalog, duffy08_all_200c, paint_box_density_grid
 
 catalog = HaloCatalog(
-    position=jnp.array([[50.0, 50.0, 50.0]]),  # Mpc/h
+    position=jnp.array([[50.0, 50.0, 50.0]]),  # comoving Mpc/h
     mass=jnp.array([1.0e14]),                  # Msun/h
     redshift=jnp.array([0.0]),
 )
@@ -81,15 +90,19 @@ grid = paint_box_density_grid(
     concentration_params=duffy08_all_200c(),
     periodic=True,
 )
+
 print(grid.shape)  # (32, 32, 32)
 ```
 
-## Minimal PLC/lightcone example
+### Lightcone Surface Density
 
-GEPPETTO does not require `healpy` inside the differentiable core. Pass HEALPix pixel unit vectors from PINOCCHIO or another map layer.
+GEPPETTO's differentiable core receives fixed pixel unit vectors, not HEALPix
+indices. Convert HEALPix pixels outside the core, for example with
+`geppetto.io.healpix_pixel_unit_vectors`.
 
 ```python
 import jax.numpy as jnp
+
 from geppetto import LightconeHaloCatalog, paint_lightcone_surface_density
 
 pixel_unit_vectors = jnp.array([
@@ -99,17 +112,19 @@ pixel_unit_vectors = jnp.array([
 
 catalog = LightconeHaloCatalog(
     unit_vector=jnp.array([[1.0, 0.0, 0.0]]),
-    chi=jnp.array([1000.0]),      # Mpc/h
+    chi=jnp.array([1000.0]),      # comoving Mpc/h
     mass=jnp.array([1.0e14]),     # Msun/h
     redshift=jnp.array([0.3]),
 )
 
 sigma = paint_lightcone_surface_density(pixel_unit_vectors, catalog)
-print(sigma)  # projected one-halo surface density at the supplied pixels
+print(sigma)
 ```
 
-For larger maps, build a fixed sparse halo-pixel stencil outside the
-differentiable core and paint only the retained pairs:
+### Sparse PLC Painting
+
+For large angular maps, build a fixed halo-pixel stencil outside JAX and paint
+only retained local pairs:
 
 ```python
 from geppetto import paint_lightcone_surface_density_sparse
@@ -118,129 +133,46 @@ from geppetto.io import build_lightcone_sparse_stencil_bruteforce
 stencil = build_lightcone_sparse_stencil_bruteforce(
     pixel_unit_vectors,
     catalog,
-    rmax_mpc_h=5.0,  # fixed geometry cut in comoving Mpc/h
+    rmax_mpc_h=5.0,
 )
+
 sigma_sparse = paint_lightcone_surface_density_sparse(stencil, catalog)
 ```
 
-The sparse painter is differentiable with respect to NFW concentration/profile
-parameters. Pixel indices, HEALPix geometry, and the `Rmax` stencil cut are fixed
-inputs and are not differentiation targets.
-
 `build_lightcone_sparse_stencil_bruteforce` materializes an `n_pix * n_halo`
-separation matrix before filtering, so it is meant for validation, examples, and
-small maps. Production HEALPix-local stencil construction belongs outside the
-JAX painter and should pass the same `LightconeSparseStencil` container.
+separation matrix and is intended for tests, examples, and small maps. The
+PINOCCHIO calibration script below uses a HEALPix-local sparse stencil builder
+for segment painting.
 
-## Tabulated sparse lightcone profiles
+## PINOCCHIO c-M Calibration Pipeline
 
-For sparse PLC maps, GEPPETTO also supports a positive mass-normalized projected
-profile template. The template is tabulated in dimensionless radius
-`x = R / Rmax`; `Rmax` is fixed geometry and is not differentiated.
+The main PINOCCHIO workflow is:
 
-```python
-import jax.numpy as jnp
-
-from geppetto import (
-    TabulatedProjectedProfileParams,
-    paint_lightcone_surface_density_tabulated_sparse,
-)
-from geppetto.io import validate_tabulated_projected_profile_params
-
-profile = TabulatedProjectedProfileParams(
-    x=jnp.linspace(0.0, 1.0, 32),
-    log_shape=jnp.zeros(32),  # differentiable unconstrained amplitudes
-)
-validate_tabulated_projected_profile_params(profile)
-
-sigma_tabulated = paint_lightcone_surface_density_tabulated_sparse(
-    stencil,
-    catalog,
-    rmax_mpc_h=5.0,  # scalar or one value per halo
-    profile_params=profile,
-)
+```text
+PINOCCHIO PLC halo catalogue
+    -> NFW one-halo particle-count map
+    -> optional map-level derivatives wrt concentration-mass parameters
 ```
 
-The tabulated sparse painter uses JAX interpolation, exponentiates `log_shape`
-for positivity, and normalizes the disk integral inside `Rmax` to the halo mass.
-It treats both `x` and `Rmax` as fixed geometry and is differentiable with
-respect to `log_shape`, masses, and catalogue distances used for mass-per-pixel
-conversion.
+The command-line entrypoint is:
 
-The profile is normalized in the continuum. Exact discrete mass conservation on
-a HEALPix/pixel stencil is not enforced in this release, so coarse maps or
-stencils with very small `Rmax` only approximate the halo mass after pixel
-sampling. The current `exp(log_shape)` parameterization also enforces positive
-profiles; compensated signed profiles are a later extension.
-
-## HEALPix one-halo particle-count map
-
-For PINOCCHIO mass-map integration, GEPPETTO can paint an NFW one-halo mass
-collector in particle-count-equivalent units. The core still receives fixed
-pixel vectors; `geppetto.io` supplies the optional `healpy` adapter and parses
-the PINOCCHIO parameter file to compute the grid-element particle mass.
-
-```python
-from geppetto import (
-    paint_lightcone_particle_count_map,
-    paint_lightcone_particle_count_map_sparse,
-    paint_lightcone_particle_count_map_tabulated_sparse,
-)
-from geppetto.io import (
-    healpix_pixel_area_sr,
-    healpix_pixel_unit_vectors,
-    read_pinocchio_parameter_file,
-)
-
-metadata = read_pinocchio_parameter_file("parameter_file")
-pixel_unit_vectors = healpix_pixel_unit_vectors(nside=256, nest=False)
-
-one_halo_counts = paint_lightcone_particle_count_map(
-    pixel_unit_vectors,
-    lightcone_catalog,
-    particle_mass_msun_h=metadata.particle_mass_msun_h,
-    pixel_area_sr=healpix_pixel_area_sr(256),
-    cosmology=metadata.cosmology,
-    chunk_size=1024,
-)
-
-sparse_counts = paint_lightcone_particle_count_map_sparse(
-    stencil,
-    lightcone_catalog,
-    particle_mass_msun_h=metadata.particle_mass_msun_h,
-    pixel_area_sr=healpix_pixel_area_sr(256),
-    cosmology=metadata.cosmology,
-)
-
-tabulated_sparse_counts = paint_lightcone_particle_count_map_tabulated_sparse(
-    stencil,
-    lightcone_catalog,
-    rmax_mpc_h=rmax_per_halo,
-    profile_params=profile,
-    particle_mass_msun_h=metadata.particle_mass_msun_h,
-    pixel_area_sr=healpix_pixel_area_sr(256),
-)
+```text
+examples/paint_halo_particles_for_pinocchio_segment.py
 ```
 
-`one_halo_counts`, `sparse_counts`, and `tabulated_sparse_counts` are one-halo
-mass per pixel divided by the PINOCCHIO particle mass. They do not include
-PINOCCHIO's two-halo map.
+It always writes an NFW painted map in particle-count-equivalent units. In
+derivative modes it also saves:
 
-## PINOCCHIO c-M calibration script
+```text
+d_nfw_particle_counts_d_concentration_amplitude
+d_nfw_particle_counts_d_concentration_mass_slope
+d_nfw_particle_counts_d_concentration_redshift_slope
+```
 
-`examples/paint_halo_particles_for_pinocchio_segment.py` runs a compact
-PINOCCHIO-to-NFW painting pipeline for calibrating a concentration--mass
-relation. It can run on a single PINOCCHIO mass-map segment or on all existing
-segments discovered from a glob. For each segment, it bins the resolved halo
-mass as a point-halo diagnostic, paints an NFW one-halo
-particle-count-equivalent map on the same compact HEALPix pixel domain, and can
-save map-level derivatives with respect to concentration amplitude, mass slope,
-and redshift slope. Segment-local compatibility is preserved: the compact
-`PIXEL` list, row ordering, `NSIDE`, `ORDERING`, and segment bounds match the
-corresponding PINOCCHIO on-the-fly mass-map segment.
+These derivative maps have the same compact pixel shape and ordering as the
+corresponding PINOCCHIO mass-map segment.
 
-The script always saves `nfw_particle_counts` and uses one public execution
-mode flag:
+### Single Segment
 
 ```bash
 python examples/paint_halo_particles_for_pinocchio_segment.py \
@@ -252,8 +184,7 @@ python examples/paint_halo_particles_for_pinocchio_segment.py \
   --output examples/pinocchio_geppetto_case/halo_particles.seg001.paint.npz
 ```
 
-Use derivative mode to also save the three derivative maps needed for a c-M
-calibration loop:
+Add map-level derivatives:
 
 ```bash
 python examples/paint_halo_particles_for_pinocchio_segment.py \
@@ -266,9 +197,10 @@ python examples/paint_halo_particles_for_pinocchio_segment.py \
   --mode derivatives
 ```
 
-To paint all discovered mass-map segments, provide a glob and an output
-directory. This writes one `painted_nfw.segXXX.npz`, one compact
-`painted_nfw.segXXX.fits`, and a `painted_nfw_manifest.csv` summary:
+Optionally add `--output-fits path/to/painted.seg001.fits` to write a compact
+HEALPix FITS table containing the painted NFW map in the `TEMPERATURE` column.
+
+### All Segments
 
 ```bash
 python examples/paint_halo_particles_for_pinocchio_segment.py \
@@ -280,29 +212,117 @@ python examples/paint_halo_particles_for_pinocchio_segment.py \
   --mode derivatives
 ```
 
-For timing output, use `--mode profile` or `--mode derivatives-profile`.
-Concentration calibration parameters are exposed as
-`--concentration-amplitude`, `--concentration-mass-slope`,
-`--concentration-redshift-slope`, and `--concentration-mass-pivot`; the pivot is
-fixed when computing derivative maps.
+All-segments mode writes one segment-local NPZ and one segment-local FITS file
+per input mass-map segment:
 
-## Reading PINOCCHIO outputs
+```text
+painted_nfw.seg000.npz
+painted_nfw.seg000.fits
+painted_nfw.seg001.npz
+painted_nfw.seg001.fits
+painted_nfw_manifest.csv
+```
 
-PINOCCHIO readers live in `geppetto.io`, outside the differentiable core. They
-preserve raw metadata and provide explicit conversions to GEPPETTO catalogues.
-Snapshot and PLC readers auto-detect ASCII output and native PINOCCHIO binary
-output, including split binary files such as `*.catalog.out.0`:
+Each output preserves the corresponding PINOCCHIO segment's compact `PIXEL`
+list, row ordering, `NSIDE`, `ORDERING`, segment index, and segment bounds. The
+script does not produce a merged global light-cone map.
+
+### Pipeline Modes
+
+```text
+--mode paint
+    Paint and save the NFW particle-count map.
+
+--mode derivatives
+    Also save map-level derivatives wrt concentration amplitude, mass slope,
+    and redshift slope.
+
+--mode profile
+    Paint and print timing information.
+
+--mode derivatives-profile
+    Compute derivatives and print timing information.
+```
+
+Calibration parameters exposed by the CLI:
+
+```text
+--concentration-amplitude
+--concentration-mass-slope
+--concentration-redshift-slope
+--concentration-mass-pivot
+--truncation-width-fraction
+```
+
+The mass pivot is fixed when derivative maps are computed.
+
+## Python API Overview
+
+Core catalogue containers:
+
+- `HaloCatalog`: comoving snapshot/box halo positions, masses, and redshifts.
+- `LightconeHaloCatalog`: lightcone directions, comoving distances, masses, and
+  redshifts.
+- `LightconeSparseStencil`: fixed sparse halo-pixel pairs for PLC painting.
+
+Core parameter containers:
+
+- `ConcentrationParams`
+- `NFWProfileParams`
+- `TabulatedProjectedProfileParams`
+- `Cosmology`
+
+Main painters:
+
+- `density_at_points`
+- `paint_box_density_grid`
+- `paint_lightcone_surface_density`
+- `paint_lightcone_surface_density_sparse`
+- `paint_lightcone_particle_count_map`
+- `paint_lightcone_particle_count_map_sparse`
+- `paint_lightcone_surface_density_tabulated_sparse`
+- `paint_lightcone_particle_count_map_tabulated_sparse`
+
+The default NFW concentration relation is a free power law,
+
+```text
+c(M, z) = A_c (M / M_pivot)^alpha_M (1 + z)^alpha_z
+```
+
+with convenience initializers `duffy08_all_200c()` and
+`duffy08_relaxed_200c()`.
+
+## Supported PINOCCHIO Inputs
+
+PINOCCHIO readers live in `geppetto.io` and are intentionally outside the
+differentiable JAX core.
+
+Current reader support includes:
+
+- snapshot halo catalogues, ASCII and native binary, including split files;
+- full PLC catalogues, ASCII and native binary, using Cartesian positions for
+  comoving distance and PINOCCHIO angular columns for map-basis directions;
+- light PLC catalogues with angular coordinates and redshifts, ASCII and native
+  32-byte binary;
+- `HubbleTableFile` distance interpolation for light PLC conversion;
+- parameter files, including particle-mass metadata;
+- mass-sheet, `nz`, and mass-function ASCII outputs;
+- compact HEALPix mass-map FITS tables.
+
+Example:
 
 ```python
 from geppetto.io import (
     healpix_pixel_area_sr,
     healpix_pixel_unit_vectors,
-    read_pinocchio_parameter_file,
     read_pinocchio_hubble_table,
     read_pinocchio_lightcone_catalog,
     read_pinocchio_lightcone_light_catalog,
+    read_pinocchio_parameter_file,
     read_pinocchio_snapshot_catalog,
 )
+
+metadata = read_pinocchio_parameter_file("parameter_file")
 
 snapshot = read_pinocchio_snapshot_catalog("pinocchio.0.0000.example.catalog.out")
 box_catalog = snapshot.to_halo_catalog(position="final")
@@ -312,63 +332,109 @@ lightcone_catalog = plc.to_lightcone_catalog(redshift="true")
 
 distance = read_pinocchio_hubble_table("CAMBFiles/hubble.dat")
 light_plc = read_pinocchio_lightcone_light_catalog("pinocchio.example.plc.out")
-light_lightcone_catalog = light_plc.to_lightcone_catalog(distance, redshift="true")
+light_catalog = light_plc.to_lightcone_catalog(distance, redshift="true")
 
-metadata = read_pinocchio_parameter_file("parameter_file")
 nside = int(metadata.parameters.get("MassMapNSIDE", ("256",))[0])
 pixel_unit_vectors = healpix_pixel_unit_vectors(nside)
 pixel_area = healpix_pixel_area_sr(nside)
 ```
 
-Use `format="ascii"` or `format="binary"` to force a specific parser. The
-full PLC reader expects Cartesian positions and can convert directly. Light PLC
-readers support ASCII and native 32-byte binary output; because those files only
-store angles and redshifts, conversion requires an explicit
-`read_pinocchio_hubble_table` distance interpolator. The interpolator reads the
-PINOCCHIO `HubbleTableFile` convention, `E(z) = H(z) / H0`, and returns
-comoving distances in `Mpc/h`.
+Use `format="ascii"` or `format="binary"` to force a parser when auto-detection
+is not desired.
 
-Mass-map FITS readers and HEALPix helpers are also in `geppetto.io` and import
-Astropy/healpy lazily, so install with `.[io]` when reading FITS products or
-generating HEALPix pixel vectors.
+For PLC angular directions, GEPPETTO follows PINOCCHIO's mass-map convention:
+`theta` is latitude-like in degrees, `phi` is longitude, and the PLC axis is the
+HEALPix north pole in the internal mass-map basis. This keeps halo catalogue
+directions aligned with compact PINOCCHIO mass-map pixels.
 
-To validate the readers against real PINOCCHIO outputs, run the opt-in matrix
-driver. It creates ASCII/binary and single/split output cases in `/tmp`:
+## Differentiability Contract
+
+The JAX core is differentiable with respect to profile parameters,
+concentration parameters, halo masses, redshifts, distances, and continuous
+positions used by the painters.
+
+The following are fixed, non-differentiable geometry or I/O:
+
+- file reading and parsing;
+- halo selection by segment bounds;
+- HEALPix indexing and `query_disc`;
+- sparse stencil `pix_id`, `halo_id`, and `r_perp`;
+- sparse support radii such as `Rmax`;
+- mass-map compact pixel domains.
+
+For map-level concentration derivatives, GEPPETTO uses a fixed sparse stencil
+and forward-mode JVPs. It does not differentiate through the discrete halo-pixel
+pair selection.
+
+## Current Limitations
+
+- Baryonification is a documented extension point, not implemented physics.
+- Projected NFW currently uses a tapered analytic projected profile rather than
+  a full exact truncated projected NFW expression.
+- Smooth truncation is not exactly mass-conserving in the discrete HEALPix
+  pixelization.
+- Tabulated projected profiles are currently wired to sparse PLC painters, not
+  dense PLC or 3D box painters.
+- The tabulated profile parameterization is positive-only through
+  `exp(log_shape)` and does not represent compensated signed profiles.
+- The calibration script writes one output per PINOCCHIO mass-map segment and
+  does not merge them into a global map.
+
+More design context is in [docs/architecture.md](docs/architecture.md).
+
+## Development and Validation
+
+Run the standard checks from the repository root:
+
+```bash
+pytest
+ruff check .
+```
+
+Validate the opt-in PINOCCHIO reader matrix against generated real outputs:
 
 ```bash
 python scripts/validate_pinocchio_reader_matrix.py --all --overwrite
 GEPPETTO_PINOCCHIO_READER_MATRIX_DIR=/tmp/geppetto-pinocchio-reader-validation pytest tests/test_pinocchio_reader_matrix.py
 ```
 
-## Differentiability contract
+Useful runnable examples:
 
-The core kernels are written in JAX and are differentiable with respect to profile parameters, concentration parameters, masses, redshifts, and continuous coordinates. Pixel indices and catalogue selection are discrete by construction, so they are kept outside the differentiable core.
+- `examples/nfw_box.py`
+- `examples/nfw_lightcone.py`
+- `examples/nfw_healpix_particle_count.py`
+- `examples/paint_halo_particles_for_pinocchio_segment.py`
+- `examples/pinocchio_geppetto_case/README.md`
 
-The current NFW implementation uses a smooth radial taper by default to avoid a hard non-differentiable profile edge. Exact mass-conserving truncation and baryonified compensated profiles are future model options.
-
-## Repository layout
+## Repository Layout
 
 ```text
 GEPPETTO/
-├── AGENTS.md                 # instructions for future coding agents
-├── docs/architecture.md       # design notes and roadmap
-├── examples/                  # runnable examples
-├── src/geppetto/              # package source
-│   ├── baryonification.py     # extension point for Aricò-style model
-│   ├── catalog.py             # JAX pytree catalogue containers
-│   ├── concentration.py       # Duffy-like c-M relations
-│   ├── cosmology.py           # background densities
-│   ├── geometry.py            # box/lightcone geometry
-│   ├── io.py                  # non-core catalogue adapters
-│   ├── painters.py            # one-halo painting kernels
-│   └── profiles.py            # NFW 3D and projected profiles
-└── tests/                     # differentiability and shape tests
+├── docs/architecture.md
+├── examples/
+├── scripts/validate_pinocchio_reader_matrix.py
+├── src/geppetto/
+│   ├── catalog.py
+│   ├── concentration.py
+│   ├── cosmology.py
+│   ├── geometry.py
+│   ├── io.py
+│   ├── painters.py
+│   └── profiles.py
+└── tests/
 ```
 
-## Development priorities
+## Near-Term Priorities
 
-1. Validate NFW mass normalization and projection conventions against controlled analytic cases.
-2. Add robust PINOCCHIO ASCII/FITS/HDF5 readers in `geppetto.io` without polluting the differentiable core.
-3. Add high-throughput chunking over pixels and haloes for large PLC maps.
-4. Implement compensated/baryonified profiles following the selected Aricò et al. prescription.
-5. Add direct integration hooks to your PINOCCHIO fork once the catalogue/map boundary is fixed.
+1. Harden projected NFW normalization and truncation validation.
+2. Expand validation coverage for PINOCCHIO reader and mass-map workflows.
+3. Add scalable, reusable HEALPix-local sparse stencil builders outside the JAX
+   core.
+4. Generalize sparse painting toward compensated and baryonified profile
+   families.
+5. Define the production convention for combining GEPPETTO one-halo maps with
+   PINOCCHIO two-halo maps.
+
+## License
+
+GEPPETTO is distributed under the MIT license. See [LICENSE](LICENSE).

@@ -123,6 +123,12 @@ by particle-mass convention on a precomputed stencil. The tabulated sparse
 equivalent follows the same count convention with the tabulated projected
 profile replacing `Sigma_NFW`.
 
+PINOCCHIO mass-map pixels are expressed in the internal PLC angular basis, with
+the PLC axis at the HEALPix north pole. GEPPETTO therefore converts PINOCCHIO
+PLC `theta, phi` columns directly to map-basis unit vectors for PLC painting.
+The full PLC reader still uses Cartesian positions to compute radial distance
+`chi`, but not to define angular map directions.
+
 ## Box mode
 
 The box painter constructs cell-centre positions and evaluates the 3D profile with optional periodic minimum-image wrapping. This is intended for snapshot-box validation and for measuring the matter power spectrum from the painted one-halo density field.
@@ -141,10 +147,11 @@ The painter should dispatch on the profile function or receive a callable profil
 ## Known limitations in version 0.1.0
 
 - PINOCCHIO catalogue readers support ASCII and native binary catalogues/full
-  PLCs, including split files. Light PLC readers support angular/redshift ASCII
-  and 32-byte binary outputs, but conversion to GEPPETTO lightcone catalogues
-  requires an explicit distance interpolator from the PINOCCHIO
-  `HubbleTableFile`.
+  PLCs, including split files. Full PLC angular directions follow the
+  PINOCCHIO mass-map basis, where `theta` is latitude-like and `phi` is
+  longitude. Light PLC readers support angular/redshift ASCII and 32-byte
+  binary outputs, but conversion to GEPPETTO lightcone catalogues requires an
+  explicit distance interpolator from the PINOCCHIO `HubbleTableFile`.
 - HEALPix helpers are I/O adapters only; HEALPix indices are not differentiable
   targets and do not enter JAX kernels.
 - No exact mass-conserving smooth truncation yet.
