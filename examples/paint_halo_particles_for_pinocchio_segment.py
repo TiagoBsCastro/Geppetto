@@ -183,6 +183,24 @@ def parse_args() -> argparse.Namespace:
         help="Concentration amplitude used for --nfw-gradient-demo",
     )
     parser.add_argument(
+        "--nfw-concentration-mass-slope",
+        type=float,
+        default=-0.084,
+        help="Mass slope of the NFW concentration--mass relation.",
+    )
+    parser.add_argument(
+        "--nfw-concentration-redshift-slope",
+        type=float,
+        default=-0.47,
+        help="Redshift slope of the NFW concentration--mass relation.",
+    )
+    parser.add_argument(
+        "--nfw-concentration-mass-pivot",
+        type=float,
+        default=2.0e12,
+        help="Mass pivot in Msun/h for the NFW concentration--mass relation.",
+    )
+    parser.add_argument(
         "--nfw-truncation-width-fraction",
         type=float,
         default=0.05,
@@ -217,6 +235,16 @@ def parse_args() -> argparse.Namespace:
         help=(
             "For the default sparse NFW gradient demo, also compare the direct "
             "sum-only objective against the sparse map-sum painter."
+        ),
+    )
+    parser.add_argument(
+        "--nfw-map-derivatives",
+        choices=("none", "concentration"),
+        default="none",
+        help=(
+            "Optionally save map-level derivatives of the NFW particle-count map. "
+            "'concentration' computes derivatives with respect to concentration "
+            "amplitude, mass slope, and redshift slope using a fixed sparse stencil."
         ),
     )
     parser.add_argument(
@@ -608,6 +636,95 @@ def nfw_sparse_total_particle_count(
     return jnp.sum(sigma * (chi**2) * pixel_area_sr / particle_mass_msun_h)
 
 
+def nfw_concentration_map_derivatives(
+    stencil: LightconeSparseStencil,
+    selected_catalog: LightconeHaloCatalog,
+    mass_map: PinocchioMassMap,
+    metadata: PinocchioRunMetadata,
+    particle_mass_msun_h: float,
+    concentration_amplitude: float,
+    concentration_mass_slope: float,
+    concentration_redshift_slope: float,
+    concentration_mass_pivot: float,
+    truncation_width_fraction: float,
+    profile: bool = False,
+) -> dict[str, float | str | np.ndarray]:
+    """Return compact-map JVP derivatives with respect to concentration parameters.
+
+    The sparse stencil geometry and retained pair set are fixed. Derivatives are
+    taken only with respect to concentration amplitude, mass slope, and redshift
+    slope; ``mass_pivot`` remains fixed.
+    """
+
+    if particle_mass_msun_h <= 0.0:
+        raise ValueError("particle_mass_msun_h must be positive")
+    if concentration_mass_pivot <= 0.0:
+        raise ValueError("concentration_mass_pivot must be positive")
+
+    pixel_area_sr = healpix_pixel_area_sr(mass_map.nside)
+    theta = jnp.asarray(
+        [
+            concentration_amplitude,
+            concentration_mass_slope,
+            concentration_redshift_slope,
+        ],
+        dtype=selected_catalog.mass.dtype,
+    )
+
+    def paint_map_from_theta(theta):
+        concentration_params = ConcentrationParams(
+            amplitude=theta[0],
+            mass_slope=theta[1],
+            redshift_slope=theta[2],
+            mass_pivot=concentration_mass_pivot,
+        )
+        profile_params = NFWProfileParams(
+            truncation_width_fraction=truncation_width_fraction,
+        )
+        return paint_lightcone_particle_count_map_sparse(
+            stencil,
+            selected_catalog,
+            particle_mass_msun_h=particle_mass_msun_h,
+            pixel_area_sr=pixel_area_sr,
+            cosmology=metadata.cosmology,
+            concentration_params=concentration_params,
+            profile_params=profile_params,
+        )
+
+    basis = jnp.eye(theta.shape[0], dtype=theta.dtype)
+    with timed_stage("NFW map concentration JVPs", profile):
+        dmaps = jax.vmap(
+            lambda direction: jax.jvp(
+                paint_map_from_theta,
+                (theta,),
+                (direction,),
+            )[1]
+        )(basis)
+        dmaps.block_until_ready()
+
+    d_amp = dmaps[0]
+    d_mass_slope = dmaps[1]
+    d_redshift_slope = dmaps[2]
+    sum_d_amp = float(jnp.sum(d_amp))
+    sum_d_mass_slope = float(jnp.sum(d_mass_slope))
+    sum_d_redshift_slope = float(jnp.sum(d_redshift_slope))
+
+    with timed_stage("NFW map concentration derivatives to numpy", profile):
+        d_amp_np = np.asarray(d_amp)
+        d_mass_slope_np = np.asarray(d_mass_slope)
+        d_redshift_slope_np = np.asarray(d_redshift_slope)
+
+    return {
+        "nfw_map_derivatives": "concentration",
+        "d_nfw_particle_counts_d_concentration_amplitude": d_amp_np,
+        "d_nfw_particle_counts_d_concentration_mass_slope": d_mass_slope_np,
+        "d_nfw_particle_counts_d_concentration_redshift_slope": d_redshift_slope_np,
+        "sum_d_nfw_particle_counts_d_concentration_amplitude": sum_d_amp,
+        "sum_d_nfw_particle_counts_d_concentration_mass_slope": sum_d_mass_slope,
+        "sum_d_nfw_particle_counts_d_concentration_redshift_slope": sum_d_redshift_slope,
+    }
+
+
 def nfw_gradient_demo(
     catalog: LightconeHaloCatalog,
     mask: np.ndarray,
@@ -616,11 +733,15 @@ def nfw_gradient_demo(
     particle_mass_msun_h: float,
     *,
     concentration_amplitude: float = 5.71,
+    concentration_mass_slope: float = -0.084,
+    concentration_redshift_slope: float = -0.47,
+    concentration_mass_pivot: float = 2.0e12,
     truncation_width_fraction: float = 0.05,
     chunk_size: int | None = 1024,
     taper_radius_factor: float = 10.0,
     dense_demo: bool = False,
     validate_sum_only: bool = False,
+    map_derivatives: str = "none",
     compute_gradients: bool = True,
     profile: bool = False,
     profile_jax_repeat: bool = False,
@@ -637,6 +758,12 @@ def nfw_gradient_demo(
 
     if particle_mass_msun_h <= 0.0:
         raise ValueError("particle_mass_msun_h must be positive")
+    if concentration_mass_pivot <= 0.0:
+        raise ValueError("concentration_mass_pivot must be positive")
+    if map_derivatives not in ("none", "concentration"):
+        raise ValueError("map_derivatives must be 'none' or 'concentration'")
+    if dense_demo and map_derivatives == "concentration":
+        raise ValueError("--nfw-map-derivatives concentration is only supported for sparse mode")
     if dense_demo and validate_sum_only:
         raise ValueError("--nfw-validate-sum-only is only supported for sparse NFW demos")
     if validate_sum_only and not compute_gradients:
@@ -652,7 +779,12 @@ def nfw_gradient_demo(
     dense_pair_count = n_halo * n_pix
     pixel_unit_vectors = None
 
-    fiducial_concentration_params = ConcentrationParams(amplitude=concentration_amplitude)
+    fiducial_concentration_params = ConcentrationParams(
+        amplitude=concentration_amplitude,
+        mass_slope=concentration_mass_slope,
+        redshift_slope=concentration_redshift_slope,
+        mass_pivot=concentration_mass_pivot,
+    )
     fiducial_profile_params = NFWProfileParams(
         truncation_width_fraction=truncation_width_fraction
     )
@@ -700,7 +832,12 @@ def nfw_gradient_demo(
     ) if compute_gradients else "not_computed"
 
     def objective(theta):
-        concentration_params = ConcentrationParams(amplitude=theta[0])
+        concentration_params = ConcentrationParams(
+            amplitude=theta[0],
+            mass_slope=concentration_mass_slope,
+            redshift_slope=concentration_redshift_slope,
+            mass_pivot=concentration_mass_pivot,
+        )
         profile_params = NFWProfileParams(truncation_width_fraction=theta[1])
         if dense_demo:
             assert pixel_unit_vectors is not None
@@ -743,7 +880,12 @@ def nfw_gradient_demo(
         total_counts = None
         grad = None
 
-    output_concentration_params = ConcentrationParams(amplitude=theta[0])
+    output_concentration_params = ConcentrationParams(
+        amplitude=theta[0],
+        mass_slope=concentration_mass_slope,
+        redshift_slope=concentration_redshift_slope,
+        mass_pivot=concentration_mass_pivot,
+    )
     output_profile_params = NFWProfileParams(truncation_width_fraction=theta[1])
     with timed_stage("NFW particle map", profile):
         if dense_demo:
@@ -788,6 +930,44 @@ def nfw_gradient_demo(
     with timed_stage("NFW particle map to numpy", profile):
         nfw_particle_counts_np = np.asarray(nfw_particle_counts)
 
+    map_derivative_diagnostics: dict[str, float | str | np.ndarray] = {
+        "nfw_map_derivatives": "none"
+    }
+    if map_derivatives == "concentration":
+        assert stencil is not None
+        map_derivative_diagnostics = nfw_concentration_map_derivatives(
+            stencil,
+            selected_catalog,
+            mass_map,
+            metadata,
+            particle_mass_msun_h,
+            concentration_amplitude=concentration_amplitude,
+            concentration_mass_slope=concentration_mass_slope,
+            concentration_redshift_slope=concentration_redshift_slope,
+            concentration_mass_pivot=concentration_mass_pivot,
+            truncation_width_fraction=truncation_width_fraction,
+            profile=profile,
+        )
+
+        if grad is not None:
+            scalar_amp_grad = float(grad[0])
+            map_amp_grad_sum = float(
+                map_derivative_diagnostics[
+                    "sum_d_nfw_particle_counts_d_concentration_amplitude"
+                ]
+            )
+            if not np.allclose(
+                scalar_amp_grad,
+                map_amp_grad_sum,
+                rtol=1.0e-5,
+                atol=1.0e-5 * max(1.0, abs(scalar_amp_grad)),
+            ):
+                raise RuntimeError(
+                    "Map-level concentration-amplitude derivative does not match "
+                    "scalar derivative: "
+                    f"scalar={scalar_amp_grad:.17g}, map_sum={map_amp_grad_sum:.17g}"
+                )
+
     diagnostics: dict[str, bool | float | int | str | np.ndarray] = {
         "nfw_particle_counts": nfw_particle_counts_np,
         "nfw_derivatives_computed": bool(compute_gradients),
@@ -804,8 +984,12 @@ def nfw_gradient_demo(
         ),
         "nfw_sum_particle_counts": float(total_counts),
         "nfw_concentration_amplitude": float(concentration_amplitude),
+        "nfw_concentration_mass_slope": float(concentration_mass_slope),
+        "nfw_concentration_redshift_slope": float(concentration_redshift_slope),
+        "nfw_concentration_mass_pivot": float(concentration_mass_pivot),
         "nfw_truncation_width_fraction": float(truncation_width_fraction),
     }
+    diagnostics.update(map_derivative_diagnostics)
     if grad is not None:
         grad_concentration = grad[0]
         grad_truncation_width = grad[1]
@@ -1024,6 +1208,20 @@ def print_nfw_gradient_summary(
             "  d(sum) / d truncation width fraction: "
             f"{nfw_diagnostics['nfw_d_sum_d_truncation_width_fraction']:.12g}"
         )
+    if nfw_diagnostics.get("nfw_map_derivatives", "none") == "concentration":
+        print("  Map derivatives: concentration")
+        print(
+            "  Sum d(map)/d concentration amplitude: "
+            f"{nfw_diagnostics['sum_d_nfw_particle_counts_d_concentration_amplitude']:.12g}"
+        )
+        print(
+            "  Sum d(map)/d concentration mass slope: "
+            f"{nfw_diagnostics['sum_d_nfw_particle_counts_d_concentration_mass_slope']:.12g}"
+        )
+        print(
+            "  Sum d(map)/d concentration redshift slope: "
+            f"{nfw_diagnostics['sum_d_nfw_particle_counts_d_concentration_redshift_slope']:.12g}"
+        )
 
 
 def main() -> None:
@@ -1035,6 +1233,12 @@ def main() -> None:
     particle_mass = float(metadata.particle_mass_msun_h)
     if particle_mass <= 0.0:
         raise ValueError("particle_mass_msun_h must be positive")
+    if args.nfw_concentration_mass_pivot <= 0.0:
+        raise ValueError("--nfw-concentration-mass-pivot must be positive")
+    if args.nfw_map_derivatives != "none" and not (
+        args.nfw_paint or args.nfw_gradient_demo
+    ):
+        raise ValueError("--nfw-map-derivatives requires --nfw-paint or --nfw-gradient-demo")
 
     with timed_stage("read sheets", args.profile):
         sheets = read_pinocchio_mass_sheets(args.sheets)
@@ -1097,11 +1301,15 @@ def main() -> None:
                 metadata,
                 particle_mass,
                 concentration_amplitude=args.nfw_concentration_amplitude,
+                concentration_mass_slope=args.nfw_concentration_mass_slope,
+                concentration_redshift_slope=args.nfw_concentration_redshift_slope,
+                concentration_mass_pivot=args.nfw_concentration_mass_pivot,
                 truncation_width_fraction=args.nfw_truncation_width_fraction,
                 chunk_size=args.nfw_chunk_size,
                 taper_radius_factor=args.nfw_taper_radius_factor,
                 dense_demo=args.nfw_dense_demo,
                 validate_sum_only=args.nfw_validate_sum_only,
+                map_derivatives=args.nfw_map_derivatives,
                 compute_gradients=args.nfw_gradient_demo,
                 profile=args.profile,
                 profile_jax_repeat=args.profile_jax_repeat,

@@ -126,6 +126,10 @@ def test_example_script_help_runs():
     assert "--nfw-dense-demo" in result.stdout
     assert "--nfw-taper-radius-factor" in result.stdout
     assert "--nfw-validate-sum-only" in result.stdout
+    assert "--nfw-map-derivatives" in result.stdout
+    assert "--nfw-concentration-mass-slope" in result.stdout
+    assert "--nfw-concentration-redshift-slope" in result.stdout
+    assert "--nfw-concentration-mass-pivot" in result.stdout
     assert "--profile" in result.stdout
     assert "--profile-jax-repeat" in result.stdout
 
@@ -331,6 +335,13 @@ def test_save_npz_can_include_nfw_gradient_diagnostics(tmp_path):
     }
     nfw_diagnostics = {
         "nfw_particle_counts": np.array([0.75, 0.5]),
+        "nfw_map_derivatives": "concentration",
+        "d_nfw_particle_counts_d_concentration_amplitude": np.array([0.1, 0.2]),
+        "d_nfw_particle_counts_d_concentration_mass_slope": np.array([0.3, 0.4]),
+        "d_nfw_particle_counts_d_concentration_redshift_slope": np.array([0.5, 0.6]),
+        "sum_d_nfw_particle_counts_d_concentration_amplitude": 0.3,
+        "sum_d_nfw_particle_counts_d_concentration_mass_slope": 0.7,
+        "sum_d_nfw_particle_counts_d_concentration_redshift_slope": 1.1,
         "nfw_derivatives_computed": True,
         "nfw_operation_mode": "paint_plus_derivatives",
         "nfw_paint_mode": "sparse",
@@ -360,6 +371,19 @@ def test_save_npz_can_include_nfw_gradient_diagnostics(tmp_path):
 
     with np.load(args.output) as data:
         np.testing.assert_allclose(data["nfw_particle_counts"], [0.75, 0.5])
+        assert str(data["nfw_map_derivatives"]) == "concentration"
+        np.testing.assert_allclose(
+            data["d_nfw_particle_counts_d_concentration_amplitude"], [0.1, 0.2]
+        )
+        np.testing.assert_allclose(
+            data["d_nfw_particle_counts_d_concentration_mass_slope"], [0.3, 0.4]
+        )
+        np.testing.assert_allclose(
+            data["d_nfw_particle_counts_d_concentration_redshift_slope"], [0.5, 0.6]
+        )
+        assert float(data["sum_d_nfw_particle_counts_d_concentration_amplitude"]) == 0.3
+        assert float(data["sum_d_nfw_particle_counts_d_concentration_mass_slope"]) == 0.7
+        assert float(data["sum_d_nfw_particle_counts_d_concentration_redshift_slope"]) == 1.1
         assert bool(data["nfw_derivatives_computed"])
         assert str(data["nfw_operation_mode"]) == "paint_plus_derivatives"
         assert str(data["nfw_paint_mode"]) == "sparse"
@@ -520,6 +544,129 @@ def test_nfw_gradient_demo_sparse_sum_only_validation_matches_sparse_map_sum():
         diagnostics["nfw_sum_particle_counts"],
         rtol=1.0e-5,
     )
+
+
+def test_nfw_map_concentration_derivatives_have_map_shape_and_match_scalar_gradient():
+    hp = pytest.importorskip("healpy")
+    module = _load_example_module()
+
+    halo_pixels = np.array([0, 5], dtype=np.int64)
+    unit_vector = np.stack(hp.pix2vec(1, halo_pixels), axis=-1)
+    catalog = _catalog(
+        unit_vector=unit_vector,
+        mass=np.array([1.0e13, 2.0e13]),
+        redshift=np.array([0.2, 0.25]),
+        chi=np.array([1000.0, 1100.0]),
+    )
+    mass_map = _mass_map(
+        np.array([5, 0], dtype=np.int64),
+        temperature=np.array([100.0, 200.0]),
+        nside=1,
+    )
+    metadata = SimpleNamespace(cosmology=Cosmology())
+
+    diagnostics = module.nfw_gradient_demo(
+        catalog,
+        np.array([True, True]),
+        mass_map,
+        metadata,
+        particle_mass_msun_h=1.0e10,
+        concentration_amplitude=5.71,
+        concentration_mass_slope=-0.084,
+        concentration_redshift_slope=-0.47,
+        concentration_mass_pivot=2.0e12,
+        truncation_width_fraction=0.05,
+        chunk_size=1,
+        map_derivatives="concentration",
+    )
+
+    assert diagnostics["nfw_map_derivatives"] == "concentration"
+    for key in (
+        "d_nfw_particle_counts_d_concentration_amplitude",
+        "d_nfw_particle_counts_d_concentration_mass_slope",
+        "d_nfw_particle_counts_d_concentration_redshift_slope",
+    ):
+        assert diagnostics[key].shape == diagnostics["nfw_particle_counts"].shape
+        assert np.all(np.isfinite(diagnostics[key]))
+
+    scalar_amp_grad = diagnostics["nfw_d_sum_d_concentration_amplitude"]
+    np.testing.assert_allclose(
+        np.sum(diagnostics["d_nfw_particle_counts_d_concentration_amplitude"]),
+        scalar_amp_grad,
+        rtol=1.0e-5,
+        atol=1.0e-5 * max(1.0, abs(scalar_amp_grad)),
+    )
+    np.testing.assert_allclose(
+        np.sum(diagnostics["d_nfw_particle_counts_d_concentration_mass_slope"]),
+        diagnostics["sum_d_nfw_particle_counts_d_concentration_mass_slope"],
+        rtol=1.0e-5,
+    )
+    np.testing.assert_allclose(
+        np.sum(diagnostics["d_nfw_particle_counts_d_concentration_redshift_slope"]),
+        diagnostics["sum_d_nfw_particle_counts_d_concentration_redshift_slope"],
+        rtol=1.0e-5,
+    )
+
+
+def test_nfw_map_concentration_derivatives_are_sparse_only():
+    module = _load_example_module()
+    catalog = _catalog(
+        unit_vector=np.array([[1.0, 0.0, 0.0]]),
+        mass=np.array([1.0e13]),
+        redshift=np.array([0.2]),
+        chi=np.array([1000.0]),
+    )
+    mass_map = _mass_map(
+        np.array([0], dtype=np.int64),
+        temperature=np.array([100.0]),
+        nside=1,
+    )
+    metadata = SimpleNamespace(cosmology=Cosmology())
+
+    with pytest.raises(ValueError, match="only supported for sparse"):
+        module.nfw_gradient_demo(
+            catalog,
+            np.array([True]),
+            mass_map,
+            metadata,
+            particle_mass_msun_h=1.0e10,
+            dense_demo=True,
+            map_derivatives="concentration",
+        )
+
+
+def test_nfw_map_concentration_derivative_profile_labels(capsys):
+    hp = pytest.importorskip("healpy")
+    module = _load_example_module()
+
+    halo_pixels = np.array([0], dtype=np.int64)
+    unit_vector = np.stack(hp.pix2vec(1, halo_pixels), axis=-1)
+    catalog = _catalog(
+        unit_vector=unit_vector,
+        mass=np.array([1.0e13]),
+        redshift=np.array([0.2]),
+        chi=np.array([1000.0]),
+    )
+    mass_map = _mass_map(
+        np.array([0], dtype=np.int64),
+        temperature=np.array([100.0]),
+        nside=1,
+    )
+    metadata = SimpleNamespace(cosmology=Cosmology())
+
+    module.nfw_gradient_demo(
+        catalog,
+        np.array([True]),
+        mass_map,
+        metadata,
+        particle_mass_msun_h=1.0e10,
+        map_derivatives="concentration",
+        profile=True,
+    )
+
+    captured = capsys.readouterr()
+    assert "NFW map concentration JVPs" in captured.out
+    assert "NFW map concentration derivatives to numpy" in captured.out
 
 
 def test_nfw_paint_only_outputs_map_without_gradients():
@@ -707,12 +854,20 @@ def test_print_nfw_summary_distinguishes_operation_modes(capsys):
             "nfw_objective_mode": "sum_only_sparse",
             "nfw_d_sum_d_concentration_amplitude": 0.5,
             "nfw_d_sum_d_truncation_width_fraction": -0.25,
+            "nfw_map_derivatives": "concentration",
+            "sum_d_nfw_particle_counts_d_concentration_amplitude": 0.5,
+            "sum_d_nfw_particle_counts_d_concentration_mass_slope": 1.5,
+            "sum_d_nfw_particle_counts_d_concentration_redshift_slope": -2.5,
         }
     )
     with_derivatives = capsys.readouterr().out
     assert "NFW one-halo map + derivatives:" in with_derivatives
     assert "Operation mode: paint_plus_derivatives" in with_derivatives
     assert "Objective mode: sum_only_sparse" in with_derivatives
+    assert "Map derivatives: concentration" in with_derivatives
+    assert "Sum d(map)/d concentration amplitude" in with_derivatives
+    assert "Sum d(map)/d concentration mass slope" in with_derivatives
+    assert "Sum d(map)/d concentration redshift slope" in with_derivatives
 
 
 def test_local_sparse_stencil_uses_compact_rows_not_global_pixels():
