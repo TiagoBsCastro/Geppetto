@@ -819,6 +819,21 @@ def test_nfw_gradient_demo_profile_prints_derivative_and_map_labels(capsys):
     assert "NFW particle map to numpy" in captured.out
 
 
+def test_nfw_stage_label_distinguishes_scalar_and_map_derivatives():
+    module = _load_example_module()
+
+    assert module.nfw_stage_label(False, "none") == "NFW paint only"
+    assert (
+        module.nfw_stage_label(False, "concentration")
+        == "NFW paint + map derivatives"
+    )
+    assert module.nfw_stage_label(True, "none") == "NFW paint + scalar derivatives"
+    assert (
+        module.nfw_stage_label(True, "concentration")
+        == "NFW paint + scalar and map derivatives"
+    )
+
+
 def test_print_nfw_summary_distinguishes_operation_modes(capsys):
     module = _load_example_module()
     common = {
@@ -843,7 +858,26 @@ def test_print_nfw_summary_distinguishes_operation_modes(capsys):
     paint_only = capsys.readouterr().out
     assert "NFW one-halo map:" in paint_only
     assert "Operation mode: paint_only" in paint_only
-    assert "Gradients: not computed" in paint_only
+    assert "Scalar gradients: not computed" in paint_only
+
+    module.print_nfw_gradient_summary(
+        {
+            **common,
+            "nfw_derivatives_computed": False,
+            "nfw_operation_mode": "paint_only",
+            "nfw_gradient_mode": "not_computed",
+            "nfw_objective_mode": "not_computed",
+            "nfw_map_derivatives": "concentration",
+            "sum_d_nfw_particle_counts_d_concentration_amplitude": 0.5,
+            "sum_d_nfw_particle_counts_d_concentration_mass_slope": 1.5,
+            "sum_d_nfw_particle_counts_d_concentration_redshift_slope": -2.5,
+        }
+    )
+    map_only = capsys.readouterr().out
+    assert "NFW one-halo map + derivatives:" in map_only
+    assert "Operation mode: paint_only" in map_only
+    assert "Scalar gradients: not computed" in map_only
+    assert "Map derivatives: concentration" in map_only
 
     module.print_nfw_gradient_summary(
         {

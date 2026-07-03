@@ -35,7 +35,7 @@ python examples/paint_halo_particles_for_pinocchio_segment.py \\
 Add ``--nfw-gradient-demo`` to also print and save a differentiability tutorial
 for an NFW one-halo map evaluated on the same segment and pixel domain.
 
-To compare NFW painting with and without derivatives, run:
+To compare NFW painting with and without scalar derivatives, run:
 
   python examples/paint_halo_particles_for_pinocchio_segment.py ... --nfw-paint --profile
 
@@ -44,9 +44,11 @@ and:
   python examples/paint_halo_particles_for_pinocchio_segment.py ... \\
     --nfw-gradient-demo --profile --profile-jax-repeat
 
-The incremental derivative cost is the difference between
-``NFW paint + derivatives`` and ``NFW paint only``, with detailed derivative
-cost shown by ``NFW derivatives value_and_grad``.
+The incremental scalar-derivative cost is the difference between
+``NFW paint + scalar derivatives`` and ``NFW paint only``, with detailed scalar
+derivative cost shown by ``NFW derivatives value_and_grad``. Map-level
+derivatives are profiled separately as ``NFW paint + map derivatives`` or
+``NFW paint + scalar and map derivatives``.
 """
 
 from __future__ import annotations
@@ -1173,12 +1175,26 @@ def print_output_summary(
     )
 
 
+def nfw_stage_label(compute_scalar_derivatives: bool, map_derivatives: str) -> str:
+    """Return a clear top-level profile label for the requested NFW work."""
+
+    has_map_derivatives = map_derivatives != "none"
+    if compute_scalar_derivatives and has_map_derivatives:
+        return "NFW paint + scalar and map derivatives"
+    if compute_scalar_derivatives:
+        return "NFW paint + scalar derivatives"
+    if has_map_derivatives:
+        return "NFW paint + map derivatives"
+    return "NFW paint only"
+
+
 def print_nfw_gradient_summary(
     nfw_diagnostics: dict[str, bool | float | int | str | np.ndarray],
 ) -> None:
     """Print the optional NFW differentiability tutorial summary."""
 
-    if nfw_diagnostics["nfw_derivatives_computed"]:
+    has_map_derivatives = nfw_diagnostics.get("nfw_map_derivatives", "none") != "none"
+    if nfw_diagnostics["nfw_derivatives_computed"] or has_map_derivatives:
         print("NFW one-halo map + derivatives:")
     else:
         print("NFW one-halo map:")
@@ -1189,7 +1205,7 @@ def print_nfw_gradient_summary(
         print(f"  Gradient mode: {nfw_diagnostics['nfw_gradient_mode']}")
         print(f"  Objective mode: {nfw_diagnostics['nfw_objective_mode']}")
     else:
-        print("  Gradients: not computed")
+        print("  Scalar gradients: not computed")
     print(f"  Selected halos painted: {nfw_diagnostics['nfw_gradient_demo_n_halos']}")
     print(f"  Compact pixels: {nfw_diagnostics['nfw_compact_pixel_count']}")
     print(f"  Sparse halo-pixel pairs: {nfw_diagnostics['nfw_sparse_pair_count']}")
@@ -1290,9 +1306,7 @@ def main() -> None:
     nfw_diagnostics = None
     run_nfw = args.nfw_paint or args.nfw_gradient_demo
     if run_nfw:
-        nfw_stage_name = (
-            "NFW paint + derivatives" if args.nfw_gradient_demo else "NFW paint only"
-        )
+        nfw_stage_name = nfw_stage_label(args.nfw_gradient_demo, args.nfw_map_derivatives)
         with timed_stage(nfw_stage_name, args.profile):
             nfw_diagnostics = nfw_gradient_demo(
                 catalog,
