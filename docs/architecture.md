@@ -129,6 +129,31 @@ PLC `theta, phi` columns directly to map-basis unit vectors for PLC painting.
 The full PLC reader still uses Cartesian positions to compute radial distance
 `chi`, but not to define angular map directions.
 
+The PINOCCHIO calibration script also has hidden sparse-stencil audit flags for
+benchmarking HEALPix query choices without changing the default scientific
+path:
+
+```bash
+python examples/paint_halo_particles_for_pinocchio_segment.py ... \
+  --mode paint \
+  --stencil-diagnostics \
+  --stencil-query-mode inclusive
+
+python examples/paint_halo_particles_for_pinocchio_segment.py ... \
+  --mode paint \
+  --stencil-diagnostics \
+  --stencil-query-mode center
+
+python examples/paint_halo_particles_for_pinocchio_segment.py ... \
+  --mode paint \
+  --stencil-compare-query-modes
+```
+
+`inclusive` keeps the current `healpy.query_disc(..., inclusive=True)` path.
+`center` uses `inclusive=False`. The comparison mode is single-segment only and
+reports stencil timing, query counts, kept-pair counts, and painted-map
+differences.
+
 ## Box mode
 
 The box painter constructs cell-centre positions and evaluates the 3D profile with optional periodic minimum-image wrapping. This is intended for snapshot-box validation and for measuring the matter power spectrum from the painted one-halo density field.

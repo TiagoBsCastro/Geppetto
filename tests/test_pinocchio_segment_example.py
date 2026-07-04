@@ -31,6 +31,7 @@ def _load_example_module():
     spec = importlib.util.spec_from_file_location("paint_halo_particles_for_pinocchio_segment", EXAMPLE_PATH)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
@@ -137,6 +138,9 @@ def _workflow_args(**overrides) -> SimpleNamespace:
         "nfw_chunk_size": 1,
         "nfw_taper_radius_factor": 10.0,
         "nfw_dense_demo": False,
+        "stencil_query_mode": "inclusive",
+        "stencil_diagnostics": False,
+        "stencil_compare_query_modes": False,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -172,6 +176,9 @@ def test_example_script_help_runs():
     assert "--nfw-validate-sum-only" not in result.stdout
     assert "--nfw-chunk-size" not in result.stdout
     assert "--nfw-taper-radius-factor" not in result.stdout
+    assert "--stencil-query-mode" not in result.stdout
+    assert "--stencil-diagnostics" not in result.stdout
+    assert "--stencil-compare-query-modes" not in result.stdout
 
 
 def test_parse_segment_index_from_mass_map_path():
@@ -252,6 +259,17 @@ def test_validate_segment_workflow_args_rejects_mixed_and_incomplete(tmp_path):
                 mass_map_glob=str(tmp_path / "*.fits"),
                 output_dir=tmp_path / "painted",
                 output_fits=tmp_path / "single.fits",
+            )
+        )
+    with pytest.raises(ValueError, match="only in single-segment"):
+        module.validate_segment_workflow_args(
+            _workflow_args(
+                mass_map=None,
+                sheet_index=None,
+                output=None,
+                mass_map_glob=str(tmp_path / "*.fits"),
+                output_dir=tmp_path / "painted",
+                stencil_compare_query_modes=True,
             )
         )
 
@@ -599,6 +617,91 @@ def test_run_calibration_for_segment_writes_npz_with_derivative_arrays(tmp_path,
             data["d_nfw_particle_counts_d_concentration_amplitude"].shape
             == data["halo_particle_counts"].shape
         )
+
+
+def test_run_calibration_for_segment_saves_stencil_diagnostics(tmp_path, monkeypatch):
+    pytest.importorskip("healpy")
+    module = _load_example_module()
+    catalog, _, mass_map, _ = _single_pixel_pipeline_case()
+    metadata = SimpleNamespace(particle_mass_msun_h=1.0e10, cosmology=Cosmology())
+    output_npz = tmp_path / "painted_nfw.seg000.npz"
+    monkeypatch.setattr(
+        module,
+        "read_pinocchio_mass_map_fits",
+        lambda path: mass_map,
+    )
+
+    module.run_calibration_for_segment(
+        segment_index=0,
+        mass_map_path=tmp_path / "pinocchio.example.massmap.seg000.fits",
+        output_npz=output_npz,
+        output_fits=None,
+        catalog=catalog,
+        sheets=_sheets(),
+        metadata=metadata,
+        particle_mass=metadata.particle_mass_msun_h,
+        args=_workflow_args(stencil_diagnostics=True),
+        profile=False,
+        compute_map_derivatives=False,
+        inclusive_upper=False,
+    )
+
+    with np.load(output_npz) as data:
+        assert str(data["stencil_query_mode"]) == "inclusive"
+        assert "stencil_query_pixels_total" in data
+        assert "stencil_inside_domain_total" in data
+        assert "stencil_kept_pairs_total" in data
+        assert "stencil_inside_over_query" in data
+        assert "stencil_kept_over_query" in data
+        assert "stencil_kept_over_inside" in data
+        assert "stencil_build_seconds" in data
+        assert int(data["stencil_query_pixels_total"]) >= int(data["stencil_inside_domain_total"])
+        assert int(data["stencil_inside_domain_total"]) >= int(data["stencil_kept_pairs_total"])
+
+
+def test_run_calibration_for_segment_saves_query_mode_comparison(tmp_path, monkeypatch):
+    pytest.importorskip("healpy")
+    module = _load_example_module()
+    catalog, _, mass_map, _ = _single_pixel_pipeline_case()
+    metadata = SimpleNamespace(particle_mass_msun_h=1.0e10, cosmology=Cosmology())
+    output_npz = tmp_path / "painted_nfw.seg000.npz"
+    monkeypatch.setattr(
+        module,
+        "read_pinocchio_mass_map_fits",
+        lambda path: mass_map,
+    )
+
+    module.run_calibration_for_segment(
+        segment_index=0,
+        mass_map_path=tmp_path / "pinocchio.example.massmap.seg000.fits",
+        output_npz=output_npz,
+        output_fits=None,
+        catalog=catalog,
+        sheets=_sheets(),
+        metadata=metadata,
+        particle_mass=metadata.particle_mass_msun_h,
+        args=_workflow_args(stencil_compare_query_modes=True),
+        profile=False,
+        compute_map_derivatives=False,
+        inclusive_upper=False,
+    )
+
+    with np.load(output_npz) as data:
+        for key in (
+            "inclusive_stencil_seconds",
+            "center_stencil_seconds",
+            "inclusive_query_pixels_total",
+            "center_query_pixels_total",
+            "inclusive_kept_pairs_total",
+            "center_kept_pairs_total",
+            "max_abs_map_difference",
+            "sum_abs_map_difference",
+            "relative_sum_difference",
+            "differing_pixels",
+            "maps_allclose",
+        ):
+            assert key in data
+        assert int(data["center_query_pixels_total"]) <= int(data["inclusive_query_pixels_total"])
 
 
 def test_nfw_sparse_total_particle_count_matches_sparse_map_sum():
@@ -1144,6 +1247,213 @@ def test_local_sparse_stencil_uses_compact_rows_not_global_pixels():
     np.testing.assert_array_equal(np.asarray(stencil.pix_id), [1, 0])
     np.testing.assert_array_equal(np.asarray(stencil.halo_id), [0, 1])
     assert np.all(np.asarray(stencil.r_perp) <= 1.0)
+
+
+def test_local_sparse_stencil_query_modes_and_validation():
+    hp = pytest.importorskip("healpy")
+    module = _load_example_module()
+
+    pixels = np.array([0], dtype=np.int64)
+    unit_vector = np.stack(hp.pix2vec(1, pixels), axis=-1)
+    catalog = _catalog(
+        unit_vector=unit_vector,
+        mass=np.array([1.0e13]),
+        redshift=np.array([0.2]),
+        chi=np.array([1000.0]),
+    )
+    mass_map = _mass_map(pixels, temperature=np.array([100.0]), nside=1)
+
+    inclusive = module.build_lightcone_sparse_stencil_for_mass_map_local(
+        mass_map,
+        catalog,
+        rmax_mpc_h=np.array([1.0]),
+        query_mode="inclusive",
+    )
+    center = module.build_lightcone_sparse_stencil_for_mass_map_local(
+        mass_map,
+        catalog,
+        rmax_mpc_h=np.array([1.0]),
+        query_mode="center",
+    )
+
+    assert inclusive.n_pix == 1
+    assert center.n_pix == 1
+    assert np.asarray(inclusive.pix_id).shape[0] >= 1
+    assert np.asarray(center.pix_id).shape[0] >= 1
+    with pytest.raises(ValueError, match="query_mode"):
+        module.build_lightcone_sparse_stencil_for_mass_map_local(
+            mass_map,
+            catalog,
+            rmax_mpc_h=np.array([1.0]),
+            query_mode="bad",
+        )
+
+
+@pytest.mark.parametrize("query_mode", ["inclusive", "center"])
+def test_local_sparse_stencil_diagnostics_counters(query_mode):
+    hp = pytest.importorskip("healpy")
+    module = _load_example_module()
+
+    pixels = np.array([0, 5], dtype=np.int64)
+    unit_vector = np.stack(hp.pix2vec(1, np.array([0, 5], dtype=np.int64)), axis=-1)
+    catalog = _catalog(
+        unit_vector=unit_vector,
+        mass=np.array([1.0e13, 2.0e13]),
+        redshift=np.array([0.2, 0.25]),
+        chi=np.array([1000.0, 1100.0]),
+    )
+    mass_map = _mass_map(pixels, temperature=np.array([100.0, 200.0]), nside=1)
+
+    stencil, diag = module.build_lightcone_sparse_stencil_for_mass_map_local(
+        mass_map,
+        catalog,
+        rmax_mpc_h=np.array([1.0, 1.0]),
+        query_mode=query_mode,
+        collect_diagnostics=True,
+    )
+
+    assert diag.n_halos == len(catalog.mass)
+    assert diag.n_query_pixels_total >= diag.n_inside_domain_total
+    assert diag.n_inside_domain_total >= diag.n_kept_pairs_total
+    assert diag.n_kept_pairs_total == len(np.asarray(stencil.pix_id))
+    assert diag.query_mode == query_mode
+    assert diag.elapsed_seconds >= 0.0
+
+
+def test_center_query_mode_has_no_more_query_pixels_than_inclusive():
+    hp = pytest.importorskip("healpy")
+    module = _load_example_module()
+
+    pixels = np.array([0, 5], dtype=np.int64)
+    unit_vector = np.stack(hp.pix2vec(1, pixels), axis=-1)
+    catalog = _catalog(
+        unit_vector=unit_vector,
+        mass=np.array([1.0e13, 2.0e13]),
+        redshift=np.array([0.2, 0.25]),
+        chi=np.array([1000.0, 1100.0]),
+    )
+    mass_map = _mass_map(pixels, temperature=np.array([100.0, 200.0]), nside=1)
+
+    _, inclusive_diag = module.build_lightcone_sparse_stencil_for_mass_map_local(
+        mass_map,
+        catalog,
+        rmax_mpc_h=np.array([1.0, 1.0]),
+        query_mode="inclusive",
+        collect_diagnostics=True,
+    )
+    _, center_diag = module.build_lightcone_sparse_stencil_for_mass_map_local(
+        mass_map,
+        catalog,
+        rmax_mpc_h=np.array([1.0, 1.0]),
+        query_mode="center",
+        collect_diagnostics=True,
+    )
+
+    assert center_diag.n_query_pixels_total <= inclusive_diag.n_query_pixels_total
+
+
+def test_inclusive_and_center_maps_are_finite_and_match_when_pairs_match():
+    hp = pytest.importorskip("healpy")
+    module = _load_example_module()
+
+    pixels = np.array([0], dtype=np.int64)
+    unit_vector = np.stack(hp.pix2vec(1, pixels), axis=-1)
+    catalog = _catalog(
+        unit_vector=unit_vector,
+        mass=np.array([1.0e13]),
+        redshift=np.array([0.2]),
+        chi=np.array([1000.0]),
+    )
+    mass_map = _mass_map(pixels, temperature=np.array([100.0]), nside=1)
+    metadata = SimpleNamespace(cosmology=Cosmology())
+    concentration_params = module.ConcentrationParams()
+    profile_params = module.NFWProfileParams()
+    rmax = np.array([1.0])
+    pixel_area_sr = module.healpix_pixel_area_sr(mass_map.nside)
+
+    maps = {}
+    pair_sets = {}
+    for query_mode in ("inclusive", "center"):
+        stencil = module.build_lightcone_sparse_stencil_for_mass_map_local(
+            mass_map,
+            catalog,
+            rmax_mpc_h=rmax,
+            query_mode=query_mode,
+        )
+        counts = module.paint_lightcone_particle_count_map_sparse(
+            stencil,
+            catalog,
+            particle_mass_msun_h=1.0e10,
+            pixel_area_sr=pixel_area_sr,
+            cosmology=metadata.cosmology,
+            concentration_params=concentration_params,
+            profile_params=profile_params,
+        )
+        maps[query_mode] = np.asarray(counts)
+        pair_sets[query_mode] = {
+            (
+                int(pixel),
+                int(halo),
+                float(r_perp),
+            )
+            for pixel, halo, r_perp in zip(
+                np.asarray(stencil.pix_id),
+                np.asarray(stencil.halo_id),
+                np.asarray(stencil.r_perp),
+                strict=True,
+            )
+        }
+
+    assert maps["inclusive"].shape == maps["center"].shape
+    assert np.all(np.isfinite(maps["inclusive"]))
+    assert np.all(np.isfinite(maps["center"]))
+    if pair_sets["inclusive"] == pair_sets["center"]:
+        np.testing.assert_allclose(maps["inclusive"], maps["center"])
+
+
+def test_stencil_query_mode_comparison_helper_returns_audit_keys():
+    module = _load_example_module()
+    catalog, mask, mass_map, metadata = _single_pixel_pipeline_case()
+    selected_catalog = module.selected_lightcone_catalog(catalog, mask)
+    concentration_params = module.ConcentrationParams()
+    profile_params = module.NFWProfileParams()
+    rmax = module.nfw_stencil_rmax_mpc_h(
+        selected_catalog,
+        metadata,
+        concentration_params,
+        profile_params,
+        taper_radius_factor=10.0,
+    )
+
+    counts, stencil, comparison = module.compare_stencil_query_modes(
+        mass_map,
+        selected_catalog,
+        rmax,
+        metadata,
+        particle_mass_msun_h=1.0e10,
+        pixel_area_sr=module.healpix_pixel_area_sr(mass_map.nside),
+        concentration_params=concentration_params,
+        profile_params=profile_params,
+    )
+
+    assert counts.shape == mass_map.temperature.shape
+    assert stencil.n_pix == len(mass_map.pixel)
+    for key in (
+        "inclusive_stencil_seconds",
+        "center_stencil_seconds",
+        "inclusive_query_pixels_total",
+        "center_query_pixels_total",
+        "inclusive_kept_pairs_total",
+        "center_kept_pairs_total",
+        "max_abs_map_difference",
+        "sum_abs_map_difference",
+        "relative_sum_difference",
+        "differing_pixels",
+        "maps_allclose",
+    ):
+        assert key in comparison
+    assert comparison["center_query_pixels_total"] <= comparison["inclusive_query_pixels_total"]
+    assert isinstance(comparison["maps_allclose"], bool)
 
 
 def test_run_nfw_calibration_pipeline_dense_debug_path_paints_map():

@@ -65,6 +65,7 @@ import csv
 import glob
 import re
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
 from typing import Any
@@ -99,6 +100,39 @@ from geppetto.profiles import nfw_projected_surface_density, nfw_scale_radius_an
 # calibration path never calls the dense validation builder.
 _BRUTE_FORCE_STENCIL_BUILDER_REGRESSION_SENTINEL = build_lightcone_sparse_stencil_bruteforce
 _SEGMENT_RE = re.compile(r"seg(\d+)")
+
+
+@dataclass
+class StencilBuildDiagnostics:
+    """Host-side counters for HEALPix sparse-stencil construction."""
+
+    n_halos: int = 0
+    n_halos_with_query_pixels: int = 0
+    n_halos_with_inside_pixels: int = 0
+    n_halos_with_kept_pairs: int = 0
+    n_query_pixels_total: int = 0
+    n_inside_domain_total: int = 0
+    n_kept_pairs_total: int = 0
+    query_mode: str = "inclusive"
+    elapsed_seconds: float = 0.0
+
+    @property
+    def inside_over_query(self) -> float:
+        if self.n_query_pixels_total == 0:
+            return 0.0
+        return self.n_inside_domain_total / self.n_query_pixels_total
+
+    @property
+    def kept_over_query(self) -> float:
+        if self.n_query_pixels_total == 0:
+            return 0.0
+        return self.n_kept_pairs_total / self.n_query_pixels_total
+
+    @property
+    def kept_over_inside(self) -> float:
+        if self.n_inside_domain_total == 0:
+            return 0.0
+        return self.n_kept_pairs_total / self.n_inside_domain_total
 
 
 @contextmanager
@@ -246,6 +280,22 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help=argparse.SUPPRESS,
     )
+    parser.add_argument(
+        "--stencil-query-mode",
+        choices=("inclusive", "center"),
+        default="inclusive",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--stencil-diagnostics",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--stencil-compare-query-modes",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
     return parser.parse_args()
 
 
@@ -273,6 +323,10 @@ def validate_segment_workflow_args(args: argparse.Namespace) -> str:
     if all(single_segment_args) and not any(all_segment_args):
         return "single"
     if all(all_segment_args) and not any(single_segment_args):
+        if args.stencil_compare_query_modes:
+            raise ValueError(
+                "--stencil-compare-query-modes is currently supported only in single-segment mode"
+            )
         return "all"
     raise ValueError(
         "Provide either --mass-map, --sheet-index, --output "
@@ -556,7 +610,10 @@ def build_lightcone_sparse_stencil_for_mass_map_local(
     mass_map: PinocchioMassMap,
     catalog: LightconeHaloCatalog,
     rmax_mpc_h: np.ndarray,
-) -> LightconeSparseStencil:
+    *,
+    query_mode: str = "inclusive",
+    collect_diagnostics: bool = False,
+) -> LightconeSparseStencil | tuple[LightconeSparseStencil, StencilBuildDiagnostics]:
     """Build a HEALPix-local sparse stencil on a compact PINOCCHIO map domain.
 
     The returned ``pix_id`` values are compact row indices into
@@ -564,6 +621,9 @@ def build_lightcone_sparse_stencil_for_mass_map_local(
     outside JAX; the differentiable sparse painter receives only the retained
     local halo-pixel pairs.
     """
+
+    if query_mode not in ("inclusive", "center"):
+        raise ValueError("query_mode must be 'inclusive' or 'center'")
 
     try:
         import healpy as hp
@@ -595,31 +655,40 @@ def build_lightcone_sparse_stencil_for_mass_map_local(
     pix_id_chunks: list[np.ndarray] = []
     halo_id_chunks: list[np.ndarray] = []
     r_perp_chunks: list[np.ndarray] = []
+    diagnostics = StencilBuildDiagnostics(query_mode=query_mode)
+    inclusive = query_mode == "inclusive"
+    t0 = perf_counter()
 
     for halo_id, (halo_vector, chi_i, rmax_i) in enumerate(
         zip(halo_unit_vectors, halo_chi, rmax, strict=True)
     ):
+        diagnostics.n_halos += 1
         alpha_max = 2.0 * np.arcsin(min(1.0, float(rmax_i) / (2.0 * float(chi_i))))
         queried_pixels = np.asarray(
             hp.query_disc(
                 mass_map.nside,
                 halo_vector.astype(np.float64, copy=False),
                 alpha_max,
-                inclusive=True,
+                inclusive=inclusive,
                 nest=False,
             ),
             dtype=np.int64,
         )
+        diagnostics.n_query_pixels_total += int(queried_pixels.size)
         if queried_pixels.size == 0:
             continue
+        diagnostics.n_halos_with_query_pixels += 1
 
         rows = np.array(
             [pixel_to_row.get(int(pixel), -1) for pixel in queried_pixels],
             dtype=np.int64,
         )
         inside_domain = rows >= 0
+        n_inside = int(np.count_nonzero(inside_domain))
+        diagnostics.n_inside_domain_total += n_inside
         if not np.any(inside_domain):
             continue
+        diagnostics.n_halos_with_inside_pixels += 1
 
         local_pixels = queried_pixels[inside_domain]
         local_rows = rows[inside_domain]
@@ -629,13 +698,16 @@ def build_lightcone_sparse_stencil_for_mass_map_local(
         chord = np.sqrt(np.maximum(2.0 * (1.0 - cosang), 0.0))
         r_perp = chi_i * chord
         keep = r_perp <= float(rmax_i)
+        n_keep = int(np.count_nonzero(keep))
+        diagnostics.n_kept_pairs_total += n_keep
         if not np.any(keep):
             continue
+        diagnostics.n_halos_with_kept_pairs += 1
 
-        n_keep = int(np.count_nonzero(keep))
         pix_id_chunks.append(local_rows[keep])
         halo_id_chunks.append(np.full(n_keep, halo_id, dtype=np.int64))
         r_perp_chunks.append(r_perp[keep])
+    diagnostics.elapsed_seconds = perf_counter() - t0
 
     if pix_id_chunks:
         pix_id = np.concatenate(pix_id_chunks)
@@ -646,12 +718,151 @@ def build_lightcone_sparse_stencil_for_mass_map_local(
         halo_id = np.empty((0,), dtype=np.int64)
         r_perp = np.empty((0,), dtype=np.float64)
 
-    return LightconeSparseStencil(
+    stencil = LightconeSparseStencil(
         pix_id=jnp.asarray(pix_id, dtype=jnp.int32),
         halo_id=jnp.asarray(halo_id, dtype=jnp.int32),
         r_perp=jnp.asarray(r_perp, dtype=jnp.asarray(catalog.chi).dtype),
         n_pix=n_pix,
     )
+    if collect_diagnostics:
+        if diagnostics.n_kept_pairs_total != int(pix_id.shape[0]):
+            raise RuntimeError("stencil diagnostics kept-pair count does not match stencil size")
+        return stencil, diagnostics
+    return stencil
+
+
+def stencil_diagnostics_to_dict(diag: StencilBuildDiagnostics) -> dict[str, float | int | str]:
+    """Return NPZ-safe scalar diagnostics for a stencil build."""
+
+    return {
+        "stencil_query_mode": diag.query_mode,
+        "stencil_query_pixels_total": int(diag.n_query_pixels_total),
+        "stencil_inside_domain_total": int(diag.n_inside_domain_total),
+        "stencil_kept_pairs_total": int(diag.n_kept_pairs_total),
+        "stencil_inside_over_query": float(diag.inside_over_query),
+        "stencil_kept_over_query": float(diag.kept_over_query),
+        "stencil_kept_over_inside": float(diag.kept_over_inside),
+        "stencil_build_seconds": float(diag.elapsed_seconds),
+    }
+
+
+def print_stencil_diagnostics(diag: StencilBuildDiagnostics) -> None:
+    """Print HEALPix query diagnostics for one sparse-stencil build."""
+
+    print("Sparse-stencil HEALPix query diagnostics:")
+    print(f"  Query mode: {diag.query_mode}")
+    print(f"  Halos processed: {diag.n_halos}")
+    print(f"  Halos with query pixels: {diag.n_halos_with_query_pixels}")
+    print(f"  Halos with compact-domain pixels: {diag.n_halos_with_inside_pixels}")
+    print(f"  Halos with kept pairs: {diag.n_halos_with_kept_pairs}")
+    print(f"  Queried HEALPix pixels: {diag.n_query_pixels_total}")
+    print(f"  Inside compact domain: {diag.n_inside_domain_total}")
+    print(f"  Kept halo-pixel pairs: {diag.n_kept_pairs_total}")
+    print(f"  Inside/query fraction: {diag.inside_over_query:.6g}")
+    print(f"  Kept/query fraction: {diag.kept_over_query:.6g}")
+    print(f"  Kept/inside fraction: {diag.kept_over_inside:.6g}")
+    print(f"  Stencil build time [s]: {diag.elapsed_seconds:.6g}")
+
+
+def print_stencil_query_mode_comparison(
+    comparison: dict[str, bool | float | int | str],
+) -> None:
+    """Print an inclusive-vs-center sparse-stencil comparison report."""
+
+    print("Stencil query-mode comparison:")
+    print(f"  inclusive stencil time [s]: {comparison['inclusive_stencil_seconds']:.6g}")
+    print(f"  center stencil time [s]: {comparison['center_stencil_seconds']:.6g}")
+    print(f"  inclusive queried pixels: {comparison['inclusive_query_pixels_total']}")
+    print(f"  center queried pixels: {comparison['center_query_pixels_total']}")
+    print(f"  inclusive kept pairs: {comparison['inclusive_kept_pairs_total']}")
+    print(f"  center kept pairs: {comparison['center_kept_pairs_total']}")
+    print(f"  max abs map difference: {comparison['max_abs_map_difference']:.12g}")
+    print(f"  sum abs map difference: {comparison['sum_abs_map_difference']:.12g}")
+    print(f"  relative sum difference: {comparison['relative_sum_difference']:.12g}")
+    print(f"  differing pixels: {comparison['differing_pixels']}")
+    print(f"  maps allclose: {comparison['maps_allclose']}")
+
+
+def compare_stencil_query_modes(
+    mass_map: PinocchioMassMap,
+    selected_catalog: LightconeHaloCatalog,
+    rmax_mpc_h: np.ndarray,
+    metadata: PinocchioRunMetadata,
+    particle_mass_msun_h: float,
+    pixel_area_sr: float,
+    concentration_params: ConcentrationParams,
+    profile_params: NFWProfileParams,
+    *,
+    profile: bool = False,
+) -> tuple[jax.Array, LightconeSparseStencil, dict[str, bool | float | int | str]]:
+    """Build inclusive and center stencils, paint both maps, and compare them."""
+
+    stencils: dict[str, LightconeSparseStencil] = {}
+    diagnostics_by_mode: dict[str, StencilBuildDiagnostics] = {}
+    maps: dict[str, jax.Array] = {}
+
+    for query_mode in ("inclusive", "center"):
+        with timed_stage(f"NFW local sparse stencil ({query_mode})", profile):
+            stencil, diag = build_lightcone_sparse_stencil_for_mass_map_local(
+                mass_map,
+                selected_catalog,
+                rmax_mpc_h,
+                query_mode=query_mode,
+                collect_diagnostics=True,
+            )
+        with timed_stage(f"NFW particle map ({query_mode})", profile):
+            counts = paint_lightcone_particle_count_map_sparse(
+                stencil,
+                selected_catalog,
+                particle_mass_msun_h=particle_mass_msun_h,
+                pixel_area_sr=pixel_area_sr,
+                cosmology=metadata.cosmology,
+                concentration_params=concentration_params,
+                profile_params=profile_params,
+            )
+            counts.block_until_ready()
+        stencils[query_mode] = stencil
+        diagnostics_by_mode[query_mode] = diag
+        maps[query_mode] = counts
+
+    inclusive_map = np.asarray(maps["inclusive"])
+    center_map = np.asarray(maps["center"])
+    abs_diff = np.abs(inclusive_map - center_map)
+    inclusive_sum = float(np.sum(inclusive_map))
+    center_sum = float(np.sum(center_map))
+    relative_sum_difference = abs(inclusive_sum - center_sum) / max(abs(inclusive_sum), 1.0)
+    inclusive_diag = diagnostics_by_mode["inclusive"]
+    center_diag = diagnostics_by_mode["center"]
+
+    comparison: dict[str, bool | float | int | str] = {
+        "inclusive_stencil_seconds": float(inclusive_diag.elapsed_seconds),
+        "center_stencil_seconds": float(center_diag.elapsed_seconds),
+        "inclusive_query_pixels_total": int(inclusive_diag.n_query_pixels_total),
+        "center_query_pixels_total": int(center_diag.n_query_pixels_total),
+        "inclusive_inside_domain_total": int(inclusive_diag.n_inside_domain_total),
+        "center_inside_domain_total": int(center_diag.n_inside_domain_total),
+        "inclusive_kept_pairs_total": int(inclusive_diag.n_kept_pairs_total),
+        "center_kept_pairs_total": int(center_diag.n_kept_pairs_total),
+        "inclusive_inside_over_query": float(inclusive_diag.inside_over_query),
+        "center_inside_over_query": float(center_diag.inside_over_query),
+        "inclusive_kept_over_query": float(inclusive_diag.kept_over_query),
+        "center_kept_over_query": float(center_diag.kept_over_query),
+        "inclusive_kept_over_inside": float(inclusive_diag.kept_over_inside),
+        "center_kept_over_inside": float(center_diag.kept_over_inside),
+        "max_abs_map_difference": float(np.max(abs_diff)) if abs_diff.size else 0.0,
+        "sum_abs_map_difference": float(np.sum(abs_diff)),
+        "relative_sum_difference": float(relative_sum_difference),
+        "differing_pixels": int(np.count_nonzero(inclusive_map != center_map)),
+        "maps_allclose": bool(
+            np.allclose(
+                inclusive_map,
+                center_map,
+                rtol=1.0e-6,
+                atol=1.0e-10,
+            )
+        ),
+    }
+    return maps["inclusive"], stencils["inclusive"], comparison
 
 
 def nfw_sparse_total_particle_count(
@@ -800,6 +1011,9 @@ def run_nfw_calibration_pipeline(
     dense_demo: bool = False,
     compute_map_derivatives: bool = False,
     profile: bool = False,
+    stencil_query_mode: str = "inclusive",
+    stencil_diagnostics: bool = False,
+    stencil_compare_query_modes: bool = False,
 ) -> dict[str, bool | float | int | str | np.ndarray]:
     """Paint the NFW calibration map and optional concentration derivatives.
 
@@ -819,6 +1033,8 @@ def run_nfw_calibration_pipeline(
         raise ValueError("truncation_width_fraction must be positive")
     if dense_demo and compute_map_derivatives:
         raise ValueError("map-level concentration derivatives are only supported for sparse mode")
+    if dense_demo and (stencil_diagnostics or stencil_compare_query_modes):
+        raise ValueError("stencil diagnostics are only supported for sparse mode")
     if chunk_size is not None and chunk_size <= 0:
         chunk_size = None
 
@@ -840,6 +1056,9 @@ def run_nfw_calibration_pipeline(
         truncation_width_fraction=truncation_width_fraction
     )
     stencil = None
+    stencil_diag = None
+    comparison_diagnostics: dict[str, bool | float | int | str] = {}
+    nfw_particle_counts = None
     sparse_pair_count = dense_pair_count
     if not dense_demo:
         with timed_stage("NFW rmax", profile):
@@ -850,12 +1069,31 @@ def run_nfw_calibration_pipeline(
                 profile_params,
                 taper_radius_factor,
             )
-        with timed_stage("NFW local sparse stencil", profile):
-            stencil = build_lightcone_sparse_stencil_for_mass_map_local(
+        if stencil_compare_query_modes:
+            nfw_particle_counts, stencil, comparison_diagnostics = compare_stencil_query_modes(
                 mass_map,
                 selected_catalog,
                 rmax,
+                metadata,
+                particle_mass_msun_h,
+                pixel_area_sr,
+                concentration_params,
+                profile_params,
+                profile=profile,
             )
+        else:
+            with timed_stage("NFW local sparse stencil", profile):
+                stencil_result = build_lightcone_sparse_stencil_for_mass_map_local(
+                    mass_map,
+                    selected_catalog,
+                    rmax,
+                    query_mode=stencil_query_mode,
+                    collect_diagnostics=stencil_diagnostics,
+                )
+            if stencil_diagnostics:
+                stencil, stencil_diag = stencil_result
+            else:
+                stencil = stencil_result
         sparse_pair_count = int(stencil.size)
         print("NFW sparse stencil:")
         print(f"  Selected halos: {n_halo}")
@@ -866,14 +1104,18 @@ def run_nfw_calibration_pipeline(
             "  Sparse compression factor: "
             f"{_compression_factor(dense_pair_count, sparse_pair_count):.12g}"
         )
+        if stencil_diag is not None:
+            print_stencil_diagnostics(stencil_diag)
+        if comparison_diagnostics:
+            print_stencil_query_mode_comparison(comparison_diagnostics)
     else:
         with timed_stage("NFW dense pixel vectors", profile):
             pixel_unit_vectors = jnp.asarray(
                 healpix_pixel_unit_vectors(mass_map.nside, np.asarray(mass_map.pixel), nest=False)
             )
 
-    with timed_stage("NFW particle map", profile):
-        if dense_demo:
+    if dense_demo:
+        with timed_stage("NFW particle map", profile):
             assert pixel_unit_vectors is not None
             nfw_particle_counts = paint_lightcone_particle_count_map(
                 pixel_unit_vectors,
@@ -885,7 +1127,9 @@ def run_nfw_calibration_pipeline(
                 profile_params=profile_params,
                 chunk_size=chunk_size,
             )
-        else:
+            nfw_particle_counts.block_until_ready()
+    elif nfw_particle_counts is None:
+        with timed_stage("NFW particle map", profile):
             assert stencil is not None
             nfw_particle_counts = paint_lightcone_particle_count_map_sparse(
                 stencil,
@@ -896,6 +1140,8 @@ def run_nfw_calibration_pipeline(
                 concentration_params=concentration_params,
                 profile_params=profile_params,
             )
+            nfw_particle_counts.block_until_ready()
+    else:
         nfw_particle_counts.block_until_ready()
 
     total_counts = jnp.sum(nfw_particle_counts)
@@ -941,6 +1187,37 @@ def run_nfw_calibration_pipeline(
         "nfw_concentration_mass_pivot": float(concentration_mass_pivot),
         "nfw_truncation_width_fraction": float(truncation_width_fraction),
     }
+    if stencil_diag is not None:
+        diagnostics.update(stencil_diagnostics_to_dict(stencil_diag))
+    if comparison_diagnostics:
+        diagnostics.update(comparison_diagnostics)
+        if stencil_diagnostics:
+            diagnostics.update(
+                {
+                    "stencil_query_mode": "inclusive",
+                    "stencil_query_pixels_total": int(
+                        comparison_diagnostics["inclusive_query_pixels_total"]
+                    ),
+                    "stencil_inside_domain_total": int(
+                        comparison_diagnostics["inclusive_inside_domain_total"]
+                    ),
+                    "stencil_kept_pairs_total": int(
+                        comparison_diagnostics["inclusive_kept_pairs_total"]
+                    ),
+                    "stencil_inside_over_query": float(
+                        comparison_diagnostics["inclusive_inside_over_query"]
+                    ),
+                    "stencil_kept_over_query": float(
+                        comparison_diagnostics["inclusive_kept_over_query"]
+                    ),
+                    "stencil_kept_over_inside": float(
+                        comparison_diagnostics["inclusive_kept_over_inside"]
+                    ),
+                    "stencil_build_seconds": float(
+                        comparison_diagnostics["inclusive_stencil_seconds"]
+                    ),
+                }
+            )
     diagnostics.update(map_derivative_diagnostics)
     return diagnostics
 
@@ -1360,6 +1637,9 @@ def run_calibration_for_segment(
             dense_demo=args.nfw_dense_demo,
             compute_map_derivatives=compute_map_derivatives,
             profile=profile,
+            stencil_query_mode=args.stencil_query_mode,
+            stencil_diagnostics=args.stencil_diagnostics,
+            stencil_compare_query_modes=args.stencil_compare_query_modes,
         )
 
     with timed_stage("save NPZ", profile):
