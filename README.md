@@ -227,6 +227,25 @@ Each output preserves the corresponding PINOCCHIO segment's compact `PIXEL`
 list, row ordering, `NSIDE`, `ORDERING`, segment index, and segment bounds. The
 script does not produce a merged global light-cone map.
 
+Advanced parallel mode is opt-in. `--segment-workers N` uses a thread pool over
+mass-map segments within one process. `--mpi-plc-parts` uses one MPI rank per
+split PLC catalogue part named like `pinocchio.RUN.plc.out.0`,
+`pinocchio.RUN.plc.out.1`, and so on; the MPI world size must equal the number
+of discovered parts. Each rank paints only its local halo subset and rank 0
+reduces the partial maps before writing the final NPZ/FITS files and manifest.
+
+```bash
+mpiexec -n 4 python examples/paint_halo_particles_for_pinocchio_segment.py \
+  --params path/to/parameter_file \
+  --sheets path/to/pinocchio.RUN.sheets.out \
+  --plc-catalog path/to/pinocchio.RUN.plc.out \
+  --mass-map-glob "path/to/pinocchio.RUN.massmap.seg*.fits" \
+  --output-dir path/to/painted_nfw \
+  --mode derivatives \
+  --mpi-plc-parts \
+  --segment-workers 2
+```
+
 ### Pipeline Modes
 
 ```text

@@ -41,6 +41,9 @@ io = [
   "astropy>=6.0",
   "healpy>=1.16"
 ]
+mpi = [
+  "mpi4py>=4.0"
+]
 
 [project.urls]
 Repository = "https://github.com/TiagoBsCastro/GEPPETTO"

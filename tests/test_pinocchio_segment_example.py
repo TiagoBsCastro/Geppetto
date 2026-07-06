@@ -179,6 +179,8 @@ def test_example_script_help_runs():
     assert "--stencil-query-mode" not in result.stdout
     assert "--stencil-diagnostics" not in result.stdout
     assert "--stencil-compare-query-modes" not in result.stdout
+    assert "--mpi-plc-parts" not in result.stdout
+    assert "--segment-workers" not in result.stdout
 
 
 def test_parse_segment_index_from_mass_map_path():
@@ -216,6 +218,35 @@ def test_discover_mass_map_segments_rejects_duplicates_and_empty(tmp_path):
         module.discover_mass_map_segments(str(tmp_path / "*.fits"))
     with pytest.raises(ValueError, match="No mass-map segments match glob"):
         module.discover_mass_map_segments(str(tmp_path / "missing*.fits"))
+
+
+def test_discover_plc_catalog_parts_sorts_and_validates_mpi_size(tmp_path):
+    module = _load_example_module()
+    base = tmp_path / "pinocchio.demo.plc.out"
+    part1 = Path(f"{base}.1")
+    part0 = Path(f"{base}.0")
+    part1.touch()
+    part0.touch()
+
+    parts = module.discover_plc_catalog_parts(base)
+
+    assert parts == [part0, part1]
+    module.validate_mpi_plc_part_count(parts, mpi_size=2)
+    with pytest.raises(ValueError, match="one rank per PLC part"):
+        module.validate_mpi_plc_part_count(parts, mpi_size=3)
+
+
+def test_discover_plc_catalog_parts_rejects_empty_and_noncontiguous(tmp_path):
+    module = _load_example_module()
+    base = tmp_path / "pinocchio.demo.plc.out"
+
+    with pytest.raises(ValueError, match="No split PLC part files"):
+        module.discover_plc_catalog_parts(base)
+
+    Path(f"{base}.0").touch()
+    Path(f"{base}.2").touch()
+    with pytest.raises(ValueError, match="contiguous"):
+        module.discover_plc_catalog_parts(base)
 
 
 def test_validate_segment_workflow_args_accepts_single_and_all_modes(tmp_path):
@@ -271,6 +302,37 @@ def test_validate_segment_workflow_args_rejects_mixed_and_incomplete(tmp_path):
                 output_dir=tmp_path / "painted",
                 stencil_compare_query_modes=True,
             )
+        )
+
+
+def test_validate_mpi_workflow_args_rejects_missing_flag_and_query_comparison(tmp_path):
+    module = _load_example_module()
+    base = tmp_path / "pinocchio.demo.plc.out"
+    args = _workflow_args(plc_catalog=base, segment_workers=1, mpi_plc_parts=False)
+
+    with pytest.raises(ValueError, match="requires --mpi-plc-parts"):
+        module.validate_mpi_workflow_args(
+            args,
+            workflow="single",
+            mpi_context=module.MpiContext(enabled=False, size=2),
+        )
+
+    args = _workflow_args(
+        mass_map=None,
+        sheet_index=None,
+        output=None,
+        mass_map_glob=str(tmp_path / "*.fits"),
+        output_dir=tmp_path / "painted",
+        plc_catalog=base,
+        segment_workers=1,
+        mpi_plc_parts=True,
+        stencil_compare_query_modes=True,
+    )
+    with pytest.raises(ValueError, match="not supported with --mpi-plc-parts"):
+        module.validate_mpi_workflow_args(
+            args,
+            workflow="all",
+            mpi_context=module.MpiContext(enabled=True, size=2),
         )
 
 
@@ -378,6 +440,40 @@ def test_light_plc_requires_hubble_table():
     )
     with pytest.raises(ValueError, match="--hubble-table"):
         module.load_lightcone_catalog(args)
+
+
+def test_load_rank_local_lightcone_catalog_reads_this_rank_part(tmp_path, monkeypatch):
+    module = _load_example_module()
+    base = tmp_path / "pinocchio.demo.plc.out"
+    Path(f"{base}.0").touch()
+    Path(f"{base}.1").touch()
+    calls = []
+
+    class RawCatalog:
+        def to_lightcone_catalog(self, *, redshift):
+            assert redshift == "true"
+            return _catalog()
+
+    def fake_reader(path, *, format):
+        calls.append((Path(path), format))
+        return RawCatalog()
+
+    monkeypatch.setattr(module, "read_pinocchio_lightcone_catalog", fake_reader)
+    args = SimpleNamespace(
+        light_plc=False,
+        hubble_table=None,
+        plc_catalog=base,
+        catalog_format="auto",
+        redshift_mode="true",
+    )
+
+    catalog = module.load_rank_local_lightcone_catalog(
+        args,
+        module.MpiContext(enabled=True, rank=1, size=2),
+    )
+
+    assert catalog.mass.shape[0] == 4
+    assert calls == [(Path(f"{base}.1"), "auto")]
 
 
 def test_halo_particle_count_map_uses_compact_pixel_order_and_ignores_outside_pixels():
@@ -1129,6 +1225,122 @@ def test_print_nfw_calibration_summary_reports_map_derivatives(capsys):
     assert "Sum d(map)/d concentration redshift slope" in map_only
 
 
+def test_reduce_calibration_segment_result_sums_additive_payloads():
+    module = _load_example_module()
+    mass_map = _mass_map(np.array([0, 1]), temperature=np.array([10.0, 20.0]))
+    bounds = {
+        "sheet_index": 0,
+        "z_lo": 0.1,
+        "z_hi": 0.2,
+        "a_lo": 1.0 / 1.2,
+        "a_hi": 1.0 / 1.1,
+        "chi_lo_mpc_h": 100.0,
+        "chi_hi_mpc_h": 200.0,
+    }
+    local = module.CalibrationSegmentResult(
+        segment_index=0,
+        mass_map_path=Path("massmap.seg000.fits"),
+        output_npz=Path("painted.seg000.npz"),
+        output_fits=None,
+        bounds=bounds,
+        inclusive_upper=False,
+        mass_map=mass_map,
+        halo_particle_counts=np.array([1.0, 2.0]),
+        diagnostics={
+            "particle_mass_msun_h": 1.0,
+            "n_halos_total": 2,
+            "n_halos_in_segment": 1,
+            "n_halos_in_segment_and_pixels": 1,
+            "sum_halo_particle_counts": 3.0,
+            "sum_pinocchio_mass_map_values": 30.0,
+        },
+        nfw_diagnostics={
+            "pipeline_mode": "derivatives",
+            "particle_mass_msun_h": 1.0,
+            "nfw_particle_counts": np.array([0.5, 1.5]),
+            "nfw_map_derivatives": "concentration",
+            "d_nfw_particle_counts_d_concentration_amplitude": np.array([0.1, 0.2]),
+            "d_nfw_particle_counts_d_concentration_mass_slope": np.array([0.3, 0.4]),
+            "d_nfw_particle_counts_d_concentration_redshift_slope": np.array([0.5, 0.6]),
+            "sum_d_nfw_particle_counts_d_concentration_amplitude": 0.3,
+            "sum_d_nfw_particle_counts_d_concentration_mass_slope": 0.7,
+            "sum_d_nfw_particle_counts_d_concentration_redshift_slope": 1.1,
+            "nfw_paint_mode": "sparse",
+            "nfw_selected_halo_count": 1,
+            "nfw_compact_pixel_count": 2,
+            "nfw_sparse_pair_count": 2,
+            "nfw_dense_pair_count": 4,
+            "nfw_sparse_compression_factor": 2.0,
+            "nfw_sum_particle_counts": 2.0,
+            "nfw_concentration_amplitude": 5.71,
+            "nfw_concentration_mass_slope": -0.084,
+            "nfw_concentration_redshift_slope": -0.47,
+            "nfw_concentration_mass_pivot": 2.0e12,
+            "nfw_truncation_width_fraction": 0.05,
+        },
+    )
+
+    remote_values = [
+        np.array([3.0, 4.0]),
+        np.array([2.0, 3.0]),
+        np.array([0.4, 0.5]),
+        np.array([0.6, 0.7]),
+        np.array([0.8, 0.9]),
+        3,
+        2,
+        2,
+        7.0,
+        2,
+        3,
+        6,
+        5.0,
+        0.9,
+        1.3,
+        1.7,
+    ]
+
+    class PairwiseSumComm:
+        def __init__(self, values):
+            self.values = list(values)
+
+        def reduce(self, value, op=None, root=0):
+            del op, root
+            other = self.values.pop(0)
+            return np.asarray(value) + np.asarray(other)
+
+    context = module.MpiContext(
+        enabled=True,
+        comm=PairwiseSumComm(remote_values),
+        rank=0,
+        size=2,
+    )
+
+    reduced = module.reduce_calibration_segment_result(local, context)
+
+    assert reduced is not None
+    np.testing.assert_allclose(reduced.halo_particle_counts, [4.0, 6.0])
+    np.testing.assert_allclose(reduced.nfw_diagnostics["nfw_particle_counts"], [2.5, 4.5])
+    np.testing.assert_allclose(
+        reduced.nfw_diagnostics["d_nfw_particle_counts_d_concentration_amplitude"],
+        [0.5, 0.7],
+    )
+    assert reduced.diagnostics["n_halos_total"] == 5
+    assert reduced.diagnostics["n_halos_in_segment"] == 3
+    assert reduced.diagnostics["n_halos_in_segment_and_pixels"] == 3
+    assert reduced.diagnostics["sum_pinocchio_mass_map_values"] == 30.0
+    assert reduced.diagnostics["sum_halo_particle_counts"] == 10.0
+    assert reduced.nfw_diagnostics["nfw_selected_halo_count"] == 3
+    assert reduced.nfw_diagnostics["nfw_sparse_pair_count"] == 5
+    assert reduced.nfw_diagnostics["nfw_dense_pair_count"] == 10
+    assert reduced.nfw_diagnostics["nfw_compact_pixel_count"] == 2
+    assert reduced.nfw_diagnostics["nfw_sparse_compression_factor"] == 2.0
+    assert reduced.nfw_diagnostics["nfw_sum_particle_counts"] == 7.0
+    assert (
+        reduced.nfw_diagnostics["sum_d_nfw_particle_counts_d_concentration_amplitude"]
+        == 1.2
+    )
+
+
 def test_run_segment_workflow_all_segments_names_outputs_and_sets_inclusive_bounds(
     tmp_path,
     monkeypatch,
@@ -1217,6 +1429,103 @@ def test_run_segment_workflow_single_segment_uses_last_segment_flag(monkeypatch)
     assert calls[0]["inclusive_upper"] is True
     assert calls[0]["output_npz"] == Path("painted.seg000.npz")
     assert calls[0]["output_fits"] == Path("painted.seg000.fits")
+
+
+def test_run_segment_workflow_all_segments_uses_segment_workers(tmp_path, monkeypatch):
+    module = _load_example_module()
+    seg001 = tmp_path / "run.massmap.seg001.fits"
+    seg000 = tmp_path / "run.massmap.seg000.fits"
+    seg001.touch()
+    seg000.touch()
+    output_dir = tmp_path / "painted"
+    args = _workflow_args(
+        mass_map=None,
+        sheet_index=None,
+        output=None,
+        mass_map_glob=str(tmp_path / "*.fits"),
+        output_dir=output_dir,
+        segment_workers=2,
+    )
+    compute_calls = []
+    write_calls = []
+
+    def fake_compute(**kwargs):
+        compute_calls.append(kwargs)
+        return module.CalibrationSegmentResult(
+            segment_index=kwargs["segment_index"],
+            mass_map_path=kwargs["mass_map_path"],
+            output_npz=kwargs["output_npz"],
+            output_fits=kwargs["output_fits"],
+            bounds={
+                "sheet_index": kwargs["segment_index"],
+                "z_lo": 0.1,
+                "z_hi": 0.2,
+                "a_lo": 1.0 / 1.2,
+                "a_hi": 1.0 / 1.1,
+                "chi_lo_mpc_h": 100.0,
+                "chi_hi_mpc_h": 200.0,
+            },
+            inclusive_upper=kwargs["inclusive_upper"],
+            mass_map=_mass_map(np.array([0]), temperature=np.array([1.0])),
+            halo_particle_counts=np.array([1.0]),
+            diagnostics={
+                "particle_mass_msun_h": 1.0,
+                "n_halos_total": 1,
+                "n_halos_in_segment": 1,
+                "n_halos_in_segment_and_pixels": 1,
+                "sum_halo_particle_counts": 1.0,
+                "sum_pinocchio_mass_map_values": 1.0,
+            },
+            nfw_diagnostics={
+                "pipeline_mode": "paint",
+                "particle_mass_msun_h": 1.0,
+                "nfw_particle_counts": np.array([1.0]),
+                "nfw_map_derivatives": "none",
+                "nfw_paint_mode": "sparse",
+                "nfw_selected_halo_count": 1,
+                "nfw_compact_pixel_count": 1,
+                "nfw_sparse_pair_count": 1,
+                "nfw_dense_pair_count": 1,
+                "nfw_sparse_compression_factor": 1.0,
+                "nfw_sum_particle_counts": 1.0,
+                "nfw_concentration_amplitude": 5.71,
+                "nfw_concentration_mass_slope": -0.084,
+                "nfw_concentration_redshift_slope": -0.47,
+                "nfw_concentration_mass_pivot": 2.0e12,
+                "nfw_truncation_width_fraction": 0.05,
+            },
+        )
+
+    def fake_write(result, metadata, *, profile, verbose):
+        del metadata, profile, verbose
+        write_calls.append(result.segment_index)
+        return {"segment_index": result.segment_index}
+
+    manifest_calls = []
+    monkeypatch.setattr(module, "compute_calibration_for_segment", fake_compute)
+    monkeypatch.setattr(module, "write_calibration_segment_outputs", fake_write)
+    monkeypatch.setattr(
+        module,
+        "write_manifest",
+        lambda path, rows: manifest_calls.append((path, rows)),
+    )
+
+    rows = module.run_segment_workflow(
+        args,
+        workflow="all",
+        catalog=_catalog(),
+        sheets=_sheets(),
+        metadata=SimpleNamespace(particle_mass_msun_h=1.0, cosmology=Cosmology()),
+        particle_mass=1.0,
+        profile=False,
+        compute_map_derivatives=False,
+    )
+
+    assert sorted(call["segment_index"] for call in compute_calls) == [0, 1]
+    assert all(call["verbose"] is False for call in compute_calls)
+    assert write_calls == [0, 1]
+    assert rows == [{"segment_index": 0}, {"segment_index": 1}]
+    assert manifest_calls[0][1] == rows
 
 
 def test_local_sparse_stencil_uses_compact_rows_not_global_pixels():

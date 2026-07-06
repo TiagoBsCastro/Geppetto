@@ -63,7 +63,9 @@ from __future__ import annotations
 import argparse
 import csv
 import glob
+import os
 import re
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -100,6 +102,37 @@ from geppetto.profiles import nfw_projected_surface_density, nfw_scale_radius_an
 # calibration path never calls the dense validation builder.
 _BRUTE_FORCE_STENCIL_BUILDER_REGRESSION_SENTINEL = build_lightcone_sparse_stencil_bruteforce
 _SEGMENT_RE = re.compile(r"seg(\d+)")
+
+
+@dataclass(frozen=True)
+class MpiContext:
+    """Minimal MPI runtime state for optional rank-per-PLC-part painting."""
+
+    enabled: bool = False
+    comm: Any | None = None
+    rank: int = 0
+    size: int = 1
+    sum_op: Any | None = None
+
+    @property
+    def is_root(self) -> bool:
+        return self.rank == 0
+
+
+@dataclass
+class CalibrationSegmentResult:
+    """Computed segment payload, before any output files are written."""
+
+    segment_index: int
+    mass_map_path: Path
+    output_npz: Path
+    output_fits: Path | None
+    bounds: dict[str, float]
+    inclusive_upper: bool
+    mass_map: PinocchioMassMap
+    halo_particle_counts: np.ndarray
+    diagnostics: dict[str, float | int]
+    nfw_diagnostics: dict[str, bool | float | int | str | np.ndarray]
 
 
 @dataclass
@@ -296,6 +329,17 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help=argparse.SUPPRESS,
     )
+    parser.add_argument(
+        "--mpi-plc-parts",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--segment-workers",
+        type=int,
+        default=1,
+        help=argparse.SUPPRESS,
+    )
     return parser.parse_args()
 
 
@@ -332,6 +376,117 @@ def validate_segment_workflow_args(args: argparse.Namespace) -> str:
         "Provide either --mass-map, --sheet-index, --output "
         "or --mass-map-glob, --output-dir."
     )
+
+
+def _mpi_environment_size_hint() -> int:
+    """Return a best-effort MPI world-size hint without importing mpi4py."""
+
+    for name in (
+        "OMPI_COMM_WORLD_SIZE",
+        "PMI_SIZE",
+        "PMIX_SIZE",
+        "MPI_LOCALNRANKS",
+        "MV2_COMM_WORLD_SIZE",
+    ):
+        value = os.environ.get(name)
+        if value is None:
+            continue
+        try:
+            size = int(value)
+        except ValueError:
+            continue
+        if size > 1:
+            return size
+    return 1
+
+
+def initialize_mpi_context(requested: bool) -> MpiContext:
+    """Initialize optional MPI state only when requested or launched under MPI."""
+
+    if not requested and _mpi_environment_size_hint() <= 1:
+        return MpiContext()
+
+    try:
+        from mpi4py import MPI
+    except ImportError as exc:
+        raise RuntimeError("MPI execution requires mpi4py; install geppetto[mpi]") from exc
+
+    comm = MPI.COMM_WORLD
+    size = int(comm.Get_size())
+    rank = int(comm.Get_rank())
+    return MpiContext(
+        enabled=bool(requested),
+        comm=comm,
+        rank=rank,
+        size=size,
+        sum_op=MPI.SUM,
+    )
+
+
+def discover_plc_catalog_parts(path: Path) -> list[Path]:
+    """Return contiguous split PLC part files named ``path.0``, ``path.1``, ..."""
+
+    base = Path(path)
+    pattern = re.compile(rf"{re.escape(base.name)}\.(\d+)$")
+    parts: list[tuple[int, Path]] = []
+    for candidate in base.parent.glob(f"{base.name}.*"):
+        match = pattern.fullmatch(candidate.name)
+        if match is not None:
+            parts.append((int(match.group(1)), candidate))
+
+    if not parts:
+        raise ValueError(f"No split PLC part files found for MPI mode: {base}.0, {base}.1, ...")
+
+    parts = sorted(parts, key=lambda item: item[0])
+    indices = [index for index, _ in parts]
+    expected = list(range(len(parts)))
+    if indices != expected:
+        raise ValueError(
+            "Split PLC part files must be contiguous from 0: "
+            f"found {indices}, expected {expected}"
+        )
+    return [path for _, path in parts]
+
+
+def validate_mpi_plc_part_count(parts: list[Path], mpi_size: int) -> None:
+    """Require exactly one MPI rank per split PLC part."""
+
+    n_parts = len(parts)
+    if mpi_size != n_parts:
+        raise ValueError(
+            "MPI PLC part mode requires one rank per PLC part: "
+            f"Nmpi={mpi_size}, Nparts={n_parts}"
+        )
+
+
+def plc_catalog_path_for_rank(plc_catalog: Path, mpi_context: MpiContext) -> Path:
+    """Return the catalogue path this rank should read."""
+
+    if not mpi_context.enabled:
+        return Path(plc_catalog)
+    parts = discover_plc_catalog_parts(Path(plc_catalog))
+    validate_mpi_plc_part_count(parts, mpi_context.size)
+    return parts[mpi_context.rank]
+
+
+def validate_mpi_workflow_args(
+    args: argparse.Namespace,
+    *,
+    workflow: str,
+    mpi_context: MpiContext,
+) -> None:
+    """Validate MPI-specific workflow constraints."""
+
+    segment_workers = int(getattr(args, "segment_workers", 1))
+    if segment_workers < 1:
+        raise ValueError("--segment-workers must be at least 1")
+    if mpi_context.size > 1 and not bool(getattr(args, "mpi_plc_parts", False)):
+        raise ValueError("MPI world size > 1 requires --mpi-plc-parts")
+    if mpi_context.enabled and bool(getattr(args, "stencil_compare_query_modes", False)):
+        raise ValueError("--stencil-compare-query-modes is not supported with --mpi-plc-parts")
+    if mpi_context.enabled:
+        parts = discover_plc_catalog_parts(Path(args.plc_catalog))
+        validate_mpi_plc_part_count(parts, mpi_context.size)
 
 
 def parse_segment_index_from_mass_map_path(path: Path) -> int:
@@ -374,14 +529,18 @@ def segment_output_paths(output_dir: Path, segment_index: int) -> dict[str, Path
     }
 
 
-def load_lightcone_catalog(args: argparse.Namespace) -> LightconeHaloCatalog:
+def load_lightcone_catalog(
+    args: argparse.Namespace,
+    plc_catalog_path: Path | None = None,
+) -> LightconeHaloCatalog:
     """Load a full or light PINOCCHIO PLC catalogue as a GEPPETTO catalogue."""
 
+    source = Path(args.plc_catalog) if plc_catalog_path is None else Path(plc_catalog_path)
     if args.light_plc:
         if args.hubble_table is None:
             raise ValueError("--hubble-table is required when --light-plc is used")
         raw = read_pinocchio_lightcone_light_catalog(
-            args.plc_catalog,
+            source,
             format=args.catalog_format,
         )
         distance_interpolator = read_pinocchio_hubble_table(args.hubble_table)
@@ -390,8 +549,20 @@ def load_lightcone_catalog(args: argparse.Namespace) -> LightconeHaloCatalog:
             redshift=args.redshift_mode,
         )
 
-    raw = read_pinocchio_lightcone_catalog(args.plc_catalog, format=args.catalog_format)
+    raw = read_pinocchio_lightcone_catalog(source, format=args.catalog_format)
     return raw.to_lightcone_catalog(redshift=args.redshift_mode)
+
+
+def load_rank_local_lightcone_catalog(
+    args: argparse.Namespace,
+    mpi_context: MpiContext,
+) -> LightconeHaloCatalog:
+    """Load all PLC parts in serial mode or this rank's one PLC part in MPI mode."""
+
+    return load_lightcone_catalog(
+        args,
+        plc_catalog_path_for_rank(Path(args.plc_catalog), mpi_context),
+    )
 
 
 def segment_bounds(sheets: Any, sheet_index: int) -> dict[str, float]:
@@ -1014,6 +1185,7 @@ def run_nfw_calibration_pipeline(
     stencil_query_mode: str = "inclusive",
     stencil_diagnostics: bool = False,
     stencil_compare_query_modes: bool = False,
+    verbose: bool = True,
 ) -> dict[str, bool | float | int | str | np.ndarray]:
     """Paint the NFW calibration map and optional concentration derivatives.
 
@@ -1095,19 +1267,20 @@ def run_nfw_calibration_pipeline(
             else:
                 stencil = stencil_result
         sparse_pair_count = int(stencil.size)
-        print("NFW sparse stencil:")
-        print(f"  Selected halos: {n_halo}")
-        print(f"  Compact pixels: {n_pix}")
-        print(f"  Sparse halo-pixel pairs: {sparse_pair_count}")
-        print(f"  Dense pair count: {dense_pair_count}")
-        print(
-            "  Sparse compression factor: "
-            f"{_compression_factor(dense_pair_count, sparse_pair_count):.12g}"
-        )
-        if stencil_diag is not None:
-            print_stencil_diagnostics(stencil_diag)
-        if comparison_diagnostics:
-            print_stencil_query_mode_comparison(comparison_diagnostics)
+        if verbose:
+            print("NFW sparse stencil:")
+            print(f"  Selected halos: {n_halo}")
+            print(f"  Compact pixels: {n_pix}")
+            print(f"  Sparse halo-pixel pairs: {sparse_pair_count}")
+            print(f"  Dense pair count: {dense_pair_count}")
+            print(
+                "  Sparse compression factor: "
+                f"{_compression_factor(dense_pair_count, sparse_pair_count):.12g}"
+            )
+            if stencil_diag is not None:
+                print_stencil_diagnostics(stencil_diag)
+            if comparison_diagnostics:
+                print_stencil_query_mode_comparison(comparison_diagnostics)
     else:
         with timed_stage("NFW dense pixel vectors", profile):
             pixel_unit_vectors = jnp.asarray(
@@ -1559,7 +1732,7 @@ def print_nfw_calibration_summary(
         )
 
 
-def run_calibration_for_segment(
+def compute_calibration_for_segment(
     *,
     segment_index: int,
     mass_map_path: Path,
@@ -1573,18 +1746,21 @@ def run_calibration_for_segment(
     profile: bool,
     compute_map_derivatives: bool,
     inclusive_upper: bool,
-) -> dict[str, object]:
-    """Run the complete NFW calibration pipeline for one mass-map segment."""
+    verbose: bool = True,
+) -> CalibrationSegmentResult:
+    """Compute the NFW calibration payload for one segment without writing files."""
 
-    print(f"Processing segment {segment_index}: {mass_map_path}")
-    with timed_stage("segment bounds", profile):
+    stage_profile = profile and verbose
+    if verbose:
+        print(f"Processing segment {segment_index}: {mass_map_path}")
+    with timed_stage("segment bounds", stage_profile):
         bounds = segment_bounds(sheets, segment_index)
 
-    with timed_stage("read mass map", profile):
+    with timed_stage("read mass map", stage_profile):
         mass_map = read_pinocchio_mass_map_fits(mass_map_path)
         validate_mass_map(mass_map)
 
-    with timed_stage("select segment mask", profile):
+    with timed_stage("select segment mask", stage_profile):
         mask = select_segment_mask(
             catalog,
             bounds,
@@ -1592,10 +1768,11 @@ def run_calibration_for_segment(
             inclusive_upper=inclusive_upper,
         )
 
-    print_segment_summary(bounds, inclusive_upper)
-    with timed_stage("point-halo rows", profile):
+    if verbose:
+        print_segment_summary(bounds, inclusive_upper)
+    with timed_stage("point-halo rows", stage_profile):
         rows, inside_pixel_domain = halo_rows_in_mass_map(catalog, mask, mass_map)
-    with timed_stage("point-halo accumulation", profile):
+    with timed_stage("point-halo accumulation", stage_profile):
         out = _accumulate_halo_particle_counts(
             catalog,
             mask,
@@ -1610,7 +1787,7 @@ def run_calibration_for_segment(
     if len(out) != len(mass_map.pixel):
         raise RuntimeError("output map length does not match mass_map.pixel")
 
-    with timed_stage("point-halo diagnostics", profile):
+    with timed_stage("point-halo diagnostics", stage_profile):
         diagnostics = diagnostics_for_map(
             catalog,
             mask,
@@ -1619,7 +1796,7 @@ def run_calibration_for_segment(
             particle_mass,
             inside_pixel_domain,
         )
-    with timed_stage(nfw_stage_label(args.mode), profile):
+    with timed_stage(nfw_stage_label(args.mode), stage_profile):
         nfw_diagnostics = run_nfw_calibration_pipeline(
             catalog,
             mask,
@@ -1636,40 +1813,42 @@ def run_calibration_for_segment(
             taper_radius_factor=args.nfw_taper_radius_factor,
             dense_demo=args.nfw_dense_demo,
             compute_map_derivatives=compute_map_derivatives,
-            profile=profile,
+            profile=stage_profile,
             stencil_query_mode=args.stencil_query_mode,
             stencil_diagnostics=args.stencil_diagnostics,
             stencil_compare_query_modes=args.stencil_compare_query_modes,
+            verbose=verbose,
         )
 
-    with timed_stage("save NPZ", profile):
-        save_npz(output_npz, out, mass_map, bounds, metadata, diagnostics, nfw_diagnostics)
-    if output_fits is not None:
-        with timed_stage("write NFW FITS", profile):
-            write_nfw_painted_fits(
-                output_fits,
-                np.asarray(nfw_diagnostics["nfw_particle_counts"]),
-                mass_map,
-                bounds,
-                nfw_diagnostics,
-            )
+    return CalibrationSegmentResult(
+        segment_index=int(segment_index),
+        mass_map_path=Path(mass_map_path),
+        output_npz=Path(output_npz),
+        output_fits=None if output_fits is None else Path(output_fits),
+        bounds=bounds,
+        inclusive_upper=bool(inclusive_upper),
+        mass_map=mass_map,
+        halo_particle_counts=out,
+        diagnostics=diagnostics,
+        nfw_diagnostics=nfw_diagnostics,
+    )
 
-    print_output_summary(diagnostics, out, mass_map)
-    print_nfw_calibration_summary(nfw_diagnostics)
-    print(f"Wrote NPZ: {output_npz}")
-    if output_fits is not None:
-        print(f"Wrote NFW FITS: {output_fits}")
 
+def calibration_manifest_row(result: CalibrationSegmentResult) -> dict[str, object]:
+    """Return the manifest row for a computed or MPI-reduced segment."""
+
+    diagnostics = result.diagnostics
+    nfw_diagnostics = result.nfw_diagnostics
     row: dict[str, object] = {
-        "segment_index": int(segment_index),
-        "mass_map_path": str(mass_map_path),
-        "output_npz": str(output_npz),
-        "output_fits": "" if output_fits is None else str(output_fits),
-        "z_lo": float(bounds["z_lo"]),
-        "z_hi": float(bounds["z_hi"]),
-        "chi_lo_mpc_h": float(bounds["chi_lo_mpc_h"]),
-        "chi_hi_mpc_h": float(bounds["chi_hi_mpc_h"]),
-        "inclusive_upper": bool(inclusive_upper),
+        "segment_index": int(result.segment_index),
+        "mass_map_path": str(result.mass_map_path),
+        "output_npz": str(result.output_npz),
+        "output_fits": "" if result.output_fits is None else str(result.output_fits),
+        "z_lo": float(result.bounds["z_lo"]),
+        "z_hi": float(result.bounds["z_hi"]),
+        "chi_lo_mpc_h": float(result.bounds["chi_lo_mpc_h"]),
+        "chi_hi_mpc_h": float(result.bounds["chi_hi_mpc_h"]),
+        "inclusive_upper": bool(result.inclusive_upper),
         "n_halos_in_segment": int(diagnostics["n_halos_in_segment"]),
         "n_halos_in_segment_and_pixels": int(diagnostics["n_halos_in_segment_and_pixels"]),
         "nfw_selected_halo_count": int(nfw_diagnostics["nfw_selected_halo_count"]),
@@ -1688,6 +1867,220 @@ def run_calibration_for_segment(
     return row
 
 
+def write_calibration_segment_outputs(
+    result: CalibrationSegmentResult,
+    metadata: PinocchioRunMetadata,
+    *,
+    profile: bool,
+    verbose: bool = True,
+) -> dict[str, object]:
+    """Write one computed segment payload and return its manifest row."""
+
+    with timed_stage("save NPZ", profile):
+        save_npz(
+            result.output_npz,
+            result.halo_particle_counts,
+            result.mass_map,
+            result.bounds,
+            metadata,
+            result.diagnostics,
+            result.nfw_diagnostics,
+        )
+    if result.output_fits is not None:
+        with timed_stage("write NFW FITS", profile):
+            write_nfw_painted_fits(
+                result.output_fits,
+                np.asarray(result.nfw_diagnostics["nfw_particle_counts"]),
+                result.mass_map,
+                result.bounds,
+                result.nfw_diagnostics,
+            )
+
+    if verbose:
+        print_output_summary(result.diagnostics, result.halo_particle_counts, result.mass_map)
+        print_nfw_calibration_summary(result.nfw_diagnostics)
+        print(f"Wrote NPZ: {result.output_npz}")
+        if result.output_fits is not None:
+            print(f"Wrote NFW FITS: {result.output_fits}")
+
+    return calibration_manifest_row(result)
+
+
+def run_calibration_for_segment(
+    *,
+    segment_index: int,
+    mass_map_path: Path,
+    output_npz: Path,
+    output_fits: Path | None,
+    catalog: LightconeHaloCatalog,
+    sheets: Any,
+    metadata: PinocchioRunMetadata,
+    particle_mass: float,
+    args: argparse.Namespace,
+    profile: bool,
+    compute_map_derivatives: bool,
+    inclusive_upper: bool,
+) -> dict[str, object]:
+    """Run the complete NFW calibration pipeline for one mass-map segment."""
+
+    result = compute_calibration_for_segment(
+        segment_index=segment_index,
+        mass_map_path=mass_map_path,
+        output_npz=output_npz,
+        output_fits=output_fits,
+        catalog=catalog,
+        sheets=sheets,
+        metadata=metadata,
+        particle_mass=particle_mass,
+        args=args,
+        profile=profile,
+        compute_map_derivatives=compute_map_derivatives,
+        inclusive_upper=inclusive_upper,
+        verbose=True,
+    )
+    return write_calibration_segment_outputs(
+        result,
+        metadata,
+        profile=profile,
+        verbose=True,
+    )
+
+
+def _mpi_sum(value: Any, mpi_context: MpiContext) -> Any:
+    if not mpi_context.enabled:
+        return value
+    if mpi_context.comm is None:
+        raise RuntimeError("MPI context is enabled but has no communicator")
+    if mpi_context.sum_op is None:
+        return mpi_context.comm.reduce(value, root=0)
+    return mpi_context.comm.reduce(value, op=mpi_context.sum_op, root=0)
+
+
+def _as_reduced_number(value: Any, *, integer: bool) -> int | float:
+    array = np.asarray(value)
+    scalar = array.item() if array.shape == () else value
+    if integer:
+        return int(scalar)
+    return float(scalar)
+
+
+def reduce_calibration_segment_result(
+    local_result: CalibrationSegmentResult,
+    mpi_context: MpiContext,
+) -> CalibrationSegmentResult | None:
+    """Sum rank-local segment maps and additive diagnostics onto rank 0."""
+
+    if not mpi_context.enabled:
+        return local_result
+
+    reduced_halo_counts = _mpi_sum(local_result.halo_particle_counts, mpi_context)
+    reduced_nfw_counts = _mpi_sum(
+        np.asarray(local_result.nfw_diagnostics["nfw_particle_counts"]),
+        mpi_context,
+    )
+
+    derivative_array_keys = (
+        "d_nfw_particle_counts_d_concentration_amplitude",
+        "d_nfw_particle_counts_d_concentration_mass_slope",
+        "d_nfw_particle_counts_d_concentration_redshift_slope",
+    )
+    reduced_derivative_arrays = {
+        key: _mpi_sum(np.asarray(local_result.nfw_diagnostics[key]), mpi_context)
+        for key in derivative_array_keys
+        if key in local_result.nfw_diagnostics
+    }
+
+    diagnostic_sum_keys = (
+        "n_halos_total",
+        "n_halos_in_segment",
+        "n_halos_in_segment_and_pixels",
+        "sum_halo_particle_counts",
+    )
+    reduced_diagnostics = {
+        key: _mpi_sum(local_result.diagnostics[key], mpi_context)
+        for key in diagnostic_sum_keys
+        if key in local_result.diagnostics
+    }
+
+    nfw_sum_keys = (
+        "nfw_selected_halo_count",
+        "nfw_sparse_pair_count",
+        "nfw_dense_pair_count",
+        "nfw_sum_particle_counts",
+        "sum_d_nfw_particle_counts_d_concentration_amplitude",
+        "sum_d_nfw_particle_counts_d_concentration_mass_slope",
+        "sum_d_nfw_particle_counts_d_concentration_redshift_slope",
+        "stencil_query_pixels_total",
+        "stencil_inside_domain_total",
+        "stencil_kept_pairs_total",
+    )
+    reduced_nfw_scalars = {
+        key: _mpi_sum(local_result.nfw_diagnostics[key], mpi_context)
+        for key in nfw_sum_keys
+        if key in local_result.nfw_diagnostics
+    }
+
+    if not mpi_context.is_root:
+        return None
+
+    diagnostics = dict(local_result.diagnostics)
+    for key, value in reduced_diagnostics.items():
+        diagnostics[key] = _as_reduced_number(
+            value,
+            integer=key.startswith("n_halos"),
+        )
+    diagnostics["sum_halo_particle_counts"] = float(np.sum(reduced_halo_counts))
+
+    nfw_diagnostics = dict(local_result.nfw_diagnostics)
+    nfw_diagnostics["nfw_particle_counts"] = np.asarray(reduced_nfw_counts)
+    for key, value in reduced_derivative_arrays.items():
+        nfw_diagnostics[key] = np.asarray(value)
+    integer_nfw_keys = {
+        "nfw_selected_halo_count",
+        "nfw_sparse_pair_count",
+        "nfw_dense_pair_count",
+        "stencil_query_pixels_total",
+        "stencil_inside_domain_total",
+        "stencil_kept_pairs_total",
+    }
+    for key, value in reduced_nfw_scalars.items():
+        nfw_diagnostics[key] = _as_reduced_number(
+            value,
+            integer=key in integer_nfw_keys,
+        )
+    nfw_diagnostics["nfw_sum_particle_counts"] = float(
+        np.sum(nfw_diagnostics["nfw_particle_counts"])
+    )
+    nfw_diagnostics["nfw_sparse_compression_factor"] = _compression_factor(
+        int(nfw_diagnostics["nfw_dense_pair_count"]),
+        int(nfw_diagnostics["nfw_sparse_pair_count"]),
+    )
+    if {
+        "stencil_query_pixels_total",
+        "stencil_inside_domain_total",
+        "stencil_kept_pairs_total",
+    }.issubset(nfw_diagnostics):
+        query = int(nfw_diagnostics["stencil_query_pixels_total"])
+        inside = int(nfw_diagnostics["stencil_inside_domain_total"])
+        kept = int(nfw_diagnostics["stencil_kept_pairs_total"])
+        nfw_diagnostics["stencil_inside_over_query"] = inside / query if query else 0.0
+        nfw_diagnostics["stencil_kept_over_query"] = kept / query if query else 0.0
+        nfw_diagnostics["stencil_kept_over_inside"] = kept / inside if inside else 0.0
+
+    return CalibrationSegmentResult(
+        segment_index=local_result.segment_index,
+        mass_map_path=local_result.mass_map_path,
+        output_npz=local_result.output_npz,
+        output_fits=local_result.output_fits,
+        bounds=local_result.bounds,
+        inclusive_upper=local_result.inclusive_upper,
+        mass_map=local_result.mass_map,
+        halo_particle_counts=np.asarray(reduced_halo_counts),
+        diagnostics=diagnostics,
+        nfw_diagnostics=nfw_diagnostics,
+    )
+
+
 def run_segment_workflow(
     args: argparse.Namespace,
     *,
@@ -1698,8 +2091,15 @@ def run_segment_workflow(
     particle_mass: float,
     profile: bool,
     compute_map_derivatives: bool,
+    mpi_context: MpiContext | None = None,
 ) -> list[dict[str, object]]:
     """Run either the single-segment or all-segments workflow."""
+
+    if mpi_context is None:
+        mpi_context = MpiContext()
+    segment_workers = int(getattr(args, "segment_workers", 1))
+    if segment_workers < 1:
+        raise ValueError("--segment-workers must be at least 1")
 
     if workflow == "single":
         segments = [(int(args.sheet_index), Path(args.mass_map))]
@@ -1708,7 +2108,8 @@ def run_segment_workflow(
     elif workflow == "all":
         segments = discover_mass_map_segments(str(args.mass_map_glob))
         output_dir = Path(args.output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
+        if mpi_context.is_root:
+            output_dir.mkdir(parents=True, exist_ok=True)
         last_segment_index = max(segment_index for segment_index, _ in segments)
         output_specs = []
         inclusive_values = []
@@ -1719,15 +2120,39 @@ def run_segment_workflow(
     else:
         raise ValueError("workflow must be 'single' or 'all'")
 
+    segment_specs = list(
+        zip(
+            segments,
+            output_specs,
+            inclusive_values,
+            strict=True,
+        )
+    )
+
     manifest_rows = []
-    for (segment_index, mass_map_path), (output_npz, output_fits), inclusive_upper in zip(
-        segments,
-        output_specs,
-        inclusive_values,
-        strict=True,
-    ):
-        manifest_rows.append(
-            run_calibration_for_segment(
+    if not mpi_context.enabled and segment_workers == 1:
+        for (segment_index, mass_map_path), (output_npz, output_fits), inclusive_upper in segment_specs:
+            manifest_rows.append(
+                run_calibration_for_segment(
+                    segment_index=segment_index,
+                    mass_map_path=mass_map_path,
+                    output_npz=output_npz,
+                    output_fits=output_fits,
+                    catalog=catalog,
+                    sheets=sheets,
+                    metadata=metadata,
+                    particle_mass=particle_mass,
+                    args=args,
+                    profile=profile,
+                    compute_map_derivatives=compute_map_derivatives,
+                    inclusive_upper=inclusive_upper,
+                )
+            )
+    else:
+
+        def compute_one(spec):
+            (segment_index, mass_map_path), (output_npz, output_fits), inclusive_upper = spec
+            return compute_calibration_for_segment(
                 segment_index=segment_index,
                 mass_map_path=mass_map_path,
                 output_npz=output_npz,
@@ -1740,10 +2165,29 @@ def run_segment_workflow(
                 profile=profile,
                 compute_map_derivatives=compute_map_derivatives,
                 inclusive_upper=inclusive_upper,
+                verbose=False,
             )
-        )
 
-    if workflow == "all":
+        if segment_workers == 1:
+            local_results = [compute_one(spec) for spec in segment_specs]
+        else:
+            with ThreadPoolExecutor(max_workers=segment_workers) as executor:
+                local_results = list(executor.map(compute_one, segment_specs))
+
+        for local_result in sorted(local_results, key=lambda result: result.segment_index):
+            reduced_result = reduce_calibration_segment_result(local_result, mpi_context)
+            if reduced_result is None:
+                continue
+            manifest_rows.append(
+                write_calibration_segment_outputs(
+                    reduced_result,
+                    metadata,
+                    profile=profile,
+                    verbose=mpi_context.is_root,
+                )
+            )
+
+    if workflow == "all" and mpi_context.is_root:
         manifest_path = Path(args.output_dir) / "painted_nfw_manifest.csv"
         with timed_stage("write manifest", profile):
             write_manifest(manifest_path, manifest_rows)
@@ -1756,6 +2200,8 @@ def main() -> None:
 
     args = parse_args()
     workflow = validate_segment_workflow_args(args)
+    mpi_context = initialize_mpi_context(bool(args.mpi_plc_parts))
+    validate_mpi_workflow_args(args, workflow=workflow, mpi_context=mpi_context)
     profile = args.mode in ("profile", "derivatives-profile")
     compute_map_derivatives = args.mode in ("derivatives", "derivatives-profile")
 
@@ -1774,7 +2220,7 @@ def main() -> None:
     with timed_stage("read sheets", profile):
         sheets = read_pinocchio_mass_sheets(args.sheets)
     with timed_stage("load PLC catalogue", profile):
-        catalog = load_lightcone_catalog(args)
+        catalog = load_rank_local_lightcone_catalog(args, mpi_context)
         validate_catalog_for_binning(catalog)
 
     run_segment_workflow(
@@ -1786,6 +2232,7 @@ def main() -> None:
         particle_mass=particle_mass,
         profile=profile,
         compute_map_derivatives=compute_map_derivatives,
+        mpi_context=mpi_context,
     )
 
 

@@ -154,6 +154,14 @@ python examples/paint_halo_particles_for_pinocchio_segment.py ... \
 reports stencil timing, query counts, kept-pair counts, and painted-map
 differences.
 
+The same calibration script has an opt-in mixed parallel mode. In
+`--mpi-plc-parts` mode, rank `r` reads only `--plc-catalog.r`; the number of MPI
+ranks must match the number of contiguous split PLC parts. Each rank computes
+partial compact segment maps from its local halos, then rank 0 sums additive
+arrays and diagnostics and writes the final NPZ/FITS outputs. Segment-level
+parallelism inside each rank uses `--segment-workers N`, a shared-memory thread
+pool over mass-map segments.
+
 ## Box mode
 
 The box painter constructs cell-centre positions and evaluates the 3D profile with optional periodic minimum-image wrapping. This is intended for snapshot-box validation and for measuring the matter power spectrum from the painted one-halo density field.
