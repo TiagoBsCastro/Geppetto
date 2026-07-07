@@ -141,9 +141,67 @@ def _workflow_args(**overrides) -> SimpleNamespace:
         "stencil_query_mode": "inclusive",
         "stencil_diagnostics": False,
         "stencil_compare_query_modes": False,
+        "mpi_plc_parts": False,
+        "mpi_output_mode": "reduce",
+        "segment_workers": 1,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
+
+
+def _fake_segment_result(
+    module,
+    *,
+    segment_index: int,
+    mass_map_path: Path,
+    output_npz: Path,
+    output_fits: Path | None,
+    inclusive_upper: bool,
+):
+    return module.CalibrationSegmentResult(
+        segment_index=segment_index,
+        mass_map_path=mass_map_path,
+        output_npz=output_npz,
+        output_fits=output_fits,
+        bounds={
+            "sheet_index": segment_index,
+            "z_lo": 0.1,
+            "z_hi": 0.2,
+            "a_lo": 1.0 / 1.2,
+            "a_hi": 1.0 / 1.1,
+            "chi_lo_mpc_h": 100.0,
+            "chi_hi_mpc_h": 200.0,
+        },
+        inclusive_upper=inclusive_upper,
+        mass_map=_mass_map(np.array([0]), temperature=np.array([1.0])),
+        halo_particle_counts=np.array([1.0]),
+        diagnostics={
+            "particle_mass_msun_h": 1.0,
+            "n_halos_total": 1,
+            "n_halos_in_segment": 1,
+            "n_halos_in_segment_and_pixels": 1,
+            "sum_halo_particle_counts": 1.0,
+            "sum_pinocchio_mass_map_values": 1.0,
+        },
+        nfw_diagnostics={
+            "pipeline_mode": "paint",
+            "particle_mass_msun_h": 1.0,
+            "nfw_particle_counts": np.array([1.0]),
+            "nfw_map_derivatives": "none",
+            "nfw_paint_mode": "sparse",
+            "nfw_selected_halo_count": 1,
+            "nfw_compact_pixel_count": 1,
+            "nfw_sparse_pair_count": 1,
+            "nfw_dense_pair_count": 1,
+            "nfw_sparse_compression_factor": 1.0,
+            "nfw_sum_particle_counts": 1.0,
+            "nfw_concentration_amplitude": 5.71,
+            "nfw_concentration_mass_slope": -0.084,
+            "nfw_concentration_redshift_slope": -0.47,
+            "nfw_concentration_mass_pivot": 2.0e12,
+            "nfw_truncation_width_fraction": 0.05,
+        },
+    )
 
 
 def test_example_script_help_runs():
@@ -180,7 +238,20 @@ def test_example_script_help_runs():
     assert "--stencil-diagnostics" not in result.stdout
     assert "--stencil-compare-query-modes" not in result.stdout
     assert "--mpi-plc-parts" not in result.stdout
+    assert "--mpi-output-mode" not in result.stdout
     assert "--segment-workers" not in result.stdout
+
+
+def test_example_script_rejects_invalid_hidden_mpi_output_mode():
+    result = subprocess.run(
+        [sys.executable, str(EXAMPLE_PATH), "--mpi-output-mode", "bad"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "invalid choice" in result.stderr
 
 
 def test_parse_segment_index_from_mass_map_path():
@@ -249,6 +320,32 @@ def test_discover_plc_catalog_parts_rejects_empty_and_noncontiguous(tmp_path):
         module.discover_plc_catalog_parts(base)
 
 
+def test_rank_local_output_paths_append_rank_before_suffix(tmp_path):
+    module = _load_example_module()
+
+    assert module.rank_suffix(7) == "rank007"
+    assert (
+        module.rank_local_output_path(tmp_path / "painted.seg000.npz", 7)
+        == tmp_path / "painted.seg000.rank007.npz"
+    )
+    assert module.rank_local_output_path(None, 7) is None
+    assert module.rank_local_output_specs(
+        [(tmp_path / "painted_nfw.seg000.npz", tmp_path / "painted_nfw.seg000.fits")],
+        3,
+    ) == [
+        (
+            tmp_path / "painted_nfw.seg000.rank003.npz",
+            tmp_path / "painted_nfw.seg000.rank003.fits",
+        )
+    ]
+    assert (
+        module.rank_local_manifest_path(tmp_path / "painted", 12)
+        == tmp_path / "painted" / "painted_nfw_manifest.rank012.csv"
+    )
+    with pytest.raises(ValueError, match="rank"):
+        module.rank_suffix(-1)
+
+
 def test_validate_segment_workflow_args_accepts_single_and_all_modes(tmp_path):
     module = _load_example_module()
 
@@ -315,6 +412,18 @@ def test_validate_mpi_workflow_args_rejects_missing_flag_and_query_comparison(tm
             args,
             workflow="single",
             mpi_context=module.MpiContext(enabled=False, size=2),
+        )
+
+    with pytest.raises(ValueError, match="rank-local requires --mpi-plc-parts"):
+        module.validate_mpi_workflow_args(
+            _workflow_args(
+                plc_catalog=base,
+                segment_workers=1,
+                mpi_output_mode="rank-local",
+                mpi_plc_parts=False,
+            ),
+            workflow="single",
+            mpi_context=module.MpiContext(enabled=False, size=1),
         )
 
     args = _workflow_args(
@@ -1526,6 +1635,160 @@ def test_run_segment_workflow_all_segments_uses_segment_workers(tmp_path, monkey
     assert write_calls == [0, 1]
     assert rows == [{"segment_index": 0}, {"segment_index": 1}]
     assert manifest_calls[0][1] == rows
+
+
+def test_run_segment_workflow_mpi_reduce_mode_reduces_before_root_write(
+    tmp_path,
+    monkeypatch,
+):
+    module = _load_example_module()
+    seg001 = tmp_path / "run.massmap.seg001.fits"
+    seg000 = tmp_path / "run.massmap.seg000.fits"
+    seg001.touch()
+    seg000.touch()
+    output_dir = tmp_path / "painted"
+    args = _workflow_args(
+        mass_map=None,
+        sheet_index=None,
+        output=None,
+        mass_map_glob=str(tmp_path / "*.fits"),
+        output_dir=output_dir,
+        mpi_plc_parts=True,
+        mpi_output_mode="reduce",
+    )
+    reduce_calls = []
+    write_calls = []
+    manifest_calls = []
+
+    def fake_compute(**kwargs):
+        return _fake_segment_result(
+            module,
+            segment_index=kwargs["segment_index"],
+            mass_map_path=kwargs["mass_map_path"],
+            output_npz=kwargs["output_npz"],
+            output_fits=kwargs["output_fits"],
+            inclusive_upper=kwargs["inclusive_upper"],
+        )
+
+    def fake_reduce(result, mpi_context):
+        reduce_calls.append((result.segment_index, mpi_context.rank))
+        return result
+
+    def fake_write(result, metadata, *, profile, verbose):
+        del metadata, profile, verbose
+        write_calls.append((result.output_npz, result.output_fits))
+        return {"segment_index": result.segment_index}
+
+    monkeypatch.setattr(module, "compute_calibration_for_segment", fake_compute)
+    monkeypatch.setattr(module, "reduce_calibration_segment_result", fake_reduce)
+    monkeypatch.setattr(module, "write_calibration_segment_outputs", fake_write)
+    monkeypatch.setattr(
+        module,
+        "write_manifest",
+        lambda path, rows: manifest_calls.append((path, rows)),
+    )
+
+    rows = module.run_segment_workflow(
+        args,
+        workflow="all",
+        catalog=_catalog(),
+        sheets=_sheets(),
+        metadata=SimpleNamespace(particle_mass_msun_h=1.0, cosmology=Cosmology()),
+        particle_mass=1.0,
+        profile=False,
+        compute_map_derivatives=False,
+        mpi_context=module.MpiContext(enabled=True, rank=0, size=2),
+    )
+
+    assert reduce_calls == [(0, 0), (1, 0)]
+    assert write_calls == [
+        (output_dir / "painted_nfw.seg000.npz", output_dir / "painted_nfw.seg000.fits"),
+        (output_dir / "painted_nfw.seg001.npz", output_dir / "painted_nfw.seg001.fits"),
+    ]
+    assert manifest_calls[0][0] == output_dir / "painted_nfw_manifest.csv"
+    assert rows == [{"segment_index": 0}, {"segment_index": 1}]
+
+
+def test_run_segment_workflow_mpi_rank_local_writes_rank_suffix_without_reduce(
+    tmp_path,
+    monkeypatch,
+):
+    module = _load_example_module()
+    seg001 = tmp_path / "run.massmap.seg001.fits"
+    seg000 = tmp_path / "run.massmap.seg000.fits"
+    seg001.touch()
+    seg000.touch()
+    output_dir = tmp_path / "painted"
+    args = _workflow_args(
+        mass_map=None,
+        sheet_index=None,
+        output=None,
+        mass_map_glob=str(tmp_path / "*.fits"),
+        output_dir=output_dir,
+        mpi_plc_parts=True,
+        mpi_output_mode="rank-local",
+    )
+    compute_paths = []
+    write_calls = []
+    manifest_calls = []
+
+    def fake_compute(**kwargs):
+        compute_paths.append((kwargs["output_npz"], kwargs["output_fits"]))
+        return _fake_segment_result(
+            module,
+            segment_index=kwargs["segment_index"],
+            mass_map_path=kwargs["mass_map_path"],
+            output_npz=kwargs["output_npz"],
+            output_fits=kwargs["output_fits"],
+            inclusive_upper=kwargs["inclusive_upper"],
+        )
+
+    def fail_reduce(*args, **kwargs):
+        raise AssertionError("rank-local mode must not reduce maps")
+
+    def fake_write(result, metadata, *, profile, verbose):
+        del metadata, profile
+        write_calls.append((result.output_npz, result.output_fits, verbose))
+        return {"segment_index": result.segment_index, "output_npz": str(result.output_npz)}
+
+    monkeypatch.setattr(module, "compute_calibration_for_segment", fake_compute)
+    monkeypatch.setattr(module, "reduce_calibration_segment_result", fail_reduce)
+    monkeypatch.setattr(module, "write_calibration_segment_outputs", fake_write)
+    monkeypatch.setattr(
+        module,
+        "write_manifest",
+        lambda path, rows: manifest_calls.append((path, rows)),
+    )
+
+    rows = module.run_segment_workflow(
+        args,
+        workflow="all",
+        catalog=_catalog(),
+        sheets=_sheets(),
+        metadata=SimpleNamespace(particle_mass_msun_h=1.0, cosmology=Cosmology()),
+        particle_mass=1.0,
+        profile=False,
+        compute_map_derivatives=False,
+        mpi_context=module.MpiContext(enabled=True, rank=1, size=2),
+    )
+
+    expected_paths = [
+        (
+            output_dir / "painted_nfw.seg000.rank001.npz",
+            output_dir / "painted_nfw.seg000.rank001.fits",
+        ),
+        (
+            output_dir / "painted_nfw.seg001.rank001.npz",
+            output_dir / "painted_nfw.seg001.rank001.fits",
+        ),
+    ]
+    assert compute_paths == expected_paths
+    assert write_calls == [(npz, fits, False) for npz, fits in expected_paths]
+    assert manifest_calls[0][0] == output_dir / "painted_nfw_manifest.rank001.csv"
+    assert rows == [
+        {"segment_index": 0, "output_npz": str(expected_paths[0][0])},
+        {"segment_index": 1, "output_npz": str(expected_paths[1][0])},
+    ]
 
 
 def test_local_sparse_stencil_uses_compact_rows_not_global_pixels():

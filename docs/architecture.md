@@ -156,9 +156,11 @@ differences.
 
 The same calibration script has an opt-in mixed parallel mode. In
 `--mpi-plc-parts` mode, rank `r` reads only `--plc-catalog.r`; the number of MPI
-ranks must match the number of contiguous split PLC parts. Each rank computes
-partial compact segment maps from its local halos, then rank 0 sums additive
-arrays and diagnostics and writes the final NPZ/FITS outputs. Segment-level
+ranks must match the number of contiguous split PLC parts. With the default
+`--mpi-output-mode reduce`, each rank computes partial compact segment maps,
+then rank 0 sums additive arrays and diagnostics and writes the final NPZ/FITS
+outputs. With `--mpi-output-mode rank-local`, no map collection is performed:
+each rank writes its own rank-suffixed partial maps and manifest. Segment-level
 parallelism inside each rank uses `--segment-workers N`, a shared-memory thread
 pool over mass-map segments.
 

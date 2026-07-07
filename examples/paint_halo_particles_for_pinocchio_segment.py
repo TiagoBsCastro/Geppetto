@@ -335,6 +335,12 @@ def parse_args() -> argparse.Namespace:
         help=argparse.SUPPRESS,
     )
     parser.add_argument(
+        "--mpi-output-mode",
+        choices=("reduce", "rank-local"),
+        default="reduce",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
         "--segment-workers",
         type=int,
         default=1,
@@ -480,6 +486,9 @@ def validate_mpi_workflow_args(
     segment_workers = int(getattr(args, "segment_workers", 1))
     if segment_workers < 1:
         raise ValueError("--segment-workers must be at least 1")
+    mpi_output_mode = getattr(args, "mpi_output_mode", "reduce")
+    if mpi_output_mode == "rank-local" and not bool(getattr(args, "mpi_plc_parts", False)):
+        raise ValueError("--mpi-output-mode rank-local requires --mpi-plc-parts")
     if mpi_context.size > 1 and not bool(getattr(args, "mpi_plc_parts", False)):
         raise ValueError("MPI world size > 1 requires --mpi-plc-parts")
     if mpi_context.enabled and bool(getattr(args, "stencil_compare_query_modes", False)):
@@ -527,6 +536,42 @@ def segment_output_paths(output_dir: Path, segment_index: int) -> dict[str, Path
         "npz": output_dir / f"painted_nfw.{tag}.npz",
         "fits": output_dir / f"painted_nfw.{tag}.fits",
     }
+
+
+def rank_suffix(rank: int) -> str:
+    """Return the stable filename suffix for one MPI rank."""
+
+    if rank < 0:
+        raise ValueError("rank must be non-negative")
+    return f"rank{rank:03d}"
+
+
+def rank_local_output_path(path: Path | None, rank: int) -> Path | None:
+    """Insert ``.rankNNN`` before the output path suffix."""
+
+    if path is None:
+        return None
+    suffix = rank_suffix(rank)
+    path = Path(path)
+    return path.with_name(f"{path.stem}.{suffix}{path.suffix}")
+
+
+def rank_local_output_specs(
+    output_specs: list[tuple[Path, Path | None]],
+    rank: int,
+) -> list[tuple[Path, Path | None]]:
+    """Return rank-suffixed NPZ/FITS output specs."""
+
+    return [
+        (rank_local_output_path(output_npz, rank), rank_local_output_path(output_fits, rank))
+        for output_npz, output_fits in output_specs
+    ]
+
+
+def rank_local_manifest_path(output_dir: Path, rank: int) -> Path:
+    """Return the rank-local all-segments manifest path."""
+
+    return output_dir / f"painted_nfw_manifest.{rank_suffix(rank)}.csv"
 
 
 def load_lightcone_catalog(
@@ -2100,6 +2145,8 @@ def run_segment_workflow(
     segment_workers = int(getattr(args, "segment_workers", 1))
     if segment_workers < 1:
         raise ValueError("--segment-workers must be at least 1")
+    mpi_output_mode = getattr(args, "mpi_output_mode", "reduce")
+    rank_local_outputs = mpi_context.enabled and mpi_output_mode == "rank-local"
 
     if workflow == "single":
         segments = [(int(args.sheet_index), Path(args.mass_map))]
@@ -2108,7 +2155,7 @@ def run_segment_workflow(
     elif workflow == "all":
         segments = discover_mass_map_segments(str(args.mass_map_glob))
         output_dir = Path(args.output_dir)
-        if mpi_context.is_root:
+        if mpi_context.is_root or rank_local_outputs:
             output_dir.mkdir(parents=True, exist_ok=True)
         last_segment_index = max(segment_index for segment_index, _ in segments)
         output_specs = []
@@ -2119,6 +2166,9 @@ def run_segment_workflow(
             inclusive_values.append(segment_index == last_segment_index)
     else:
         raise ValueError("workflow must be 'single' or 'all'")
+
+    if rank_local_outputs:
+        output_specs = rank_local_output_specs(output_specs, mpi_context.rank)
 
     segment_specs = list(
         zip(
@@ -2175,6 +2225,16 @@ def run_segment_workflow(
                 local_results = list(executor.map(compute_one, segment_specs))
 
         for local_result in sorted(local_results, key=lambda result: result.segment_index):
+            if rank_local_outputs:
+                manifest_rows.append(
+                    write_calibration_segment_outputs(
+                        local_result,
+                        metadata,
+                        profile=profile,
+                        verbose=mpi_context.is_root,
+                    )
+                )
+                continue
             reduced_result = reduce_calibration_segment_result(local_result, mpi_context)
             if reduced_result is None:
                 continue
@@ -2187,7 +2247,13 @@ def run_segment_workflow(
                 )
             )
 
-    if workflow == "all" and mpi_context.is_root:
+    if workflow == "all" and rank_local_outputs:
+        manifest_path = rank_local_manifest_path(Path(args.output_dir), mpi_context.rank)
+        with timed_stage("write manifest", profile and mpi_context.is_root):
+            write_manifest(manifest_path, manifest_rows)
+        if mpi_context.is_root:
+            print(f"Wrote manifest: {manifest_path}")
+    elif workflow == "all" and mpi_context.is_root:
         manifest_path = Path(args.output_dir) / "painted_nfw_manifest.csv"
         with timed_stage("write manifest", profile):
             write_manifest(manifest_path, manifest_rows)

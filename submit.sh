@@ -10,7 +10,7 @@
 #SBATCH --output=logs/geppetto_%j.out
 #SBATCH --error=logs/geppetto_%j.err
 
-set -euo pipefail
+set -eo pipefail
 
 module purge
 
@@ -18,9 +18,20 @@ module purge
 module load gcc/12.2.0
 module load openmpi/4.1.6--gcc--12.2.0-cuda-12.2
 
-# Activate your conda env
+# Conda activation hooks may reference unset variables.
+set +u
 source ~/miniforge3/bin/activate
 conda activate geppetto-dev
+set -u
+
+echo "Python: $(which python)"
+echo "mpicc: $(which mpicc)"
+python - <<'PY'
+from mpi4py import MPI
+
+print("mpi4py MPI version:", MPI.Get_version())
+print(MPI.Get_library_version())
+PY
 
 # Avoid each segment worker spawning extra threaded BLAS/OpenMP work.
 export OMP_NUM_THREADS=1
@@ -46,4 +57,3 @@ srun --cpu-bind=cores python examples/paint_halo_particles_for_pinocchio_segment
 	--mpi-plc-parts \
 	--mpi-output-mode rank-local \
 	--segment-workers "${SLURM_CPUS_PER_TASK}"
-

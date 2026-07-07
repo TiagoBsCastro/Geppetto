@@ -231,8 +231,11 @@ Advanced parallel mode is opt-in. `--segment-workers N` uses a thread pool over
 mass-map segments within one process. `--mpi-plc-parts` uses one MPI rank per
 split PLC catalogue part named like `pinocchio.RUN.plc.out.0`,
 `pinocchio.RUN.plc.out.1`, and so on; the MPI world size must equal the number
-of discovered parts. Each rank paints only its local halo subset and rank 0
-reduces the partial maps before writing the final NPZ/FITS files and manifest.
+of discovered parts. By default, each rank paints only its local halo subset and
+rank 0 reduces the partial maps before writing the final NPZ/FITS files and
+manifest. Use `--mpi-output-mode rank-local` to skip MPI map collection and
+write one rank-local NPZ/FITS pair per rank and segment instead, with filenames
+such as `painted_nfw.seg000.rank001.npz`.
 
 ```bash
 mpiexec -n 4 python examples/paint_halo_particles_for_pinocchio_segment.py \
@@ -243,6 +246,7 @@ mpiexec -n 4 python examples/paint_halo_particles_for_pinocchio_segment.py \
   --output-dir path/to/painted_nfw \
   --mode derivatives \
   --mpi-plc-parts \
+  --mpi-output-mode reduce \
   --segment-workers 2
 ```
 
