@@ -223,8 +223,10 @@ painted_nfw.seg001.fits
 painted_nfw_manifest.csv
 ```
 
-Each output preserves the corresponding PINOCCHIO segment's compact `PIXEL`
-list, row ordering, `NSIDE`, `ORDERING`, segment index, and segment bounds. The
+The FITS output preserves the corresponding PINOCCHIO segment's compact
+`PIXEL` list, row ordering, `NSIDE`, `ORDERING`, segment index, and segment
+bounds. The NPZ output stores computed GEPPETTO arrays and scalar diagnostics in
+the same row order without duplicating the original PINOCCHIO map columns. The
 script does not produce a merged global light-cone map.
 
 Advanced parallel mode is opt-in. `--segment-workers N` uses a thread pool over
@@ -233,13 +235,10 @@ split PLC catalogue part named like `pinocchio.RUN.plc.out.0`,
 `pinocchio.RUN.plc.out.1`, and so on; the MPI world size must equal the number
 of discovered parts. By default, each rank paints only its local halo subset,
 then rank 0 reduces and writes final segment outputs without temporary
-rank-local map files. With `--segment-workers 1`, reduce mode streams one
+per-rank map files. With `--segment-workers 1`, MPI mode streams one
 segment at a time and bounds memory to one segment. With `--segment-workers N`
 for `N > 1`, each rank computes up to `N` segments ahead while reductions and
-writes still happen in deterministic segment order. Use
-`--mpi-output-mode rank-local` to skip MPI map collection and write one
-rank-local NPZ/FITS pair per rank and segment instead, with filenames such as
-`painted_nfw.seg000.rank001.npz`.
+writes still happen in deterministic segment order.
 
 ```bash
 mpiexec -n 4 python examples/paint_halo_particles_for_pinocchio_segment.py \
@@ -250,7 +249,6 @@ mpiexec -n 4 python examples/paint_halo_particles_for_pinocchio_segment.py \
   --output-dir path/to/painted_nfw \
   --mode derivatives \
   --mpi-plc-parts \
-  --mpi-output-mode reduce \
   --segment-workers 4
 ```
 

@@ -3,8 +3,8 @@
 This diagnostic script reads a PINOCCHIO parameter file, mass-sheet table,
 on-the-fly HEALPix mass-map FITS files, and a PLC halo catalogue. It can run on
 one selected segment or on all existing segments discovered from a glob. For
-each segment it writes two compact maps with the same pixel domain and row
-ordering as the corresponding ``*.massmap.segXXX.fits`` file:
+each segment it writes computed arrays whose rows follow the compact pixel
+domain of the corresponding ``*.massmap.segXXX.fits`` file:
 
     halo_particle_counts: point-halo resolved mass / particle mass
     nfw_particle_counts: projected NFW one-halo mass / particle mass
@@ -14,8 +14,9 @@ a theoretical prediction while preserving PINOCCHIO's segment bounds and
 compact pixel ordering. In derivative modes the script also saves map-level
 derivatives with respect to concentration amplitude, mass slope, and redshift
 slope. HEALPix stencil construction is fixed geometry and is not differentiated.
-In all-segments mode the output is one segment-local NPZ and one compact NFW
-FITS map per input segment; no global light-cone map is merged in this script.
+In all-segments mode the output is one lean NPZ and one compact NFW FITS map per
+input segment; the FITS file carries the compact ``PIXEL`` list and HEALPix
+metadata. No global light-cone map is merged in this script.
 
 Coordinate-basis warning
 ------------------------
@@ -336,12 +337,6 @@ def parse_args() -> argparse.Namespace:
         help=argparse.SUPPRESS,
     )
     parser.add_argument(
-        "--mpi-output-mode",
-        choices=("reduce", "rank-local"),
-        default="reduce",
-        help=argparse.SUPPRESS,
-    )
-    parser.add_argument(
         "--segment-workers",
         type=int,
         default=1,
@@ -487,9 +482,6 @@ def validate_mpi_workflow_args(
     segment_workers = int(getattr(args, "segment_workers", 1))
     if segment_workers < 1:
         raise ValueError("--segment-workers must be at least 1")
-    mpi_output_mode = getattr(args, "mpi_output_mode", "reduce")
-    if mpi_output_mode == "rank-local" and not bool(getattr(args, "mpi_plc_parts", False)):
-        raise ValueError("--mpi-output-mode rank-local requires --mpi-plc-parts")
     if mpi_context.size > 1 and not bool(getattr(args, "mpi_plc_parts", False)):
         raise ValueError("MPI world size > 1 requires --mpi-plc-parts")
     if mpi_context.enabled and bool(getattr(args, "stencil_compare_query_modes", False)):
@@ -537,42 +529,6 @@ def segment_output_paths(output_dir: Path, segment_index: int) -> dict[str, Path
         "npz": output_dir / f"painted_nfw.{tag}.npz",
         "fits": output_dir / f"painted_nfw.{tag}.fits",
     }
-
-
-def rank_suffix(rank: int) -> str:
-    """Return the stable filename suffix for one MPI rank."""
-
-    if rank < 0:
-        raise ValueError("rank must be non-negative")
-    return f"rank{rank:03d}"
-
-
-def rank_local_output_path(path: Path | None, rank: int) -> Path | None:
-    """Insert ``.rankNNN`` before the output path suffix."""
-
-    if path is None:
-        return None
-    suffix = rank_suffix(rank)
-    path = Path(path)
-    return path.with_name(f"{path.stem}.{suffix}{path.suffix}")
-
-
-def rank_local_output_specs(
-    output_specs: list[tuple[Path, Path | None]],
-    rank: int,
-) -> list[tuple[Path, Path | None]]:
-    """Return rank-suffixed NPZ/FITS output specs."""
-
-    return [
-        (rank_local_output_path(output_npz, rank), rank_local_output_path(output_fits, rank))
-        for output_npz, output_fits in output_specs
-    ]
-
-
-def rank_local_manifest_path(output_dir: Path, rank: int) -> Path:
-    """Return the rank-local all-segments manifest path."""
-
-    return output_dir / f"painted_nfw_manifest.{rank_suffix(rank)}.csv"
 
 
 def load_lightcone_catalog(
@@ -1190,9 +1146,6 @@ def nfw_concentration_map_derivatives(
     d_amp = dmaps[0]
     d_mass_slope = dmaps[1]
     d_redshift_slope = dmaps[2]
-    sum_d_amp = float(jnp.sum(d_amp))
-    sum_d_mass_slope = float(jnp.sum(d_mass_slope))
-    sum_d_redshift_slope = float(jnp.sum(d_redshift_slope))
 
     with timed_stage("NFW map concentration derivatives to numpy", profile):
         d_amp_np = np.asarray(d_amp)
@@ -1204,9 +1157,6 @@ def nfw_concentration_map_derivatives(
         "d_nfw_particle_counts_d_concentration_amplitude": d_amp_np,
         "d_nfw_particle_counts_d_concentration_mass_slope": d_mass_slope_np,
         "d_nfw_particle_counts_d_concentration_redshift_slope": d_redshift_slope_np,
-        "sum_d_nfw_particle_counts_d_concentration_amplitude": sum_d_amp,
-        "sum_d_nfw_particle_counts_d_concentration_mass_slope": sum_d_mass_slope,
-        "sum_d_nfw_particle_counts_d_concentration_redshift_slope": sum_d_redshift_slope,
     }
 
 
@@ -1470,7 +1420,6 @@ def _resolve_output_path(output: Path | argparse.Namespace) -> Path:
 def save_npz(
     output: Path | argparse.Namespace,
     out: np.ndarray,
-    mass_map: PinocchioMassMap,
     bounds: dict[str, float],
     metadata: PinocchioRunMetadata,
     diagnostics: dict[str, float | int],
@@ -1480,10 +1429,6 @@ def save_npz(
 
     payload = {
         "halo_particle_counts": out,
-        "pinocchio_mass_map_values": np.asarray(mass_map.temperature),
-        "pixel": np.asarray(mass_map.pixel),
-        "nside": int(mass_map.nside),
-        "ordering": mass_map.ordering,
         "sheet_index": int(bounds["sheet_index"]),
         "z_lo": float(bounds["z_lo"]),
         "z_hi": float(bounds["z_hi"]),
@@ -1496,7 +1441,6 @@ def save_npz(
         "n_halos_in_segment": int(diagnostics["n_halos_in_segment"]),
         "n_halos_in_segment_and_pixels": int(diagnostics["n_halos_in_segment_and_pixels"]),
         "sum_halo_particle_counts": float(diagnostics["sum_halo_particle_counts"]),
-        "sum_pinocchio_mass_map_values": float(diagnostics["sum_pinocchio_mass_map_values"]),
     }
     if nfw_diagnostics is not None:
         payload.update(nfw_diagnostics)
@@ -1681,14 +1625,7 @@ def write_manifest(path: Path, rows: list[dict[str, object]]) -> None:
         "nfw_sum_particle_counts",
         "nfw_map_derivatives",
     ]
-    derivative_columns = [
-        "sum_d_nfw_particle_counts_d_concentration_amplitude",
-        "sum_d_nfw_particle_counts_d_concentration_mass_slope",
-        "sum_d_nfw_particle_counts_d_concentration_redshift_slope",
-    ]
     columns = list(base_columns)
-    if any(any(column in row for column in derivative_columns) for row in rows):
-        columns.extend(derivative_columns)
 
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="") as handle:
@@ -1764,18 +1701,6 @@ def print_nfw_calibration_summary(
     print(f"  NFW sum particle counts: {nfw_diagnostics['nfw_sum_particle_counts']:.12g}")
     if nfw_diagnostics.get("nfw_map_derivatives", "none") == "concentration":
         print("  Map derivatives: concentration")
-        print(
-            "  Sum d(map)/d concentration amplitude: "
-            f"{nfw_diagnostics['sum_d_nfw_particle_counts_d_concentration_amplitude']:.12g}"
-        )
-        print(
-            "  Sum d(map)/d concentration mass slope: "
-            f"{nfw_diagnostics['sum_d_nfw_particle_counts_d_concentration_mass_slope']:.12g}"
-        )
-        print(
-            "  Sum d(map)/d concentration redshift slope: "
-            f"{nfw_diagnostics['sum_d_nfw_particle_counts_d_concentration_redshift_slope']:.12g}"
-        )
 
 
 def compute_calibration_for_segment(
@@ -1903,13 +1828,6 @@ def calibration_manifest_row(result: CalibrationSegmentResult) -> dict[str, obje
         "nfw_sum_particle_counts": float(nfw_diagnostics["nfw_sum_particle_counts"]),
         "nfw_map_derivatives": str(nfw_diagnostics["nfw_map_derivatives"]),
     }
-    for key in (
-        "sum_d_nfw_particle_counts_d_concentration_amplitude",
-        "sum_d_nfw_particle_counts_d_concentration_mass_slope",
-        "sum_d_nfw_particle_counts_d_concentration_redshift_slope",
-    ):
-        if key in nfw_diagnostics:
-            row[key] = float(nfw_diagnostics[key])
     return row
 
 
@@ -1926,7 +1844,6 @@ def write_calibration_segment_outputs(
         save_npz(
             result.output_npz,
             result.halo_particle_counts,
-            result.mass_map,
             result.bounds,
             metadata,
             result.diagnostics,
@@ -2014,7 +1931,7 @@ def reduce_calibration_segment_result(
     local_result: CalibrationSegmentResult,
     mpi_context: MpiContext,
 ) -> CalibrationSegmentResult | None:
-    """Sum rank-local segment maps and additive diagnostics onto rank 0."""
+    """Sum per-rank segment maps and additive diagnostics onto rank 0."""
 
     if not mpi_context.enabled:
         return local_result
@@ -2053,9 +1970,6 @@ def reduce_calibration_segment_result(
         "nfw_sparse_pair_count",
         "nfw_dense_pair_count",
         "nfw_sum_particle_counts",
-        "sum_d_nfw_particle_counts_d_concentration_amplitude",
-        "sum_d_nfw_particle_counts_d_concentration_mass_slope",
-        "sum_d_nfw_particle_counts_d_concentration_redshift_slope",
         "stencil_query_pixels_total",
         "stencil_inside_domain_total",
         "stencil_kept_pairs_total",
@@ -2146,8 +2060,6 @@ def run_segment_workflow(
     segment_workers = int(getattr(args, "segment_workers", 1))
     if segment_workers < 1:
         raise ValueError("--segment-workers must be at least 1")
-    mpi_output_mode = getattr(args, "mpi_output_mode", "reduce")
-    rank_local_outputs = mpi_context.enabled and mpi_output_mode == "rank-local"
 
     if workflow == "single":
         segments = [(int(args.sheet_index), Path(args.mass_map))]
@@ -2156,7 +2068,7 @@ def run_segment_workflow(
     elif workflow == "all":
         segments = discover_mass_map_segments(str(args.mass_map_glob))
         output_dir = Path(args.output_dir)
-        if mpi_context.is_root or rank_local_outputs:
+        if mpi_context.is_root:
             output_dir.mkdir(parents=True, exist_ok=True)
         last_segment_index = max(segment_index for segment_index, _ in segments)
         output_specs = []
@@ -2167,9 +2079,6 @@ def run_segment_workflow(
             inclusive_values.append(segment_index == last_segment_index)
     else:
         raise ValueError("workflow must be 'single' or 'all'")
-
-    if rank_local_outputs:
-        output_specs = rank_local_output_specs(output_specs, mpi_context.rank)
 
     segment_specs = list(
         zip(
@@ -2234,7 +2143,7 @@ def run_segment_workflow(
                 verbose=mpi_context.is_root,
             )
 
-        if mpi_context.enabled and mpi_output_mode == "reduce":
+        if mpi_context.enabled:
             if segment_workers == 1:
                 for spec in segment_specs:
                     row = reduce_and_write(compute_one(spec))
@@ -2267,35 +2176,16 @@ def run_segment_workflow(
                     local_results = list(executor.map(compute_one, segment_specs))
 
             for local_result in sorted(local_results, key=lambda result: result.segment_index):
-                if rank_local_outputs:
-                    manifest_rows.append(
-                        write_calibration_segment_outputs(
-                            local_result,
-                            metadata,
-                            profile=profile,
-                            verbose=mpi_context.is_root,
-                        )
-                    )
-                    continue
-                reduced_result = reduce_calibration_segment_result(local_result, mpi_context)
-                if reduced_result is None:
-                    continue
                 manifest_rows.append(
                     write_calibration_segment_outputs(
-                        reduced_result,
+                        local_result,
                         metadata,
                         profile=profile,
                         verbose=mpi_context.is_root,
                     )
                 )
 
-    if workflow == "all" and rank_local_outputs:
-        manifest_path = rank_local_manifest_path(Path(args.output_dir), mpi_context.rank)
-        with timed_stage("write manifest", profile and mpi_context.is_root):
-            write_manifest(manifest_path, manifest_rows)
-        if mpi_context.is_root:
-            print(f"Wrote manifest: {manifest_path}")
-    elif workflow == "all" and mpi_context.is_root:
+    if workflow == "all" and mpi_context.is_root:
         manifest_path = Path(args.output_dir) / "painted_nfw_manifest.csv"
         with timed_stage("write manifest", profile):
             write_manifest(manifest_path, manifest_rows)

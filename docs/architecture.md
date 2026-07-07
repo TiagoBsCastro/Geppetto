@@ -156,17 +156,14 @@ differences.
 
 The same calibration script has an opt-in mixed parallel mode. In
 `--mpi-plc-parts` mode, rank `r` reads only `--plc-catalog.r`; the number of MPI
-ranks must match the number of contiguous split PLC parts. With the default
-`--mpi-output-mode reduce`, each rank computes partial compact segment maps,
-then sums additive arrays and diagnostics for each segment on rank 0 before
-writing the final NPZ/FITS outputs. At `--segment-workers 1`, reduce mode is
-fully streamed and holds one segment payload at a time. At higher worker counts,
-it uses a bounded ordered pipeline: each rank computes up to `N` segments ahead,
-but reductions and writes remain serialized by segment index. With
-`--mpi-output-mode rank-local`, no map collection is performed: each rank writes
-its own rank-suffixed partial maps and manifest. Segment-level parallelism
-inside each rank uses `--segment-workers N`, a shared-memory thread pool over
-mass-map segments.
+ranks must match the number of contiguous split PLC parts. Each rank computes
+partial compact segment maps, then sums additive arrays and diagnostics for each
+segment on rank 0 before writing the final NPZ/FITS outputs. At
+`--segment-workers 1`, MPI mode is fully streamed and holds one segment payload
+at a time. At higher worker counts, it uses a bounded ordered pipeline: each
+rank computes up to `N` segments ahead, but reductions and writes remain
+serialized by segment index. Segment-level parallelism inside each rank uses
+`--segment-workers N`, a shared-memory thread pool over mass-map segments.
 
 ## Box mode
 
