@@ -65,6 +65,7 @@ import csv
 import glob
 import os
 import re
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -2220,20 +2221,44 @@ def run_segment_workflow(
                 verbose=False,
             )
 
+        def reduce_and_write(
+            local_result: CalibrationSegmentResult,
+        ) -> dict[str, object] | None:
+            reduced_result = reduce_calibration_segment_result(local_result, mpi_context)
+            if reduced_result is None:
+                return None
+            return write_calibration_segment_outputs(
+                reduced_result,
+                metadata,
+                profile=profile,
+                verbose=mpi_context.is_root,
+            )
+
         if mpi_context.enabled and mpi_output_mode == "reduce":
-            for spec in segment_specs:
-                local_result = compute_one(spec)
-                reduced_result = reduce_calibration_segment_result(local_result, mpi_context)
-                if reduced_result is None:
-                    continue
-                manifest_rows.append(
-                    write_calibration_segment_outputs(
-                        reduced_result,
-                        metadata,
-                        profile=profile,
-                        verbose=mpi_context.is_root,
-                    )
-                )
+            if segment_workers == 1:
+                for spec in segment_specs:
+                    row = reduce_and_write(compute_one(spec))
+                    if row is not None:
+                        manifest_rows.append(row)
+            else:
+                spec_iter = iter(segment_specs)
+                pending = deque()
+                with ThreadPoolExecutor(max_workers=segment_workers) as executor:
+                    for _ in range(segment_workers):
+                        try:
+                            pending.append(executor.submit(compute_one, next(spec_iter)))
+                        except StopIteration:
+                            break
+
+                    while pending:
+                        future = pending.popleft()
+                        row = reduce_and_write(future.result())
+                        if row is not None:
+                            manifest_rows.append(row)
+                        try:
+                            pending.append(executor.submit(compute_one, next(spec_iter)))
+                        except StopIteration:
+                            pass
         else:
             if segment_workers == 1:
                 local_results = [compute_one(spec) for spec in segment_specs]

@@ -232,8 +232,11 @@ mass-map segments within one process. `--mpi-plc-parts` uses one MPI rank per
 split PLC catalogue part named like `pinocchio.RUN.plc.out.0`,
 `pinocchio.RUN.plc.out.1`, and so on; the MPI world size must equal the number
 of discovered parts. By default, each rank paints only its local halo subset,
-then rank 0 reduces and writes one segment at a time. This avoids temporary
-rank-local map files and bounds memory to one segment. Use
+then rank 0 reduces and writes final segment outputs without temporary
+rank-local map files. With `--segment-workers 1`, reduce mode streams one
+segment at a time and bounds memory to one segment. With `--segment-workers N`
+for `N > 1`, each rank computes up to `N` segments ahead while reductions and
+writes still happen in deterministic segment order. Use
 `--mpi-output-mode rank-local` to skip MPI map collection and write one
 rank-local NPZ/FITS pair per rank and segment instead, with filenames such as
 `painted_nfw.seg000.rank001.npz`.
@@ -248,7 +251,7 @@ mpiexec -n 4 python examples/paint_halo_particles_for_pinocchio_segment.py \
   --mode derivatives \
   --mpi-plc-parts \
   --mpi-output-mode reduce \
-  --segment-workers 1
+  --segment-workers 4
 ```
 
 ### Pipeline Modes

@@ -1721,6 +1721,109 @@ def test_run_segment_workflow_mpi_reduce_mode_reduces_before_root_write(
     assert rows == [{"segment_index": 0}, {"segment_index": 1}]
 
 
+def test_run_segment_workflow_mpi_reduce_mode_uses_bounded_segment_pipeline(
+    tmp_path,
+    monkeypatch,
+):
+    module = _load_example_module()
+    for segment_index in range(3):
+        (tmp_path / f"run.massmap.seg{segment_index:03d}.fits").touch()
+    output_dir = tmp_path / "painted"
+    args = _workflow_args(
+        mass_map=None,
+        sheet_index=None,
+        output=None,
+        mass_map_glob=str(tmp_path / "*.fits"),
+        output_dir=output_dir,
+        mpi_plc_parts=True,
+        mpi_output_mode="reduce",
+        segment_workers=2,
+    )
+    manifest_calls = []
+    events = []
+
+    class FakeFuture:
+        def __init__(self, result):
+            self._result = result
+
+        def result(self):
+            return self._result
+
+    class FakeExecutor:
+        def __init__(self, max_workers):
+            self.max_workers = max_workers
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return False
+
+        def submit(self, fn, spec):
+            (segment_index, _mass_map_path), _output_spec, _inclusive_upper = spec
+            events.append(("submit", segment_index, self.max_workers))
+            return FakeFuture(fn(spec))
+
+    def fake_compute(**kwargs):
+        events.append(("compute", kwargs["segment_index"]))
+        return _fake_segment_result(
+            module,
+            segment_index=kwargs["segment_index"],
+            mass_map_path=kwargs["mass_map_path"],
+            output_npz=kwargs["output_npz"],
+            output_fits=kwargs["output_fits"],
+            inclusive_upper=kwargs["inclusive_upper"],
+        )
+
+    def fake_reduce(result, mpi_context):
+        events.append(("reduce", result.segment_index, mpi_context.rank))
+        return result
+
+    def fake_write(result, metadata, *, profile, verbose):
+        del metadata, profile, verbose
+        events.append(("write", result.segment_index))
+        return {"segment_index": result.segment_index}
+
+    monkeypatch.setattr(module, "ThreadPoolExecutor", FakeExecutor)
+    monkeypatch.setattr(module, "compute_calibration_for_segment", fake_compute)
+    monkeypatch.setattr(module, "reduce_calibration_segment_result", fake_reduce)
+    monkeypatch.setattr(module, "write_calibration_segment_outputs", fake_write)
+    monkeypatch.setattr(
+        module,
+        "write_manifest",
+        lambda path, rows: manifest_calls.append((path, rows)),
+    )
+
+    rows = module.run_segment_workflow(
+        args,
+        workflow="all",
+        catalog=_catalog(),
+        sheets=_sheets(),
+        metadata=SimpleNamespace(particle_mass_msun_h=1.0, cosmology=Cosmology()),
+        particle_mass=1.0,
+        profile=False,
+        compute_map_derivatives=False,
+        mpi_context=module.MpiContext(enabled=True, rank=0, size=2),
+    )
+
+    assert events == [
+        ("submit", 0, 2),
+        ("compute", 0),
+        ("submit", 1, 2),
+        ("compute", 1),
+        ("reduce", 0, 0),
+        ("write", 0),
+        ("submit", 2, 2),
+        ("compute", 2),
+        ("reduce", 1, 0),
+        ("write", 1),
+        ("reduce", 2, 0),
+        ("write", 2),
+    ]
+    assert rows == [{"segment_index": 0}, {"segment_index": 1}, {"segment_index": 2}]
+    assert manifest_calls[0][0] == output_dir / "painted_nfw_manifest.csv"
+
+
 def test_run_segment_workflow_mpi_rank_local_writes_rank_suffix_without_reduce(
     tmp_path,
     monkeypatch,

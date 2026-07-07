@@ -56,4 +56,4 @@ srun --cpu-bind=cores python examples/paint_halo_particles_for_pinocchio_segment
 	--mode derivatives \
 	--mpi-plc-parts \
 	--mpi-output-mode reduce \
-	--segment-workers 1
+	--segment-workers 4
