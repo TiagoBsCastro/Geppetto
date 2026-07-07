@@ -1659,8 +1659,10 @@ def test_run_segment_workflow_mpi_reduce_mode_reduces_before_root_write(
     reduce_calls = []
     write_calls = []
     manifest_calls = []
+    events = []
 
     def fake_compute(**kwargs):
+        events.append(("compute", kwargs["segment_index"]))
         return _fake_segment_result(
             module,
             segment_index=kwargs["segment_index"],
@@ -1671,11 +1673,13 @@ def test_run_segment_workflow_mpi_reduce_mode_reduces_before_root_write(
         )
 
     def fake_reduce(result, mpi_context):
+        events.append(("reduce", result.segment_index))
         reduce_calls.append((result.segment_index, mpi_context.rank))
         return result
 
     def fake_write(result, metadata, *, profile, verbose):
         del metadata, profile, verbose
+        events.append(("write", result.segment_index))
         write_calls.append((result.output_npz, result.output_fits))
         return {"segment_index": result.segment_index}
 
@@ -1701,6 +1705,14 @@ def test_run_segment_workflow_mpi_reduce_mode_reduces_before_root_write(
     )
 
     assert reduce_calls == [(0, 0), (1, 0)]
+    assert events == [
+        ("compute", 0),
+        ("reduce", 0),
+        ("write", 0),
+        ("compute", 1),
+        ("reduce", 1),
+        ("write", 1),
+    ]
     assert write_calls == [
         (output_dir / "painted_nfw.seg000.npz", output_dir / "painted_nfw.seg000.fits"),
         (output_dir / "painted_nfw.seg001.npz", output_dir / "painted_nfw.seg001.fits"),

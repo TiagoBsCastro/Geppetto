@@ -2181,7 +2181,9 @@ def run_segment_workflow(
 
     manifest_rows = []
     if not mpi_context.enabled and segment_workers == 1:
-        for (segment_index, mass_map_path), (output_npz, output_fits), inclusive_upper in segment_specs:
+        for (segment_index, mass_map_path), (output_npz, output_fits), inclusive_upper in (
+            segment_specs
+        ):
             manifest_rows.append(
                 run_calibration_for_segment(
                     segment_index=segment_index,
@@ -2200,7 +2202,7 @@ def run_segment_workflow(
             )
     else:
 
-        def compute_one(spec):
+        def compute_one(spec) -> CalibrationSegmentResult:
             (segment_index, mass_map_path), (output_npz, output_fits), inclusive_upper = spec
             return compute_calibration_for_segment(
                 segment_index=segment_index,
@@ -2218,34 +2220,49 @@ def run_segment_workflow(
                 verbose=False,
             )
 
-        if segment_workers == 1:
-            local_results = [compute_one(spec) for spec in segment_specs]
-        else:
-            with ThreadPoolExecutor(max_workers=segment_workers) as executor:
-                local_results = list(executor.map(compute_one, segment_specs))
-
-        for local_result in sorted(local_results, key=lambda result: result.segment_index):
-            if rank_local_outputs:
+        if mpi_context.enabled and mpi_output_mode == "reduce":
+            for spec in segment_specs:
+                local_result = compute_one(spec)
+                reduced_result = reduce_calibration_segment_result(local_result, mpi_context)
+                if reduced_result is None:
+                    continue
                 manifest_rows.append(
                     write_calibration_segment_outputs(
-                        local_result,
+                        reduced_result,
                         metadata,
                         profile=profile,
                         verbose=mpi_context.is_root,
                     )
                 )
-                continue
-            reduced_result = reduce_calibration_segment_result(local_result, mpi_context)
-            if reduced_result is None:
-                continue
-            manifest_rows.append(
-                write_calibration_segment_outputs(
-                    reduced_result,
-                    metadata,
-                    profile=profile,
-                    verbose=mpi_context.is_root,
+        else:
+            if segment_workers == 1:
+                local_results = [compute_one(spec) for spec in segment_specs]
+            else:
+                with ThreadPoolExecutor(max_workers=segment_workers) as executor:
+                    local_results = list(executor.map(compute_one, segment_specs))
+
+            for local_result in sorted(local_results, key=lambda result: result.segment_index):
+                if rank_local_outputs:
+                    manifest_rows.append(
+                        write_calibration_segment_outputs(
+                            local_result,
+                            metadata,
+                            profile=profile,
+                            verbose=mpi_context.is_root,
+                        )
+                    )
+                    continue
+                reduced_result = reduce_calibration_segment_result(local_result, mpi_context)
+                if reduced_result is None:
+                    continue
+                manifest_rows.append(
+                    write_calibration_segment_outputs(
+                        reduced_result,
+                        metadata,
+                        profile=profile,
+                        verbose=mpi_context.is_root,
+                    )
                 )
-            )
 
     if workflow == "all" and rank_local_outputs:
         manifest_path = rank_local_manifest_path(Path(args.output_dir), mpi_context.rank)

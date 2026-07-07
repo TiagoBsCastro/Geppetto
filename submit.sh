@@ -43,7 +43,7 @@ export PARAMS="/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2
 export SHEETS="/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/pinocchio.000.sheets.out"
 export PLC="/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/pinocchio.000.plc.out"
 export MASSMAP_GLOB="/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/pinocchio.000.massmap.seg0*.fits"
-export OUTDIR="/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/geppetto_rank_local"
+export OUTDIR="/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/geppetto_reduced"
 
 mkdir -p "${OUTDIR}"
 
@@ -55,5 +55,5 @@ srun --cpu-bind=cores python examples/paint_halo_particles_for_pinocchio_segment
 	--output-dir "${OUTDIR}" \
 	--mode derivatives \
 	--mpi-plc-parts \
-	--mpi-output-mode rank-local \
-	--segment-workers "${SLURM_CPUS_PER_TASK}"
+	--mpi-output-mode reduce \
+	--segment-workers 1
