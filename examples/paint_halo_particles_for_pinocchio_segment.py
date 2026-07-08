@@ -18,6 +18,13 @@ In all-segments mode the output is one lean NPZ and one compact NFW FITS map per
 input segment; the FITS file carries the compact ``PIXEL`` list and HEALPix
 metadata. No global light-cone map is merged in this script.
 
+Precision policy
+----------------
+This production calibration script defaults to JAX x64 because PINOCCHIO
+readers preserve float64 inputs and small-angle HEALPix geometry is
+precision-sensitive. Memory-constrained runs can opt into float32 with
+``--jax-precision float32``.
+
 Coordinate-basis warning
 ------------------------
 The script assumes that the PLC halo catalogue directions and the PINOCCHIO
@@ -61,6 +68,8 @@ Paint all discovered mass-map segments:
 
 from __future__ import annotations
 
+# ruff: noqa: E402, I001
+
 import argparse
 import csv
 import glob
@@ -73,6 +82,26 @@ from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
 from typing import Any
+
+
+def _preparse_jax_precision(argv: list[str] | None = None) -> str:
+    """Return the requested JAX precision before importing JAX-heavy modules."""
+
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument(
+        "--jax-precision",
+        choices=("float64", "float32"),
+        default="float64",
+    )
+    args, _ = parser.parse_known_args(argv)
+    return str(args.jax_precision)
+
+
+_CONFIGURED_JAX_PRECISION = _preparse_jax_precision()
+
+from jax import config as jax_config
+
+jax_config.update("jax_enable_x64", _CONFIGURED_JAX_PRECISION == "float64")
 
 import jax
 import jax.numpy as jnp
@@ -104,6 +133,7 @@ from geppetto.profiles import nfw_projected_surface_density, nfw_scale_radius_an
 # calibration path never calls the dense validation builder.
 _BRUTE_FORCE_STENCIL_BUILDER_REGRESSION_SENTINEL = build_lightcone_sparse_stencil_bruteforce
 _SEGMENT_RE = re.compile(r"seg(\d+)")
+_PIXEL_INDEX_DENSE_MAX_BYTES = 256 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -316,6 +346,12 @@ def parse_args() -> argparse.Namespace:
         help=argparse.SUPPRESS,
     )
     parser.add_argument(
+        "--jax-precision",
+        choices=("float64", "float32"),
+        default="float64",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
         "--stencil-query-mode",
         choices=("inclusive", "center"),
         default="inclusive",
@@ -491,6 +527,16 @@ def validate_mpi_workflow_args(
         validate_mpi_plc_part_count(parts, mpi_context.size)
 
 
+def warn_if_float32_precision(args: argparse.Namespace, mpi_context: MpiContext) -> None:
+    """Warn root users when they trade calibration accuracy for memory."""
+
+    if args.jax_precision == "float32" and mpi_context.is_root:
+        print(
+            "Warning: --jax-precision float32 saves memory but can reduce "
+            "small-angle NFW/stencil geometry accuracy."
+        )
+
+
 def parse_segment_index_from_mass_map_path(path: Path) -> int:
     """Return segment index parsed from a PINOCCHIO mass-map segment filename."""
 
@@ -611,6 +657,94 @@ def validate_mass_map(mass_map: PinocchioMassMap) -> None:
         raise ValueError("mass_map.pixel and mass_map.temperature must have the same length")
 
 
+@dataclass(frozen=True)
+class MassMapPixelIndex:
+    """Order-preserving compact-row lookup for one PINOCCHIO mass-map segment."""
+
+    backend: str
+    dense_rows: np.ndarray | None = None
+    sorted_pixels: np.ndarray | None = None
+    sorted_rows: np.ndarray | None = None
+
+    @classmethod
+    def from_mass_map(
+        cls,
+        mass_map: PinocchioMassMap,
+        *,
+        max_dense_bytes: int = _PIXEL_INDEX_DENSE_MAX_BYTES,
+    ) -> MassMapPixelIndex:
+        """Build a reusable global-HEALPix-pixel to compact-row lookup."""
+
+        validate_mass_map(mass_map)
+        pixels = np.asarray(mass_map.pixel, dtype=np.int64)
+        return cls.from_pixels(pixels, max_dense_bytes=max_dense_bytes)
+
+    @classmethod
+    def from_pixels(
+        cls,
+        pixels: np.ndarray,
+        *,
+        max_dense_bytes: int = _PIXEL_INDEX_DENSE_MAX_BYTES,
+    ) -> MassMapPixelIndex:
+        """Build a compact-row lookup from global HEALPix pixel numbers."""
+
+        pixels = np.asarray(pixels, dtype=np.int64)
+        if pixels.ndim != 1:
+            raise ValueError("pixels must be one-dimensional")
+        if max_dense_bytes < 0:
+            raise ValueError("max_dense_bytes must be non-negative")
+        if pixels.size == 0:
+            return cls(backend="empty")
+        if np.any(pixels < 0):
+            raise ValueError("pixels must be non-negative")
+
+        rows = np.arange(pixels.shape[0], dtype=np.int64)
+        max_pixel = int(np.max(pixels))
+        dense_bytes = (max_pixel + 1) * np.dtype(np.int64).itemsize
+        if dense_bytes <= max_dense_bytes:
+            dense_rows = np.full(max_pixel + 1, -1, dtype=np.int64)
+            dense_rows[pixels] = rows
+            return cls(backend="dense", dense_rows=dense_rows)
+
+        order = np.argsort(pixels)
+        return cls(
+            backend="sorted",
+            sorted_pixels=pixels[order],
+            sorted_rows=rows[order],
+        )
+
+    def lookup(self, pixels: np.ndarray) -> np.ndarray:
+        """Return compact rows for global HEALPix pixels, or ``-1`` if absent."""
+
+        query = np.asarray(pixels, dtype=np.int64)
+        flat_query = query.ravel()
+        flat_rows = np.full(flat_query.shape, -1, dtype=np.int64)
+        if flat_query.size == 0 or self.backend == "empty":
+            return flat_rows.reshape(query.shape)
+
+        nonnegative = flat_query >= 0
+        if self.backend == "dense":
+            if self.dense_rows is None:
+                raise RuntimeError("dense pixel index is missing dense rows")
+            in_range = nonnegative & (flat_query < self.dense_rows.shape[0])
+            flat_rows[in_range] = self.dense_rows[flat_query[in_range]]
+        elif self.backend == "sorted":
+            if self.sorted_pixels is None or self.sorted_rows is None:
+                raise RuntimeError("sorted pixel index is missing sorted arrays")
+            valid_positions = np.nonzero(nonnegative)[0]
+            valid_pixels = flat_query[valid_positions]
+            insert = np.searchsorted(self.sorted_pixels, valid_pixels)
+            inside = insert < self.sorted_pixels.shape[0]
+            matched_positions = valid_positions[inside]
+            matched_insert = insert[inside]
+            matched_pixels = valid_pixels[inside]
+            found = self.sorted_pixels[matched_insert] == matched_pixels
+            flat_rows[matched_positions[found]] = self.sorted_rows[matched_insert[found]]
+        else:
+            raise RuntimeError(f"unknown pixel-index backend {self.backend!r}")
+        return flat_rows.reshape(query.shape)
+
+
 def validate_catalog_for_binning(catalog: LightconeHaloCatalog) -> None:
     """Check catalogue array shapes before segment selection and binning."""
 
@@ -666,6 +800,7 @@ def halo_rows_in_mass_map(
     catalog: LightconeHaloCatalog,
     mask: np.ndarray,
     mass_map: PinocchioMassMap,
+    pixel_index: MassMapPixelIndex | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Map selected halo directions to compact mass-map rows."""
 
@@ -688,9 +823,10 @@ def halo_rows_in_mass_map(
         empty_inside = np.empty((0,), dtype=bool)
         return empty_rows, empty_inside
 
+    if pixel_index is None:
+        pixel_index = MassMapPixelIndex.from_mass_map(mass_map)
     halo_pix = hp.vec2pix(mass_map.nside, uv[:, 0], uv[:, 1], uv[:, 2], nest=False)
-    pixel_to_row = {int(pixel): row for row, pixel in enumerate(np.asarray(mass_map.pixel))}
-    rows = np.array([pixel_to_row.get(int(pixel), -1) for pixel in halo_pix], dtype=np.int64)
+    rows = pixel_index.lookup(halo_pix)
     inside_pixel_domain = rows >= 0
     return rows, inside_pixel_domain
 
@@ -718,10 +854,11 @@ def build_halo_particle_count_map(
     mask: np.ndarray,
     mass_map: PinocchioMassMap,
     particle_mass_msun_h: float,
+    pixel_index: MassMapPixelIndex | None = None,
 ) -> np.ndarray:
     """Build the compact halo-particle-count map for selected halos."""
 
-    rows, inside_pixel_domain = halo_rows_in_mass_map(catalog, mask, mass_map)
+    rows, inside_pixel_domain = halo_rows_in_mass_map(catalog, mask, mass_map, pixel_index)
     return _accumulate_halo_particle_counts(
         catalog,
         np.asarray(mask, dtype=bool),
@@ -786,6 +923,7 @@ def build_lightcone_sparse_stencil_for_mass_map_local(
     *,
     query_mode: str = "inclusive",
     collect_diagnostics: bool = False,
+    pixel_index: MassMapPixelIndex | None = None,
 ) -> LightconeSparseStencil | tuple[LightconeSparseStencil, StencilBuildDiagnostics]:
     """Build a HEALPix-local sparse stencil on a compact PINOCCHIO map domain.
 
@@ -808,7 +946,8 @@ def build_lightcone_sparse_stencil_for_mass_map_local(
 
     pixels = np.asarray(mass_map.pixel, dtype=np.int64)
     n_pix = int(pixels.shape[0])
-    pixel_to_row = {int(pixel): row for row, pixel in enumerate(pixels)}
+    if pixel_index is None:
+        pixel_index = MassMapPixelIndex.from_pixels(pixels)
 
     halo_unit_vectors = np.asarray(catalog.unit_vector)
     if not np.issubdtype(halo_unit_vectors.dtype, np.floating):
@@ -852,10 +991,7 @@ def build_lightcone_sparse_stencil_for_mass_map_local(
             continue
         diagnostics.n_halos_with_query_pixels += 1
 
-        rows = np.array(
-            [pixel_to_row.get(int(pixel), -1) for pixel in queried_pixels],
-            dtype=np.int64,
-        )
+        rows = pixel_index.lookup(queried_pixels)
         inside_domain = rows >= 0
         n_inside = int(np.count_nonzero(inside_domain))
         diagnostics.n_inside_domain_total += n_inside
@@ -967,6 +1103,7 @@ def compare_stencil_query_modes(
     profile_params: NFWProfileParams,
     *,
     profile: bool = False,
+    pixel_index: MassMapPixelIndex | None = None,
 ) -> tuple[jax.Array, LightconeSparseStencil, dict[str, bool | float | int | str]]:
     """Build inclusive and center stencils, paint both maps, and compare them."""
 
@@ -982,6 +1119,7 @@ def compare_stencil_query_modes(
                 rmax_mpc_h,
                 query_mode=query_mode,
                 collect_diagnostics=True,
+                pixel_index=pixel_index,
             )
         with timed_stage(f"NFW particle map ({query_mode})", profile):
             counts = paint_lightcone_particle_count_map_sparse(
@@ -1182,6 +1320,7 @@ def run_nfw_calibration_pipeline(
     stencil_diagnostics: bool = False,
     stencil_compare_query_modes: bool = False,
     verbose: bool = True,
+    pixel_index: MassMapPixelIndex | None = None,
 ) -> dict[str, bool | float | int | str | np.ndarray]:
     """Paint the NFW calibration map and optional concentration derivatives.
 
@@ -1248,6 +1387,7 @@ def run_nfw_calibration_pipeline(
                 concentration_params,
                 profile_params,
                 profile=profile,
+                pixel_index=pixel_index,
             )
         else:
             with timed_stage("NFW local sparse stencil", profile):
@@ -1257,6 +1397,7 @@ def run_nfw_calibration_pipeline(
                     rmax,
                     query_mode=stencil_query_mode,
                     collect_diagnostics=stencil_diagnostics,
+                    pixel_index=pixel_index,
                 )
             if stencil_diagnostics:
                 stencil, stencil_diag = stencil_result
@@ -1730,6 +1871,8 @@ def compute_calibration_for_segment(
     with timed_stage("read mass map", stage_profile):
         mass_map = read_pinocchio_mass_map_fits(mass_map_path)
         validate_mass_map(mass_map)
+    with timed_stage("mass-map pixel index", stage_profile):
+        pixel_index = MassMapPixelIndex.from_mass_map(mass_map)
 
     with timed_stage("select segment mask", stage_profile):
         mask = select_segment_mask(
@@ -1742,7 +1885,12 @@ def compute_calibration_for_segment(
     if verbose:
         print_segment_summary(bounds, inclusive_upper)
     with timed_stage("point-halo rows", stage_profile):
-        rows, inside_pixel_domain = halo_rows_in_mass_map(catalog, mask, mass_map)
+        rows, inside_pixel_domain = halo_rows_in_mass_map(
+            catalog,
+            mask,
+            mass_map,
+            pixel_index,
+        )
     with timed_stage("point-halo accumulation", stage_profile):
         out = _accumulate_halo_particle_counts(
             catalog,
@@ -1789,6 +1937,7 @@ def compute_calibration_for_segment(
             stencil_diagnostics=args.stencil_diagnostics,
             stencil_compare_query_modes=args.stencil_compare_query_modes,
             verbose=verbose,
+            pixel_index=pixel_index,
         )
 
     return CalibrationSegmentResult(
@@ -2199,6 +2348,7 @@ def main() -> None:
     args = parse_args()
     workflow = validate_segment_workflow_args(args)
     mpi_context = initialize_mpi_context(bool(args.mpi_plc_parts))
+    warn_if_float32_precision(args, mpi_context)
     validate_mpi_workflow_args(args, workflow=workflow, mpi_context=mpi_context)
     profile = args.mode in ("profile", "derivatives-profile")
     compute_map_derivatives = args.mode in ("derivatives", "derivatives-profile")

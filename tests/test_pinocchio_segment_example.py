@@ -35,6 +35,30 @@ def _load_example_module():
     return module
 
 
+def _probe_example_precision(*args: str) -> list[str]:
+    argv = [str(EXAMPLE_PATH), *args]
+    code = f"""
+import importlib.util
+import sys
+
+sys.argv = {argv!r}
+spec = importlib.util.spec_from_file_location("precision_probe", {str(EXAMPLE_PATH)!r})
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+print(module._CONFIGURED_JAX_PRECISION)
+print(module.jnp.asarray([1.0]).dtype)
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip().splitlines()
+
+
 def _mass_map(
     pixels: np.ndarray,
     temperature: np.ndarray | None = None,
@@ -238,6 +262,7 @@ def test_example_script_help_runs():
     assert "--mpi-plc-parts" not in result.stdout
     assert "--mpi-output-mode" not in result.stdout
     assert "--segment-workers" not in result.stdout
+    assert "--jax-precision" not in result.stdout
 
 
 def test_example_script_rejects_removed_mpi_output_mode():
@@ -267,6 +292,37 @@ def test_example_script_rejects_removed_mpi_output_mode():
 
     assert result.returncode != 0
     assert "unrecognized arguments: --mpi-output-mode" in result.stderr
+
+
+def test_example_module_defaults_to_float64_jax_precision():
+    assert _probe_example_precision() == ["float64", "float64"]
+
+
+def test_example_module_allows_float32_jax_precision():
+    assert _probe_example_precision("--jax-precision", "float32") == ["float32", "float32"]
+
+
+def test_example_script_rejects_invalid_jax_precision():
+    result = subprocess.run(
+        [sys.executable, str(EXAMPLE_PATH), "--jax-precision", "bad"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "invalid choice" in result.stderr
+
+
+def test_float32_precision_warning_is_root_only(capsys):
+    module = _load_example_module()
+    args = SimpleNamespace(jax_precision="float32")
+
+    module.warn_if_float32_precision(args, module.MpiContext(enabled=True, rank=1, size=2))
+    assert capsys.readouterr().out == ""
+
+    module.warn_if_float32_precision(args, module.MpiContext(enabled=True, rank=0, size=2))
+    assert "float32 saves memory" in capsys.readouterr().out
 
 
 def test_parse_segment_index_from_mass_map_path():
@@ -515,6 +571,41 @@ def test_catalog_and_mass_map_validation_errors_are_clear():
         )
 
 
+def test_mass_map_pixel_index_dense_backend_preserves_compact_order():
+    module = _load_example_module()
+    index = module.MassMapPixelIndex.from_pixels(
+        np.array([5, 0, 8], dtype=np.int64),
+        max_dense_bytes=1024,
+    )
+
+    assert index.backend == "dense"
+    np.testing.assert_array_equal(
+        index.lookup(np.array([0, 5, 7, 8, -1], dtype=np.int64)),
+        [1, 0, -1, 2, -1],
+    )
+
+
+def test_mass_map_pixel_index_sorted_backend_preserves_compact_order():
+    module = _load_example_module()
+    index = module.MassMapPixelIndex.from_pixels(
+        np.array([5, 0, 8], dtype=np.int64),
+        max_dense_bytes=0,
+    )
+
+    assert index.backend == "sorted"
+    np.testing.assert_array_equal(
+        index.lookup(np.array([8, 1, 0, 5], dtype=np.int64)),
+        [2, -1, 1, 0],
+    )
+
+
+def test_mass_map_pixel_index_rejects_negative_pixels():
+    module = _load_example_module()
+
+    with pytest.raises(ValueError, match="non-negative"):
+        module.MassMapPixelIndex.from_pixels(np.array([0, -1], dtype=np.int64))
+
+
 def test_light_plc_requires_hubble_table():
     module = _load_example_module()
     args = SimpleNamespace(
@@ -626,6 +717,28 @@ def test_pinocchio_plc_angles_bin_to_mass_map_internal_basis():
     np.testing.assert_array_equal(inside, [True])
     np.testing.assert_array_equal(np.asarray(stencil.pix_id), [1])
     np.testing.assert_array_equal(np.asarray(stencil.halo_id), [0])
+
+
+def test_local_sparse_stencil_preserves_float64_geometry_dtype():
+    hp = pytest.importorskip("healpy")
+    module = _load_example_module()
+    pixel = np.array([0], dtype=np.int64)
+    unit_vector = np.stack(hp.pix2vec(1, pixel), axis=-1)
+    catalog = _catalog(
+        unit_vector=unit_vector,
+        mass=np.array([1.0e13], dtype=np.float64),
+        redshift=np.array([0.2], dtype=np.float64),
+        chi=np.array([1000.0], dtype=np.float64),
+    )
+    mass_map = _mass_map(pixel, temperature=np.array([100.0]), nside=1)
+
+    stencil = module.build_lightcone_sparse_stencil_for_mass_map_local(
+        mass_map,
+        catalog,
+        rmax_mpc_h=np.array([10.0], dtype=np.float64),
+    )
+
+    assert stencil.r_perp.dtype == jnp.float64
 
 
 def test_save_npz_omits_pinocchio_input_arrays_and_keeps_diagnostics(tmp_path):
@@ -1417,6 +1530,83 @@ def test_run_segment_workflow_single_segment_uses_last_segment_flag(monkeypatch)
     assert calls[0]["inclusive_upper"] is True
     assert calls[0]["output_npz"] == Path("painted.seg000.npz")
     assert calls[0]["output_fits"] == Path("painted.seg000.fits")
+
+
+def test_compute_calibration_for_segment_reuses_one_mass_map_pixel_index(
+    tmp_path,
+    monkeypatch,
+):
+    module = _load_example_module()
+    mass_map = _mass_map(np.array([0]), temperature=np.array([100.0]), nside=1)
+    catalog = _catalog(
+        unit_vector=np.array([[1.0, 0.0, 0.0]]),
+        mass=np.array([10.0]),
+        redshift=np.array([0.3]),
+        chi=np.array([1000.0]),
+    )
+    seen = {"builds": 0, "halo_index_id": None, "nfw_index_id": None}
+    original_from_mass_map = module.MassMapPixelIndex.from_mass_map
+
+    def fake_from_mass_map(mass_map_arg, *, max_dense_bytes=module._PIXEL_INDEX_DENSE_MAX_BYTES):
+        seen["builds"] += 1
+        return original_from_mass_map(mass_map_arg, max_dense_bytes=max_dense_bytes)
+
+    def fake_halo_rows(catalog_arg, mask, mass_map_arg, pixel_index=None):
+        del catalog_arg, mask, mass_map_arg
+        seen["halo_index_id"] = id(pixel_index)
+        return np.array([0], dtype=np.int64), np.array([True])
+
+    def fake_nfw_pipeline(*args, **kwargs):
+        del args
+        seen["nfw_index_id"] = id(kwargs["pixel_index"])
+        return {
+            "pipeline_mode": "paint",
+            "particle_mass_msun_h": 1.0,
+            "nfw_particle_counts": np.array([0.5]),
+            "nfw_map_derivatives": "none",
+            "nfw_paint_mode": "sparse",
+            "nfw_selected_halo_count": 1,
+            "nfw_compact_pixel_count": 1,
+            "nfw_sparse_pair_count": 1,
+            "nfw_dense_pair_count": 1,
+            "nfw_sparse_compression_factor": 1.0,
+            "nfw_sum_particle_counts": 0.5,
+            "nfw_concentration_amplitude": 5.71,
+            "nfw_concentration_mass_slope": -0.084,
+            "nfw_concentration_redshift_slope": -0.47,
+            "nfw_concentration_mass_pivot": 2.0e12,
+            "nfw_truncation_width_fraction": 0.05,
+        }
+
+    monkeypatch.setattr(
+        module.MassMapPixelIndex,
+        "from_mass_map",
+        staticmethod(fake_from_mass_map),
+    )
+    monkeypatch.setattr(module, "read_pinocchio_mass_map_fits", lambda path: mass_map)
+    monkeypatch.setattr(module, "halo_rows_in_mass_map", fake_halo_rows)
+    monkeypatch.setattr(module, "run_nfw_calibration_pipeline", fake_nfw_pipeline)
+
+    result = module.compute_calibration_for_segment(
+        segment_index=0,
+        mass_map_path=tmp_path / "massmap.seg000.fits",
+        output_npz=tmp_path / "painted.seg000.npz",
+        output_fits=None,
+        catalog=catalog,
+        sheets=_sheets(),
+        metadata=SimpleNamespace(particle_mass_msun_h=1.0, cosmology=Cosmology()),
+        particle_mass=1.0,
+        args=_workflow_args(),
+        profile=False,
+        compute_map_derivatives=False,
+        inclusive_upper=False,
+        verbose=False,
+    )
+
+    assert result.segment_index == 0
+    assert seen["builds"] == 1
+    assert seen["halo_index_id"] == seen["nfw_index_id"]
+    assert seen["halo_index_id"] != id(None)
 
 
 def test_run_segment_workflow_all_segments_uses_segment_workers(tmp_path, monkeypatch):
