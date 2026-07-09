@@ -1,10 +1,9 @@
 #!/bin/bash
 #SBATCH --job-name=geppetto_l3870n2160_000
 #SBATCH --partition=dcgp_usr_prod
-#SBATCH --nodes=10
-#SBATCH --ntasks=30
-#SBATCH --ntasks-per-node=3
-#SBATCH --cpus-per-task=29
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=30
+#SBATCH --cpus-per-task=3
 #SBATCH --time=04:00:00
 #SBATCH --account=CMPNS_inafts
 #SBATCH --output=logs/geppetto_%j.out
@@ -55,4 +54,4 @@ srun --cpu-bind=cores python examples/paint_halo_particles_for_pinocchio_segment
 	--output-dir "${OUTDIR}" \
 	--mode derivatives \
 	--mpi-plc-parts \
-	--segment-workers 4
+	--segment-workers $SLURM_CPUS_PER_TASK
