@@ -834,6 +834,9 @@ def validate_lightcone_sparse_stencil(
     pix_id = np.asarray(stencil.pix_id)
     halo_id = np.asarray(stencil.halo_id)
     r_perp = np.asarray(stencil.r_perp)
+    pair_weight = None
+    if stencil.pair_weight is not None:
+        pair_weight = np.asarray(stencil.pair_weight)
 
     if pix_id.ndim != 1:
         raise PinocchioCatalogError("stencil.pix_id must be one-dimensional")
@@ -841,7 +844,11 @@ def validate_lightcone_sparse_stencil(
         raise PinocchioCatalogError("stencil.halo_id must be one-dimensional")
     if r_perp.ndim != 1:
         raise PinocchioCatalogError("stencil.r_perp must be one-dimensional")
+    if pair_weight is not None and pair_weight.ndim != 1:
+        raise PinocchioCatalogError("stencil.pair_weight must be one-dimensional")
     if pix_id.shape[0] != halo_id.shape[0] or pix_id.shape[0] != r_perp.shape[0]:
+        raise PinocchioCatalogError("stencil fields must have matching lengths")
+    if pair_weight is not None and pair_weight.shape[0] != pix_id.shape[0]:
         raise PinocchioCatalogError("stencil fields must have matching lengths")
     if not np.issubdtype(pix_id.dtype, np.integer):
         raise PinocchioCatalogError("stencil.pix_id must contain integer indices")
@@ -860,6 +867,12 @@ def validate_lightcone_sparse_stencil(
         raise PinocchioCatalogError("stencil.halo_id contains negative halo indices")
     if not np.all(np.isfinite(r_perp)) or np.any(r_perp < 0.0):
         raise PinocchioCatalogError("stencil.r_perp values must be finite and non-negative")
+    if pair_weight is not None and (
+        not np.all(np.isfinite(pair_weight)) or np.any(pair_weight < 0.0)
+    ):
+        raise PinocchioCatalogError(
+            "stencil.pair_weight values must be finite and non-negative"
+        )
 
     if catalog is not None:
         mass = np.asarray(catalog.mass)

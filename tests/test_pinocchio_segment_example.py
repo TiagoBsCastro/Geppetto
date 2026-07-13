@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -1110,6 +1111,172 @@ def test_nfw_sparse_total_particle_count_matches_sparse_map_sum():
     )
 
 
+def test_sparse_pair_bucket_size_and_compilation_shape_reuse():
+    module = _load_example_module()
+    assert module.sparse_pair_bucket_size(0) == 0
+    assert module.sparse_pair_bucket_size(1) == 1
+    assert module.sparse_pair_bucket_size(4) == 4
+    assert module.sparse_pair_bucket_size(5) == 8
+    with pytest.raises(ValueError, match="non-negative"):
+        module.sparse_pair_bucket_size(-1)
+
+    traces = []
+
+    def pair_sum(stencil):
+        traces.append(stencil.r_perp.shape)
+        return jnp.sum(stencil.r_perp * stencil.pair_weight)
+
+    compiled = jax.jit(pair_sum)
+    mask = np.array([False, True, True])
+
+    def bucket(n_pair):
+        stencil = LightconeSparseStencil(
+            pix_id=jnp.arange(n_pair, dtype=jnp.int32) % 2,
+            halo_id=jnp.arange(n_pair, dtype=jnp.int32) % 2,
+            r_perp=jnp.linspace(0.1, 0.3, n_pair),
+            n_pix=2,
+        )
+        return module.bucket_sparse_stencil_for_rank_catalog(stencil, mask, 3)
+
+    compiled(bucket(3)).block_until_ready()
+    compiled(bucket(4)).block_until_ready()
+    compiled(bucket(5)).block_until_ready()
+    assert traces == [(4,), (8,)]
+
+
+@pytest.mark.parametrize(
+    ("dtype", "rtol", "atol"),
+    (
+        (jnp.float32, 2.0e-5, 1.0e-6),
+        (jnp.float64, 1.0e-12, 1.0e-12),
+    ),
+)
+def test_bucketed_sparse_jit_matches_unpadded_map_and_derivatives(dtype, rtol, atol):
+    module = _load_example_module()
+    full_catalog = LightconeHaloCatalog(
+        unit_vector=jnp.asarray(
+            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            dtype=dtype,
+        ),
+        chi=jnp.asarray([800.0, 1000.0, 1200.0], dtype=dtype),
+        mass=jnp.asarray([8.0e12, 1.0e13, 2.0e13], dtype=dtype),
+        redshift=jnp.asarray([0.1, 0.2, 0.3], dtype=dtype),
+    )
+    selected_catalog = LightconeHaloCatalog(
+        unit_vector=full_catalog.unit_vector[1:],
+        chi=full_catalog.chi[1:],
+        mass=full_catalog.mass[1:],
+        redshift=full_catalog.redshift[1:],
+    )
+    stencil = LightconeSparseStencil(
+        pix_id=jnp.asarray([2, 0, 2], dtype=jnp.int32),
+        halo_id=jnp.asarray([0, 1, 0], dtype=jnp.int32),
+        r_perp=jnp.asarray([0.05, 0.10, 0.20], dtype=dtype),
+        n_pix=3,
+    )
+    bucketed = module.bucket_sparse_stencil_for_rank_catalog(
+        stencil,
+        np.array([False, True, True]),
+        3,
+    )
+    metadata = SimpleNamespace(cosmology=Cosmology())
+    theta = jnp.asarray([5.71, -0.084, -0.47], dtype=dtype)
+
+    def eager_map(theta_value):
+        return module.paint_lightcone_particle_count_map_sparse(
+            stencil,
+            selected_catalog,
+            particle_mass_msun_h=1.0e10,
+            pixel_area_sr=0.01,
+            cosmology=metadata.cosmology,
+            concentration_params=module.ConcentrationParams(
+                amplitude=theta_value[0],
+                mass_slope=theta_value[1],
+                redshift_slope=theta_value[2],
+                mass_pivot=2.0e12,
+            ),
+            profile_params=module.NFWProfileParams(truncation_width_fraction=0.05),
+        )
+
+    expected_map = eager_map(theta)
+    expected_derivatives = jax.vmap(
+        lambda direction: jax.jvp(eager_map, (theta,), (direction,))[1]
+    )(jnp.eye(3, dtype=theta.dtype))
+    actual_map, diagnostics = module.paint_bucketed_nfw_sparse_map(
+        bucketed,
+        full_catalog,
+        metadata,
+        1.0e10,
+        0.01,
+        5.71,
+        -0.084,
+        -0.47,
+        2.0e12,
+        0.05,
+        compute_map_derivatives=True,
+        profile=False,
+    )
+    actual_derivatives = np.stack(
+        [
+            diagnostics["d_nfw_particle_counts_d_concentration_amplitude"],
+            diagnostics["d_nfw_particle_counts_d_concentration_mass_slope"],
+            diagnostics["d_nfw_particle_counts_d_concentration_redshift_slope"],
+        ]
+    )
+
+    assert bucketed.size == 4
+    assert bucketed.halo_id.tolist() == [1, 2, 1, 0]
+    assert bucketed.pair_weight.tolist() == [1.0, 1.0, 1.0, 0.0]
+    np.testing.assert_allclose(
+        np.asarray(actual_map),
+        np.asarray(expected_map),
+        rtol=rtol,
+        atol=atol,
+    )
+    np.testing.assert_allclose(
+        actual_derivatives,
+        np.asarray(expected_derivatives),
+        rtol=rtol,
+        atol=atol,
+    )
+
+
+def test_bucketed_sparse_jit_handles_empty_stencil():
+    module = _load_example_module()
+    catalog = _catalog()
+    empty = LightconeSparseStencil(
+        pix_id=jnp.asarray([], dtype=jnp.int32),
+        halo_id=jnp.asarray([], dtype=jnp.int32),
+        r_perp=jnp.asarray([], dtype=catalog.mass.dtype),
+        n_pix=3,
+    )
+    bucketed = module.bucket_sparse_stencil_for_rank_catalog(
+        empty,
+        np.zeros(catalog.mass.shape[0], dtype=bool),
+        int(catalog.mass.shape[0]),
+    )
+    painted, diagnostics = module.paint_bucketed_nfw_sparse_map(
+        bucketed,
+        catalog,
+        SimpleNamespace(cosmology=Cosmology()),
+        1.0e10,
+        0.01,
+        5.71,
+        -0.084,
+        -0.47,
+        2.0e12,
+        0.05,
+        compute_map_derivatives=True,
+        profile=False,
+    )
+
+    assert bucketed.size == 0
+    np.testing.assert_array_equal(np.asarray(painted), np.zeros(3))
+    for key, value in diagnostics.items():
+        if key.startswith("d_nfw_particle_counts"):
+            np.testing.assert_array_equal(value, np.zeros(3))
+
+
 def _single_pixel_pipeline_case():
     hp = pytest.importorskip("healpy")
     halo_pixels = np.array([0], dtype=np.int64)
@@ -1257,7 +1424,7 @@ def test_nfw_map_concentration_derivative_profile_labels(capsys):
     )
 
     captured = capsys.readouterr()
-    assert "NFW map concentration JVPs" in captured.out
+    assert "NFW particle map + concentration JVPs" in captured.out
     assert "NFW map concentration derivatives to numpy" in captured.out
 
 
@@ -1338,7 +1505,7 @@ def test_run_nfw_calibration_pipeline_derivatives_profile_mode_does_both(capsys)
     assert diagnostics["pipeline_mode"] == "derivatives-profile"
     assert diagnostics["nfw_map_derivatives"] == "concentration"
     assert module.nfw_stage_label("derivatives-profile") in captured.out
-    assert "NFW map concentration JVPs" in captured.out
+    assert "NFW particle map + concentration JVPs" in captured.out
     assert "NFW particle map" in captured.out
     assert "NFW particle map to numpy" in captured.out
 

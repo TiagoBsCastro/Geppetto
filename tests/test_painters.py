@@ -187,6 +187,65 @@ def test_lightcone_sparse_painter_is_jit_safe():
     assert jnp.allclose(compiled, direct, rtol=1.0e-5, atol=1.0e-5)
 
 
+def test_sparse_pair_weights_make_duplicate_padding_inert():
+    catalog = LightconeHaloCatalog(
+        unit_vector=jnp.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]),
+        chi=jnp.array([1000.0, 900.0]),
+        mass=jnp.array([1.0e14, 5.0e13]),
+        redshift=jnp.array([0.3, 0.35]),
+    )
+    stencil = LightconeSparseStencil(
+        pix_id=jnp.array([0, 1, 0], dtype=jnp.int32),
+        halo_id=jnp.array([0, 0, 1], dtype=jnp.int32),
+        r_perp=jnp.array([0.1, 0.2, 0.3]),
+        n_pix=2,
+    )
+    padded = LightconeSparseStencil(
+        pix_id=jnp.array([0, 1, 0, 0, 0], dtype=jnp.int32),
+        halo_id=jnp.array([0, 0, 1, 0, 0], dtype=jnp.int32),
+        r_perp=jnp.array([0.1, 0.2, 0.3, 1.0, 1.0]),
+        n_pix=2,
+        pair_weight=jnp.array([1.0, 1.0, 1.0, 0.0, 0.0]),
+    )
+
+    direct = paint_lightcone_particle_count_map_sparse(
+        stencil,
+        catalog,
+        particle_mass_msun_h=1.0e10,
+        pixel_area_sr=0.01,
+    )
+    weighted = jax.jit(paint_lightcone_particle_count_map_sparse, static_argnums=(2, 3))(
+        padded,
+        catalog,
+        1.0e10,
+        0.01,
+    )
+    profile_params = TabulatedProjectedProfileParams(
+        x=jnp.linspace(0.0, 1.0, 5),
+        log_shape=jnp.linspace(0.0, -0.5, 5),
+    )
+    direct_tabulated = paint_lightcone_surface_density_tabulated_sparse(
+        stencil,
+        catalog,
+        rmax_mpc_h=1.0,
+        profile_params=profile_params,
+    )
+    weighted_tabulated = paint_lightcone_surface_density_tabulated_sparse(
+        padded,
+        catalog,
+        rmax_mpc_h=1.0,
+        profile_params=profile_params,
+    )
+
+    assert jnp.allclose(weighted, direct, rtol=1.0e-6, atol=1.0e-8)
+    assert jnp.allclose(
+        weighted_tabulated,
+        direct_tabulated,
+        rtol=1.0e-6,
+        atol=1.0e-8,
+    )
+
+
 def test_lightcone_sparse_gradients_are_finite():
     pixel_unit_vectors = jnp.array([[1.0, 0.0, 0.0], [0.999, 0.045, 0.0]])
     pixel_unit_vectors = pixel_unit_vectors / jnp.linalg.norm(pixel_unit_vectors, axis=1)[:, None]
@@ -315,6 +374,30 @@ def test_validate_lightcone_sparse_stencil_rejects_invalid_inputs():
                 halo_id=jnp.array([0], dtype=jnp.int32),
                 r_perp=jnp.array([-1.0]),
                 n_pix=1,
+            ),
+            catalog,
+        )
+
+    with pytest.raises(PinocchioCatalogError, match="matching lengths"):
+        validate_lightcone_sparse_stencil(
+            LightconeSparseStencil(
+                pix_id=jnp.array([0], dtype=jnp.int32),
+                halo_id=jnp.array([0], dtype=jnp.int32),
+                r_perp=jnp.array([0.0]),
+                n_pix=1,
+                pair_weight=jnp.array([1.0, 0.0]),
+            ),
+            catalog,
+        )
+
+    with pytest.raises(PinocchioCatalogError, match="pair_weight"):
+        validate_lightcone_sparse_stencil(
+            LightconeSparseStencil(
+                pix_id=jnp.array([0], dtype=jnp.int32),
+                halo_id=jnp.array([0], dtype=jnp.int32),
+                r_perp=jnp.array([0.0]),
+                n_pix=1,
+                pair_weight=jnp.array([-1.0]),
             ),
             catalog,
         )

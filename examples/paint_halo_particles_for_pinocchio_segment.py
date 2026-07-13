@@ -107,6 +107,10 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from geppetto._sparse_jit import (
+    paint_nfw_particle_count_map_and_concentration_jvps_jit,
+    paint_nfw_particle_count_map_sparse_jit,
+)
 from geppetto import (
     ConcentrationParams,
     NFWProfileParams,
@@ -943,6 +947,76 @@ def _compression_factor(dense_pair_count: int, sparse_pair_count: int) -> float:
     return 1.0
 
 
+def sparse_pair_bucket_size(n_pair: int) -> int:
+    """Return the next power-of-two sparse pair count, preserving zero."""
+
+    if n_pair < 0:
+        raise ValueError("n_pair must be non-negative")
+    if n_pair == 0:
+        return 0
+    return 1 << (n_pair - 1).bit_length()
+
+
+def bucket_sparse_stencil_for_rank_catalog(
+    stencil: LightconeSparseStencil,
+    selected_mask: np.ndarray,
+    rank_catalog_size: int,
+) -> LightconeSparseStencil:
+    """Remap selected-catalogue IDs and zero-pad one sparse JIT bucket.
+
+    The returned halo IDs index the full rank-local catalogue, whose shape is
+    constant across segments. Geometry and padding remain outside differentiable
+    kernels.
+    """
+
+    if rank_catalog_size < 0:
+        raise ValueError("rank_catalog_size must be non-negative")
+    mask = np.asarray(selected_mask, dtype=bool)
+    if mask.shape != (rank_catalog_size,):
+        raise ValueError("selected_mask must match the rank-local catalogue length")
+
+    pix_id = np.asarray(stencil.pix_id, dtype=np.int32)
+    local_halo_id = np.asarray(stencil.halo_id, dtype=np.int64)
+    r_perp = np.asarray(stencil.r_perp)
+    n_pair = int(r_perp.shape[0])
+    if pix_id.shape != (n_pair,) or local_halo_id.shape != (n_pair,):
+        raise ValueError("sparse stencil fields must be one-dimensional and equal length")
+
+    selected_halo_ids = np.flatnonzero(mask)
+    if local_halo_id.size and (
+        np.any(local_halo_id < 0) or np.any(local_halo_id >= selected_halo_ids.size)
+    ):
+        raise ValueError("stencil halo IDs do not index the selected catalogue")
+    rank_halo_id = selected_halo_ids[local_halo_id].astype(np.int32, copy=False)
+
+    if stencil.pair_weight is None:
+        pair_weight = np.ones(n_pair, dtype=r_perp.dtype)
+    else:
+        pair_weight = np.asarray(stencil.pair_weight, dtype=r_perp.dtype)
+        if pair_weight.shape != (n_pair,):
+            raise ValueError("stencil pair weights must match the pair count")
+    if not np.all(np.isfinite(pair_weight)) or np.any(pair_weight < 0.0):
+        raise ValueError("stencil pair weights must be finite and non-negative")
+
+    bucket_size = sparse_pair_bucket_size(n_pair)
+    padded_pix_id = np.zeros(bucket_size, dtype=np.int32)
+    padded_halo_id = np.zeros(bucket_size, dtype=np.int32)
+    padded_r_perp = np.ones(bucket_size, dtype=r_perp.dtype)
+    padded_pair_weight = np.zeros(bucket_size, dtype=r_perp.dtype)
+    padded_pix_id[:n_pair] = pix_id
+    padded_halo_id[:n_pair] = rank_halo_id
+    padded_r_perp[:n_pair] = r_perp
+    padded_pair_weight[:n_pair] = pair_weight
+
+    return LightconeSparseStencil(
+        pix_id=jnp.asarray(padded_pix_id),
+        halo_id=jnp.asarray(padded_halo_id),
+        r_perp=jnp.asarray(padded_r_perp),
+        n_pix=stencil.n_pix,
+        pair_weight=jnp.asarray(padded_pair_weight),
+    )
+
+
 def build_lightcone_sparse_stencil_for_mass_map_local(
     mass_map: PinocchioMassMap,
     catalog: LightconeHaloCatalog,
@@ -1239,7 +1313,13 @@ def nfw_sparse_total_particle_count(
         concentration_params,
         profile_params,
     )
-    return jnp.sum(sigma * (chi**2) * pixel_area_sr / particle_mass_msun_h)
+    contribution = sigma * (chi**2) * pixel_area_sr / particle_mass_msun_h
+    if stencil.pair_weight is not None:
+        contribution = contribution * jnp.asarray(
+            stencil.pair_weight,
+            dtype=contribution.dtype,
+        )
+    return jnp.sum(contribution)
 
 
 def nfw_concentration_map_derivatives(
@@ -1325,6 +1405,89 @@ def nfw_concentration_map_derivatives(
     }
 
 
+def paint_bucketed_nfw_sparse_map(
+    stencil: LightconeSparseStencil,
+    rank_catalog: LightconeHaloCatalog,
+    metadata: PinocchioRunMetadata,
+    particle_mass_msun_h: float,
+    pixel_area_sr: float,
+    concentration_amplitude: float,
+    concentration_mass_slope: float,
+    concentration_redshift_slope: float,
+    concentration_mass_pivot: float,
+    truncation_width_fraction: float,
+    *,
+    compute_map_derivatives: bool,
+    profile: bool,
+) -> tuple[jax.Array, dict[str, float | str | np.ndarray]]:
+    """Paint one padded sparse bucket and optional concentration JVP maps."""
+
+    theta = jnp.asarray(
+        [
+            concentration_amplitude,
+            concentration_mass_slope,
+            concentration_redshift_slope,
+        ],
+        dtype=rank_catalog.mass.dtype,
+    )
+    scalar_dtype = theta.dtype
+    particle_mass = jnp.asarray(particle_mass_msun_h, dtype=scalar_dtype)
+    pixel_area = jnp.asarray(pixel_area_sr, dtype=scalar_dtype)
+    mass_pivot = jnp.asarray(concentration_mass_pivot, dtype=scalar_dtype)
+    truncation_width = jnp.asarray(truncation_width_fraction, dtype=scalar_dtype)
+
+    if compute_map_derivatives:
+        with timed_stage("NFW particle map + concentration JVPs", profile):
+            if stencil.size == 0:
+                particle_counts = jnp.zeros((stencil.n_pix,), dtype=scalar_dtype)
+                derivative_maps = jnp.zeros(
+                    (theta.shape[0], stencil.n_pix),
+                    dtype=scalar_dtype,
+                )
+            else:
+                particle_counts, derivative_maps = (
+                    paint_nfw_particle_count_map_and_concentration_jvps_jit(
+                        stencil,
+                        rank_catalog,
+                        theta,
+                        particle_mass,
+                        pixel_area,
+                        metadata.cosmology,
+                        mass_pivot,
+                        truncation_width,
+                    )
+                )
+            jax.block_until_ready((particle_counts, derivative_maps))
+    else:
+        with timed_stage("NFW particle map", profile):
+            if stencil.size == 0:
+                particle_counts = jnp.zeros((stencil.n_pix,), dtype=scalar_dtype)
+            else:
+                particle_counts = paint_nfw_particle_count_map_sparse_jit(
+                    stencil,
+                    rank_catalog,
+                    theta,
+                    particle_mass,
+                    pixel_area,
+                    metadata.cosmology,
+                    mass_pivot,
+                    truncation_width,
+                )
+            particle_counts.block_until_ready()
+
+    if not compute_map_derivatives:
+        return particle_counts, {"nfw_map_derivatives": "none"}
+
+    with timed_stage("NFW map concentration derivatives to numpy", profile):
+        derivative_maps_np = np.asarray(derivative_maps)
+    return particle_counts, {
+        "nfw_map_derivatives": "concentration",
+        "d_nfw_particle_counts_d_concentration_amplitude": derivative_maps_np[0],
+        "d_nfw_particle_counts_d_concentration_mass_slope": derivative_maps_np[1],
+        "d_nfw_particle_counts_d_concentration_redshift_slope": derivative_maps_np[2],
+    }
+
+
 def run_nfw_calibration_pipeline(
     catalog: LightconeHaloCatalog,
     mask: np.ndarray,
@@ -1390,9 +1553,13 @@ def run_nfw_calibration_pipeline(
         truncation_width_fraction=truncation_width_fraction
     )
     stencil = None
+    bucketed_stencil = None
     stencil_diag = None
     comparison_diagnostics: dict[str, bool | float | int | str] = {}
     nfw_particle_counts = None
+    map_derivative_diagnostics: dict[str, float | str | np.ndarray] = {
+        "nfw_map_derivatives": "none"
+    }
     sparse_pair_count = dense_pair_count
     if not dense_demo:
         with timed_stage("NFW rmax", profile):
@@ -1431,6 +1598,13 @@ def run_nfw_calibration_pipeline(
             else:
                 stencil = stencil_result
         sparse_pair_count = int(stencil.size)
+        if not stencil_compare_query_modes:
+            with timed_stage("NFW sparse JIT bucket", profile):
+                bucketed_stencil = bucket_sparse_stencil_for_rank_catalog(
+                    stencil,
+                    mask,
+                    int(catalog.mass.shape[0]),
+                )
         if verbose:
             print("NFW sparse stencil:")
             print(f"  Selected halos: {n_halo}")
@@ -1465,45 +1639,45 @@ def run_nfw_calibration_pipeline(
                 chunk_size=chunk_size,
             )
             nfw_particle_counts.block_until_ready()
-    elif nfw_particle_counts is None:
-        with timed_stage("NFW particle map", profile):
+    elif stencil_compare_query_modes:
+        assert nfw_particle_counts is not None
+        nfw_particle_counts.block_until_ready()
+        if compute_map_derivatives:
             assert stencil is not None
-            nfw_particle_counts = paint_lightcone_particle_count_map_sparse(
+            map_derivative_diagnostics = nfw_concentration_map_derivatives(
                 stencil,
                 selected_catalog,
-                particle_mass_msun_h=particle_mass_msun_h,
-                pixel_area_sr=pixel_area_sr,
-                cosmology=metadata.cosmology,
-                concentration_params=concentration_params,
-                profile_params=profile_params,
+                mass_map,
+                metadata,
+                particle_mass_msun_h,
+                concentration_amplitude=concentration_amplitude,
+                concentration_mass_slope=concentration_mass_slope,
+                concentration_redshift_slope=concentration_redshift_slope,
+                concentration_mass_pivot=concentration_mass_pivot,
+                truncation_width_fraction=truncation_width_fraction,
+                profile=profile,
             )
-            nfw_particle_counts.block_until_ready()
     else:
-        nfw_particle_counts.block_until_ready()
+        assert bucketed_stencil is not None
+        nfw_particle_counts, map_derivative_diagnostics = paint_bucketed_nfw_sparse_map(
+            bucketed_stencil,
+            catalog,
+            metadata,
+            particle_mass_msun_h,
+            pixel_area_sr,
+            concentration_amplitude,
+            concentration_mass_slope,
+            concentration_redshift_slope,
+            concentration_mass_pivot,
+            truncation_width_fraction,
+            compute_map_derivatives=compute_map_derivatives,
+            profile=profile,
+        )
 
     total_counts = jnp.sum(nfw_particle_counts)
 
     with timed_stage("NFW particle map to numpy", profile):
         nfw_particle_counts_np = np.asarray(nfw_particle_counts)
-
-    map_derivative_diagnostics: dict[str, float | str | np.ndarray] = {
-        "nfw_map_derivatives": "none"
-    }
-    if compute_map_derivatives:
-        assert stencil is not None
-        map_derivative_diagnostics = nfw_concentration_map_derivatives(
-            stencil,
-            selected_catalog,
-            mass_map,
-            metadata,
-            particle_mass_msun_h,
-            concentration_amplitude=concentration_amplitude,
-            concentration_mass_slope=concentration_mass_slope,
-            concentration_redshift_slope=concentration_redshift_slope,
-            concentration_mass_pivot=concentration_mass_pivot,
-            truncation_width_fraction=truncation_width_fraction,
-            profile=profile,
-        )
 
     diagnostics: dict[str, bool | float | int | str | np.ndarray] = {
         "pipeline_mode": pipeline_mode,

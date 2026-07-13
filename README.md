@@ -142,7 +142,10 @@ sigma_sparse = paint_lightcone_surface_density_sparse(stencil, catalog)
 `build_lightcone_sparse_stencil_bruteforce` materializes an `n_pix * n_halo`
 separation matrix and is intended for tests, examples, and small maps. The
 PINOCCHIO calibration script below uses a HEALPix-local sparse stencil builder
-for segment painting.
+for segment painting. `LightconeSparseStencil.pair_weight` optionally applies a
+dimensionless weight to each retained pair; omitted weights are one. Zero
+weights are useful for shape padding because padded pairs then contribute
+exactly zero even when they repeat valid pixel and halo indices.
 
 ## PINOCCHIO c-M Calibration Pipeline
 
@@ -234,6 +237,15 @@ PLC catalogue part named like `pinocchio.RUN.plc.out.0`,
 `pinocchio.RUN.plc.out.1`, and so on; the MPI world size must equal the number
 of discovered parts. Each rank paints only its local halo subset, then rank 0
 reduces and writes final segment outputs without temporary per-rank map files.
+
+The normal PINOCCHIO sparse path automatically remaps stencil halo indices to
+the constant rank-local catalogue and zero-pads pair arrays to the next power
+of two. Module-level JIT kernels are then reused by segments in the same pair
+bucket. Reported sparse-pair diagnostics retain the unpadded count, and padding
+never changes NPZ/FITS map shapes or values. Derivative mode obtains the primal
+map and all three concentration JVP maps from one compiled invocation. The
+hidden `--nfw-chunk-size` control remains limited to the dense/debug painter;
+it does not configure sparse bucketing.
 
 `--segment-workers N` is a bounded prefetch window over mass-map segments, not
 an `N`-fold speedup for one segment. The main thread reduces segments in

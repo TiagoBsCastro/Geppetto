@@ -69,14 +69,16 @@ The sparse PLC painter uses the same NFW projected profile, but receives a
 precomputed halo-pixel stencil:
 
 ```text
-(pix_id, halo_id, R_perp)
+(pix_id, halo_id, R_perp, optional pair_weight)
 ```
 
 Stencil construction is non-core geometry. It may use NumPy, HEALPix helpers, or
 survey masks outside JAX, then pass fixed pair arrays into the differentiable
 painter. `LightconeSparseStencil` stores `n_pix` as static pytree metadata so
-the sparse painter can allocate its `(n_pix,)` result under `jax.jit`. The first
-builder, `build_lightcone_sparse_stencil_bruteforce`, retains pairs with
+the sparse painter can allocate its `(n_pix,)` result under `jax.jit`.
+`pair_weight` is dimensionless and defaults to one; production JIT buckets use
+zero weights to make padded duplicate indices inert. The first builder,
+`build_lightcone_sparse_stencil_bruteforce`, retains pairs with
 `R_perp <= Rmax_halo`; `Rmax` and the retained pair set are not differentiable
 parameters. This helper materializes the full `n_pix * n_halo` separation
 matrix and is intended for validation and small maps. A scalable HEALPix-local
@@ -84,6 +86,14 @@ builder should return the same stencil container after doing the discrete pixel
 queries outside JAX. The sparse painter remains differentiable with respect to
 concentration and profile parameters because it only gathers halo fields,
 evaluates the projected profile, and scatter-adds into the output map.
+
+The PINOCCHIO segment workflow remaps selected-catalogue halo indices to the
+constant rank-local catalogue, pads pair arrays to the next power of two, and
+uses module-level compiled NFW kernels. Consequently, executable reuse depends
+on pair bucket, output size, catalogue shape, dtype, and derivative mode rather
+than every exact segment pair count. In concentration-derivative mode one
+linearization returns the primal map and applies the three JVP directions
+without repeating the primal paint.
 
 The first non-NFW profile path is sparse-PLC only:
 

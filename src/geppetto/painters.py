@@ -29,6 +29,12 @@ DEFAULT_COSMOLOGY = Cosmology()
 DEFAULT_CONCENTRATION_PARAMS = ConcentrationParams()
 
 
+def _apply_sparse_pair_weight(contribution: Array, stencil: LightconeSparseStencil) -> Array:
+    if stencil.pair_weight is None:
+        return contribution
+    return contribution * jnp.asarray(stencil.pair_weight, dtype=contribution.dtype)
+
+
 def _density_from_catalog(
     points: Array,
     catalog: HaloCatalog,
@@ -306,6 +312,7 @@ def paint_lightcone_surface_density_sparse(
     if return_mass_per_pixel:
         chi = catalog.chi[halo_id]
         sigma = sigma * (chi**2) * pixel_area_sr
+    sigma = _apply_sparse_pair_weight(sigma, stencil)
 
     return jnp.zeros((stencil.n_pix,), dtype=sigma.dtype).at[pix_id].add(sigma)
 
@@ -378,6 +385,7 @@ def paint_lightcone_surface_density_tabulated_sparse(
     if return_mass_per_pixel:
         chi = catalog.chi[halo_id]
         sigma = sigma * (chi**2) * pixel_area_sr
+    sigma = _apply_sparse_pair_weight(sigma, stencil)
 
     return jnp.zeros((stencil.n_pix,), dtype=sigma.dtype).at[pix_id].add(sigma)
 

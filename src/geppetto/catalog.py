@@ -90,27 +90,38 @@ class LightconeSparseStencil:
         differentiable painter kernels.
     n_pix:
         Number of pixels in the output one-dimensional map.
+    pair_weight:
+        Optional dimensionless contribution weight for each retained pair,
+        shape ``(n_pair,)``. ``None`` is equivalent to unit weights. Zero
+        weights support shape padding without changing painted maps.
     """
 
     pix_id: Array
     halo_id: Array
     r_perp: Array
     n_pix: int
+    pair_weight: Array | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "n_pix", int(self.n_pix))
 
-    def tree_flatten(self) -> tuple[tuple[Array, Array, Array], int]:
+    def tree_flatten(self) -> tuple[tuple[Array, Array, Array, Array | None], int]:
         """Keep ``n_pix`` static for ``jax.jit`` output-shape construction."""
 
-        return (self.pix_id, self.halo_id, self.r_perp), self.n_pix
+        return (self.pix_id, self.halo_id, self.r_perp, self.pair_weight), self.n_pix
 
     @classmethod
     def tree_unflatten(
-        cls, n_pix: int, children: tuple[Array, Array, Array]
+        cls, n_pix: int, children: tuple[Array, Array, Array, Array | None]
     ) -> LightconeSparseStencil:
-        pix_id, halo_id, r_perp = children
-        return cls(pix_id=pix_id, halo_id=halo_id, r_perp=r_perp, n_pix=n_pix)
+        pix_id, halo_id, r_perp, pair_weight = children
+        return cls(
+            pix_id=pix_id,
+            halo_id=halo_id,
+            r_perp=r_perp,
+            n_pix=n_pix,
+            pair_weight=pair_weight,
+        )
 
     @property
     def size(self) -> int:
