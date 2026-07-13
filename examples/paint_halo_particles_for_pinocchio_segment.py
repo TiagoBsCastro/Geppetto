@@ -2058,22 +2058,31 @@ def run_calibration_for_segment(
     )
 
 
-def _mpi_sum(value: Any, mpi_context: MpiContext) -> Any:
+def _mpi_reduce_array(
+    value: np.ndarray,
+    mpi_context: MpiContext,
+) -> np.ndarray | None:
+    """Sum one numeric array onto rank 0 with MPI's buffer collective."""
+
+    send_buffer = np.ascontiguousarray(value)
+    if send_buffer.dtype.hasobject:
+        raise TypeError("MPI array reduction requires a numeric NumPy dtype")
     if not mpi_context.enabled:
-        return value
+        return send_buffer
     if mpi_context.comm is None:
         raise RuntimeError("MPI context is enabled but has no communicator")
+
+    receive_buffer = np.empty_like(send_buffer) if mpi_context.is_root else None
     if mpi_context.sum_op is None:
-        return mpi_context.comm.reduce(value, root=0)
-    return mpi_context.comm.reduce(value, op=mpi_context.sum_op, root=0)
-
-
-def _as_reduced_number(value: Any, *, integer: bool) -> int | float:
-    array = np.asarray(value)
-    scalar = array.item() if array.shape == () else value
-    if integer:
-        return int(scalar)
-    return float(scalar)
+        mpi_context.comm.Reduce(send_buffer, receive_buffer, root=0)
+    else:
+        mpi_context.comm.Reduce(
+            send_buffer,
+            receive_buffer,
+            op=mpi_context.sum_op,
+            root=0,
+        )
+    return receive_buffer
 
 
 def reduce_calibration_segment_result(
@@ -2085,8 +2094,11 @@ def reduce_calibration_segment_result(
     if not mpi_context.enabled:
         return local_result
 
-    reduced_halo_counts = _mpi_sum(local_result.halo_particle_counts, mpi_context)
-    reduced_nfw_counts = _mpi_sum(
+    reduced_halo_counts = _mpi_reduce_array(
+        local_result.halo_particle_counts,
+        mpi_context,
+    )
+    reduced_nfw_counts = _mpi_reduce_array(
         np.asarray(local_result.nfw_diagnostics["nfw_particle_counts"]),
         mpi_context,
     )
@@ -2097,66 +2109,70 @@ def reduce_calibration_segment_result(
         "d_nfw_particle_counts_d_concentration_redshift_slope",
     )
     reduced_derivative_arrays = {
-        key: _mpi_sum(np.asarray(local_result.nfw_diagnostics[key]), mpi_context)
+        key: _mpi_reduce_array(
+            np.asarray(local_result.nfw_diagnostics[key]),
+            mpi_context,
+        )
         for key in derivative_array_keys
         if key in local_result.nfw_diagnostics
     }
 
-    diagnostic_sum_keys = (
+    diagnostic_integer_sum_keys = (
         "n_halos_total",
         "n_halos_in_segment",
         "n_halos_in_segment_and_pixels",
-        "sum_halo_particle_counts",
     )
-    reduced_diagnostics = {
-        key: _mpi_sum(local_result.diagnostics[key], mpi_context)
-        for key in diagnostic_sum_keys
-        if key in local_result.diagnostics
-    }
-
-    nfw_sum_keys = (
+    nfw_integer_sum_keys = (
         "nfw_selected_halo_count",
         "nfw_sparse_pair_count",
         "nfw_dense_pair_count",
-        "nfw_sum_particle_counts",
         "stencil_query_pixels_total",
         "stencil_inside_domain_total",
         "stencil_kept_pairs_total",
     )
-    reduced_nfw_scalars = {
-        key: _mpi_sum(local_result.nfw_diagnostics[key], mpi_context)
-        for key in nfw_sum_keys
-        if key in local_result.nfw_diagnostics
-    }
+    present_diagnostic_keys = tuple(
+        key for key in diagnostic_integer_sum_keys if key in local_result.diagnostics
+    )
+    present_nfw_keys = tuple(
+        key for key in nfw_integer_sum_keys if key in local_result.nfw_diagnostics
+    )
+    integer_diagnostics = np.asarray(
+        [
+            *(local_result.diagnostics[key] for key in present_diagnostic_keys),
+            *(local_result.nfw_diagnostics[key] for key in present_nfw_keys),
+        ],
+        dtype=np.int64,
+    )
+    reduced_integer_diagnostics = _mpi_reduce_array(integer_diagnostics, mpi_context)
 
     if not mpi_context.is_root:
         return None
 
+    assert reduced_halo_counts is not None
+    assert reduced_nfw_counts is not None
+    assert reduced_integer_diagnostics is not None
+    n_diagnostic_values = len(present_diagnostic_keys)
+
     diagnostics = dict(local_result.diagnostics)
-    for key, value in reduced_diagnostics.items():
-        diagnostics[key] = _as_reduced_number(
-            value,
-            integer=key.startswith("n_halos"),
-        )
+    for key, value in zip(
+        present_diagnostic_keys,
+        reduced_integer_diagnostics[:n_diagnostic_values],
+        strict=True,
+    ):
+        diagnostics[key] = int(value)
     diagnostics["sum_halo_particle_counts"] = float(np.sum(reduced_halo_counts))
 
     nfw_diagnostics = dict(local_result.nfw_diagnostics)
     nfw_diagnostics["nfw_particle_counts"] = np.asarray(reduced_nfw_counts)
     for key, value in reduced_derivative_arrays.items():
+        assert value is not None
         nfw_diagnostics[key] = np.asarray(value)
-    integer_nfw_keys = {
-        "nfw_selected_halo_count",
-        "nfw_sparse_pair_count",
-        "nfw_dense_pair_count",
-        "stencil_query_pixels_total",
-        "stencil_inside_domain_total",
-        "stencil_kept_pairs_total",
-    }
-    for key, value in reduced_nfw_scalars.items():
-        nfw_diagnostics[key] = _as_reduced_number(
-            value,
-            integer=key in integer_nfw_keys,
-        )
+    for key, value in zip(
+        present_nfw_keys,
+        reduced_integer_diagnostics[n_diagnostic_values:],
+        strict=True,
+    ):
+        nfw_diagnostics[key] = int(value)
     nfw_diagnostics["nfw_sum_particle_counts"] = float(
         np.sum(nfw_diagnostics["nfw_particle_counts"])
     )

@@ -1382,6 +1382,12 @@ def test_reduce_calibration_segment_result_sums_additive_payloads():
             "nfw_concentration_redshift_slope": -0.47,
             "nfw_concentration_mass_pivot": 2.0e12,
             "nfw_truncation_width_fraction": 0.05,
+            "stencil_query_pixels_total": 10,
+            "stencil_inside_domain_total": 8,
+            "stencil_kept_pairs_total": 6,
+            "stencil_inside_over_query": 0.8,
+            "stencil_kept_over_query": 0.6,
+            "stencil_kept_over_inside": 0.75,
         },
     )
 
@@ -1391,28 +1397,27 @@ def test_reduce_calibration_segment_result_sums_additive_payloads():
         np.array([0.4, 0.5]),
         np.array([0.6, 0.7]),
         np.array([0.8, 0.9]),
-        3,
-        2,
-        2,
-        7.0,
-        2,
-        3,
-        6,
-        5.0,
+        np.array([3, 2, 2, 2, 3, 6, 20, 16, 12], dtype=np.int64),
     ]
 
     class PairwiseSumComm:
         def __init__(self, values):
             self.values = list(values)
+            self.send_buffers = []
 
-        def reduce(self, value, op=None, root=0):
-            del op, root
+        def Reduce(self, send_buffer, receive_buffer, op=None, root=0):
+            del op
+            assert root == 0
+            assert receive_buffer is not None
             other = self.values.pop(0)
-            return np.asarray(value) + np.asarray(other)
+            self.send_buffers.append(np.asarray(send_buffer).copy())
+            receive_buffer[...] = np.asarray(send_buffer) + np.asarray(other)
+
+    comm = PairwiseSumComm(remote_values)
 
     context = module.MpiContext(
         enabled=True,
-        comm=PairwiseSumComm(remote_values),
+        comm=comm,
         rank=0,
         size=2,
     )
@@ -1437,9 +1442,156 @@ def test_reduce_calibration_segment_result_sums_additive_payloads():
     assert reduced.nfw_diagnostics["nfw_compact_pixel_count"] == 2
     assert reduced.nfw_diagnostics["nfw_sparse_compression_factor"] == 2.0
     assert reduced.nfw_diagnostics["nfw_sum_particle_counts"] == 7.0
+    assert reduced.nfw_diagnostics["stencil_query_pixels_total"] == 30
+    assert reduced.nfw_diagnostics["stencil_inside_domain_total"] == 24
+    assert reduced.nfw_diagnostics["stencil_kept_pairs_total"] == 18
+    assert reduced.nfw_diagnostics["stencil_inside_over_query"] == 0.8
+    assert reduced.nfw_diagnostics["stencil_kept_over_query"] == 0.6
+    assert reduced.nfw_diagnostics["stencil_kept_over_inside"] == 0.75
     assert "sum_d_nfw_particle_counts_d_concentration_amplitude" not in reduced.nfw_diagnostics
     assert "sum_d_nfw_particle_counts_d_concentration_mass_slope" not in reduced.nfw_diagnostics
     assert "sum_d_nfw_particle_counts_d_concentration_redshift_slope" not in reduced.nfw_diagnostics
+    assert len(comm.send_buffers) == 6
+    assert comm.send_buffers[-1].dtype == np.dtype(np.int64)
+    np.testing.assert_array_equal(
+        comm.send_buffers[-1],
+        [2, 1, 1, 1, 2, 4, 10, 8, 6],
+    )
+    assert not comm.values
+
+
+def test_mpi_reduce_array_preserves_float32_and_uses_receive_buffer():
+    module = _load_example_module()
+
+    class DoublingComm:
+        def Reduce(self, send_buffer, receive_buffer, op=None, root=0):
+            del op
+            assert root == 0
+            assert receive_buffer is not None
+            assert receive_buffer.dtype == np.dtype(np.float32)
+            receive_buffer[...] = 2 * send_buffer
+
+    reduced = module._mpi_reduce_array(
+        np.array([1.0, 2.0], dtype=np.float32),
+        module.MpiContext(
+            enabled=True,
+            comm=DoublingComm(),
+            rank=0,
+            size=2,
+        ),
+    )
+
+    assert reduced is not None
+    assert reduced.dtype == np.dtype(np.float32)
+    np.testing.assert_allclose(reduced, [2.0, 4.0])
+
+
+def test_reduce_calibration_segment_result_non_root_uses_no_receive_buffers():
+    module = _load_example_module()
+    local = _fake_segment_result(
+        module,
+        segment_index=0,
+        mass_map_path=Path("massmap.seg000.fits"),
+        output_npz=Path("painted.seg000.npz"),
+        output_fits=None,
+        inclusive_upper=False,
+    )
+    local.halo_particle_counts = local.halo_particle_counts.astype(np.float32)
+    local.nfw_diagnostics["nfw_particle_counts"] = np.asarray(
+        local.nfw_diagnostics["nfw_particle_counts"],
+        dtype=np.float32,
+    )
+
+    class NonRootComm:
+        def __init__(self):
+            self.send_dtypes = []
+
+        def Reduce(self, send_buffer, receive_buffer, op=None, root=0):
+            del op
+            assert root == 0
+            assert receive_buffer is None
+            self.send_dtypes.append(np.asarray(send_buffer).dtype)
+
+    comm = NonRootComm()
+    reduced = module.reduce_calibration_segment_result(
+        local,
+        module.MpiContext(
+            enabled=True,
+            comm=comm,
+            rank=1,
+            size=2,
+        ),
+    )
+
+    assert reduced is None
+    assert comm.send_dtypes == [
+        np.dtype(np.float32),
+        np.dtype(np.float32),
+        np.dtype(np.int64),
+    ]
+
+
+def test_real_mpi_buffer_reduction():
+    module = _load_example_module()
+    if module._mpi_environment_size_hint() < 2:
+        pytest.skip("requires execution under mpiexec with at least two ranks")
+
+    mpi = pytest.importorskip("mpi4py.MPI")
+    comm = mpi.COMM_WORLD
+    if comm.Get_size() < 2:
+        pytest.skip("requires execution under mpiexec with at least two ranks")
+
+    rank_value = comm.Get_rank() + 1
+    local = _fake_segment_result(
+        module,
+        segment_index=0,
+        mass_map_path=Path("massmap.seg000.fits"),
+        output_npz=Path("painted.seg000.npz"),
+        output_fits=None,
+        inclusive_upper=False,
+    )
+    local.halo_particle_counts = np.array([rank_value], dtype=np.float64)
+    local.nfw_diagnostics["nfw_particle_counts"] = np.array(
+        [2 * rank_value],
+        dtype=np.float64,
+    )
+    for key in (
+        "n_halos_total",
+        "n_halos_in_segment",
+        "n_halos_in_segment_and_pixels",
+    ):
+        local.diagnostics[key] = rank_value
+    for key in (
+        "nfw_selected_halo_count",
+        "nfw_sparse_pair_count",
+        "nfw_dense_pair_count",
+    ):
+        local.nfw_diagnostics[key] = rank_value
+
+    reduced = module.reduce_calibration_segment_result(
+        local,
+        module.MpiContext(
+            enabled=True,
+            comm=comm,
+            rank=comm.Get_rank(),
+            size=comm.Get_size(),
+            sum_op=mpi.SUM,
+        ),
+    )
+
+    if comm.Get_rank() != 0:
+        assert reduced is None
+        return
+
+    assert reduced is not None
+    expected = comm.Get_size() * (comm.Get_size() + 1) // 2
+    np.testing.assert_allclose(reduced.halo_particle_counts, [expected])
+    np.testing.assert_allclose(
+        reduced.nfw_diagnostics["nfw_particle_counts"],
+        [2 * expected],
+    )
+    assert reduced.diagnostics["n_halos_total"] == expected
+    assert reduced.nfw_diagnostics["nfw_selected_halo_count"] == expected
 
 
 def test_run_segment_workflow_all_segments_names_outputs_and_sets_inclusive_bounds(
