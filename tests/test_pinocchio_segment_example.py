@@ -499,6 +499,71 @@ def test_timed_stage_enabled_prints_profile_line(capsys):
     assert "visible stage" in captured.out
 
 
+def test_gather_segment_execution_timings_uses_root_receive_buffer(capsys):
+    module = _load_example_module()
+
+    class RootGatherComm:
+        def Gather(self, send_buffer, receive_buffer, root=0):
+            assert root == 0
+            assert receive_buffer is not None
+            receive_buffer[0] = send_buffer
+            receive_buffer[1] = send_buffer + np.array([1.0, 2.0, 3.0])
+
+    gathered = module.gather_segment_execution_timings(
+        module.SegmentExecutionTiming(
+            compute_seconds=2.0,
+            result_wait_seconds=0.5,
+            reduction_seconds=0.25,
+        ),
+        module.MpiContext(
+            enabled=True,
+            comm=RootGatherComm(),
+            rank=0,
+            size=2,
+        ),
+    )
+
+    assert gathered is not None
+    np.testing.assert_allclose(
+        gathered,
+        [[2.0, 0.5, 0.25], [3.0, 2.5, 3.25]],
+    )
+    module.print_rank_timing_summary("segment 004", gathered)
+    captured = capsys.readouterr().out
+    assert "[profile] segment 004 rank min/mean/max (s)" in captured
+    assert "compute 2.000/2.500/3.000" in captured
+    assert "result wait 0.500/1.500/2.500" in captured
+    assert "MPI reduce 0.250/1.750/3.250" in captured
+
+
+def test_gather_segment_execution_timings_non_root_has_no_receive_buffer():
+    module = _load_example_module()
+
+    class NonRootGatherComm:
+        def __init__(self):
+            self.send_buffer = None
+
+        def Gather(self, send_buffer, receive_buffer, root=0):
+            assert root == 0
+            assert receive_buffer is None
+            self.send_buffer = np.asarray(send_buffer).copy()
+
+    comm = NonRootGatherComm()
+    gathered = module.gather_segment_execution_timings(
+        module.SegmentExecutionTiming(1.0, 0.2, 0.1),
+        module.MpiContext(
+            enabled=True,
+            comm=comm,
+            rank=1,
+            size=2,
+        ),
+    )
+
+    assert gathered is None
+    np.testing.assert_allclose(comm.send_buffer, [1.0, 0.2, 0.1])
+    assert comm.send_buffer.dtype == np.dtype(np.float64)
+
+
 def test_segment_bounds_sort_redshift_chi_and_compute_scale_factor():
     module = _load_example_module()
     bounds = module.segment_bounds(_sheets(), 1)
@@ -1594,6 +1659,43 @@ def test_real_mpi_buffer_reduction():
     assert reduced.nfw_diagnostics["nfw_selected_halo_count"] == expected
 
 
+def test_real_mpi_segment_timing_gather():
+    module = _load_example_module()
+    if module._mpi_environment_size_hint() < 2:
+        pytest.skip("requires execution under mpiexec with at least two ranks")
+
+    mpi = pytest.importorskip("mpi4py.MPI")
+    comm = mpi.COMM_WORLD
+    if comm.Get_size() < 2:
+        pytest.skip("requires execution under mpiexec with at least two ranks")
+
+    rank_value = float(comm.Get_rank() + 1)
+    gathered = module.gather_segment_execution_timings(
+        module.SegmentExecutionTiming(
+            compute_seconds=rank_value,
+            result_wait_seconds=2.0 * rank_value,
+            reduction_seconds=3.0 * rank_value,
+        ),
+        module.MpiContext(
+            enabled=True,
+            comm=comm,
+            rank=comm.Get_rank(),
+            size=comm.Get_size(),
+            sum_op=mpi.SUM,
+        ),
+    )
+
+    if comm.Get_rank() != 0:
+        assert gathered is None
+        return
+
+    assert gathered is not None
+    expected_rank_values = np.arange(1, comm.Get_size() + 1, dtype=np.float64)
+    np.testing.assert_allclose(gathered[:, 0], expected_rank_values)
+    np.testing.assert_allclose(gathered[:, 1], 2.0 * expected_rank_values)
+    np.testing.assert_allclose(gathered[:, 2], 3.0 * expected_rank_values)
+
+
 def test_run_segment_workflow_all_segments_names_outputs_and_sets_inclusive_bounds(
     tmp_path,
     monkeypatch,
@@ -1941,6 +2043,90 @@ def test_run_segment_workflow_mpi_reduce_mode_reduces_before_root_write(
     assert rows == [{"segment_index": 0}, {"segment_index": 1}]
 
 
+def test_run_segment_workflow_mpi_profile_gathers_root_timing_summaries(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    module = _load_example_module()
+    for segment_index in range(2):
+        (tmp_path / f"run.massmap.seg{segment_index:03d}.fits").touch()
+    output_dir = tmp_path / "painted"
+    args = _workflow_args(
+        mass_map=None,
+        sheet_index=None,
+        output=None,
+        mass_map_glob=str(tmp_path / "*.fits"),
+        output_dir=output_dir,
+        mpi_plc_parts=True,
+        segment_workers=1,
+    )
+
+    class ProfileGatherComm:
+        def __init__(self):
+            self.send_buffers = []
+
+        def Gather(self, send_buffer, receive_buffer, root=0):
+            assert root == 0
+            assert receive_buffer is not None
+            self.send_buffers.append(np.asarray(send_buffer).copy())
+            receive_buffer[0] = send_buffer
+            receive_buffer[1] = send_buffer + 1.0
+
+    comm = ProfileGatherComm()
+
+    def fake_compute(**kwargs):
+        return _fake_segment_result(
+            module,
+            segment_index=kwargs["segment_index"],
+            mass_map_path=kwargs["mass_map_path"],
+            output_npz=kwargs["output_npz"],
+            output_fits=kwargs["output_fits"],
+            inclusive_upper=kwargs["inclusive_upper"],
+        )
+
+    def fake_write(result, metadata, *, profile, verbose):
+        del metadata
+        assert profile is True
+        assert verbose is True
+        assert "compute_seconds" not in result.nfw_diagnostics
+        return {"segment_index": result.segment_index}
+
+    monkeypatch.setattr(module, "compute_calibration_for_segment", fake_compute)
+    monkeypatch.setattr(
+        module,
+        "reduce_calibration_segment_result",
+        lambda result, mpi_context: result,
+    )
+    monkeypatch.setattr(module, "write_calibration_segment_outputs", fake_write)
+    monkeypatch.setattr(module, "write_manifest", lambda path, rows: None)
+
+    rows = module.run_segment_workflow(
+        args,
+        workflow="all",
+        catalog=_catalog(),
+        sheets=_sheets(),
+        metadata=SimpleNamespace(particle_mass_msun_h=1.0, cosmology=Cosmology()),
+        particle_mass=1.0,
+        profile=True,
+        compute_map_derivatives=False,
+        mpi_context=module.MpiContext(
+            enabled=True,
+            comm=comm,
+            rank=0,
+            size=2,
+        ),
+    )
+
+    assert rows == [{"segment_index": 0}, {"segment_index": 1}]
+    assert len(comm.send_buffers) == 2
+    assert all(buffer.shape == (3,) for buffer in comm.send_buffers)
+    captured = capsys.readouterr().out
+    assert "[profile] segment 000 rank min/mean/max (s)" in captured
+    assert "[profile] segment 001 rank min/mean/max (s)" in captured
+    assert "[profile] all-segment totals rank min/mean/max (s)" in captured
+
+
 def test_run_segment_workflow_mpi_reduce_mode_uses_bounded_segment_pipeline(
     tmp_path,
     monkeypatch,
@@ -1960,12 +2146,14 @@ def test_run_segment_workflow_mpi_reduce_mode_uses_bounded_segment_pipeline(
     )
     manifest_calls = []
     events = []
+    outstanding = {"current": 0, "maximum": 0}
 
     class FakeFuture:
         def __init__(self, result):
             self._result = result
 
         def result(self):
+            outstanding["current"] -= 1
             return self._result
 
     class FakeExecutor:
@@ -1981,6 +2169,11 @@ def test_run_segment_workflow_mpi_reduce_mode_uses_bounded_segment_pipeline(
         def submit(self, fn, spec):
             (segment_index, _mass_map_path), _output_spec, _inclusive_upper = spec
             events.append(("submit", segment_index, self.max_workers))
+            outstanding["current"] += 1
+            outstanding["maximum"] = max(
+                outstanding["maximum"],
+                outstanding["current"],
+            )
             return FakeFuture(fn(spec))
 
     def fake_compute(**kwargs):
@@ -2039,6 +2232,7 @@ def test_run_segment_workflow_mpi_reduce_mode_uses_bounded_segment_pipeline(
         ("reduce", 2, 0),
         ("write", 2),
     ]
+    assert outstanding == {"current": 0, "maximum": 2}
     assert rows == [{"segment_index": 0}, {"segment_index": 1}, {"segment_index": 2}]
     assert manifest_calls[0][0] == output_dir / "painted_nfw_manifest.csv"
 

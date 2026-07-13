@@ -163,7 +163,14 @@ segment on rank 0 before writing the final NPZ/FITS outputs. At
 at a time. At higher worker counts, it uses a bounded ordered pipeline: each
 rank computes up to `N` segments ahead, but reductions and writes remain
 serialized by segment index. Segment-level parallelism inside each rank uses
-`--segment-workers N`, a shared-memory thread pool over mass-map segments.
+`--segment-workers N`, a shared-memory thread pool over mass-map segments. The
+workers form a bounded prefetch window: they can overlap later segment work
+with MPI waiting, but they do not directly parallelize the Python per-halo
+`healpy.query_disc` loop inside one segment. Retained map memory scales roughly
+linearly with the worker count. In profile modes, one small timing buffer per
+segment is gathered to rank 0 to report rank compute, result-wait, and reduction
+min/mean/max values; normal paint and derivative modes add no timing
+collective.
 
 ## Box mode
 

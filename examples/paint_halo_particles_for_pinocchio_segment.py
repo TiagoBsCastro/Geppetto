@@ -167,6 +167,33 @@ class CalibrationSegmentResult:
     nfw_diagnostics: dict[str, bool | float | int | str | np.ndarray]
 
 
+@dataclass(frozen=True)
+class ComputedCalibrationSegment:
+    """One completed rank-local segment and its worker wall time."""
+
+    result: CalibrationSegmentResult
+    compute_seconds: float
+
+
+@dataclass(frozen=True)
+class SegmentExecutionTiming:
+    """Rank-local timings for one segment in the bounded MPI pipeline."""
+
+    compute_seconds: float
+    result_wait_seconds: float
+    reduction_seconds: float
+
+    def as_array(self) -> np.ndarray:
+        return np.asarray(
+            (
+                self.compute_seconds,
+                self.result_wait_seconds,
+                self.reduction_seconds,
+            ),
+            dtype=np.float64,
+        )
+
+
 @dataclass
 class StencilBuildDiagnostics:
     """Host-side counters for HEALPix sparse-stencil construction."""
@@ -2085,6 +2112,46 @@ def _mpi_reduce_array(
     return receive_buffer
 
 
+def gather_segment_execution_timings(
+    timing: SegmentExecutionTiming,
+    mpi_context: MpiContext,
+) -> np.ndarray | None:
+    """Gather profile-only rank timings onto rank 0 with an MPI buffer call."""
+
+    send_buffer = timing.as_array()
+    if not mpi_context.enabled:
+        return send_buffer[np.newaxis, :]
+    if mpi_context.comm is None:
+        raise RuntimeError("MPI context is enabled but has no communicator")
+
+    receive_buffer = (
+        np.empty((mpi_context.size, send_buffer.size), dtype=np.float64)
+        if mpi_context.is_root
+        else None
+    )
+    mpi_context.comm.Gather(send_buffer, receive_buffer, root=0)
+    return receive_buffer
+
+
+def _timing_min_mean_max(values: np.ndarray) -> str:
+    values = np.asarray(values, dtype=np.float64)
+    return f"{np.min(values):.3f}/{np.mean(values):.3f}/{np.max(values):.3f}"
+
+
+def print_rank_timing_summary(label: str, rank_timings: np.ndarray) -> None:
+    """Print root-only min/mean/max rank timings for one segment or run."""
+
+    rank_timings = np.asarray(rank_timings, dtype=np.float64)
+    if rank_timings.ndim != 2 or rank_timings.shape[1] != 3:
+        raise ValueError("rank timings must have shape (n_rank, 3)")
+    print(
+        f"[profile] {label} rank min/mean/max (s): "
+        f"compute {_timing_min_mean_max(rank_timings[:, 0])}; "
+        f"result wait {_timing_min_mean_max(rank_timings[:, 1])}; "
+        f"MPI reduce {_timing_min_mean_max(rank_timings[:, 2])}"
+    )
+
+
 def reduce_calibration_segment_result(
     local_result: CalibrationSegmentResult,
     mpi_context: MpiContext,
@@ -2255,6 +2322,7 @@ def run_segment_workflow(
     )
 
     manifest_rows = []
+    profile_rank_timings: list[np.ndarray] = []
     if not mpi_context.enabled and segment_workers == 1:
         for (segment_index, mass_map_path), (output_npz, output_fits), inclusive_upper in (
             segment_specs
@@ -2277,9 +2345,10 @@ def run_segment_workflow(
             )
     else:
 
-        def compute_one(spec) -> CalibrationSegmentResult:
+        def compute_one(spec) -> ComputedCalibrationSegment:
             (segment_index, mass_map_path), (output_npz, output_fits), inclusive_upper = spec
-            return compute_calibration_for_segment(
+            compute_start = perf_counter() if profile else None
+            result = compute_calibration_for_segment(
                 segment_index=segment_index,
                 mass_map_path=mass_map_path,
                 output_npz=output_npz,
@@ -2294,11 +2363,42 @@ def run_segment_workflow(
                 inclusive_upper=inclusive_upper,
                 verbose=False,
             )
+            compute_seconds = (
+                0.0 if compute_start is None else perf_counter() - compute_start
+            )
+            return ComputedCalibrationSegment(
+                result=result,
+                compute_seconds=compute_seconds,
+            )
 
         def reduce_and_write(
-            local_result: CalibrationSegmentResult,
+            computed: ComputedCalibrationSegment,
+            *,
+            result_wait_seconds: float,
         ) -> dict[str, object] | None:
-            reduced_result = reduce_calibration_segment_result(local_result, mpi_context)
+            reduction_start = perf_counter() if profile else None
+            reduced_result = reduce_calibration_segment_result(
+                computed.result,
+                mpi_context,
+            )
+            reduction_seconds = (
+                0.0 if reduction_start is None else perf_counter() - reduction_start
+            )
+            if profile and mpi_context.enabled:
+                rank_timings = gather_segment_execution_timings(
+                    SegmentExecutionTiming(
+                        compute_seconds=computed.compute_seconds,
+                        result_wait_seconds=result_wait_seconds,
+                        reduction_seconds=reduction_seconds,
+                    ),
+                    mpi_context,
+                )
+                if rank_timings is not None:
+                    print_rank_timing_summary(
+                        f"segment {computed.result.segment_index:03d}",
+                        rank_timings,
+                    )
+                    profile_rank_timings.append(rank_timings)
             if reduced_result is None:
                 return None
             return write_calibration_segment_outputs(
@@ -2311,7 +2411,17 @@ def run_segment_workflow(
         if mpi_context.enabled:
             if segment_workers == 1:
                 for spec in segment_specs:
-                    row = reduce_and_write(compute_one(spec))
+                    result_wait_start = perf_counter() if profile else None
+                    computed = compute_one(spec)
+                    result_wait_seconds = (
+                        0.0
+                        if result_wait_start is None
+                        else perf_counter() - result_wait_start
+                    )
+                    row = reduce_and_write(
+                        computed,
+                        result_wait_seconds=result_wait_seconds,
+                    )
                     if row is not None:
                         manifest_rows.append(row)
             else:
@@ -2326,7 +2436,17 @@ def run_segment_workflow(
 
                     while pending:
                         future = pending.popleft()
-                        row = reduce_and_write(future.result())
+                        result_wait_start = perf_counter() if profile else None
+                        computed = future.result()
+                        result_wait_seconds = (
+                            0.0
+                            if result_wait_start is None
+                            else perf_counter() - result_wait_start
+                        )
+                        row = reduce_and_write(
+                            computed,
+                            result_wait_seconds=result_wait_seconds,
+                        )
                         if row is not None:
                             manifest_rows.append(row)
                         try:
@@ -2340,15 +2460,22 @@ def run_segment_workflow(
                 with ThreadPoolExecutor(max_workers=segment_workers) as executor:
                     local_results = list(executor.map(compute_one, segment_specs))
 
-            for local_result in sorted(local_results, key=lambda result: result.segment_index):
+            for computed in sorted(
+                local_results,
+                key=lambda item: item.result.segment_index,
+            ):
                 manifest_rows.append(
                     write_calibration_segment_outputs(
-                        local_result,
+                        computed.result,
                         metadata,
                         profile=profile,
                         verbose=mpi_context.is_root,
                     )
                 )
+
+    if profile_rank_timings and mpi_context.is_root:
+        rank_totals = np.sum(np.stack(profile_rank_timings, axis=0), axis=0)
+        print_rank_timing_summary("all-segment totals", rank_totals)
 
     if workflow == "all" and mpi_context.is_root:
         manifest_path = Path(args.output_dir) / "painted_nfw_manifest.csv"

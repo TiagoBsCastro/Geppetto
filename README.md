@@ -229,16 +229,28 @@ bounds. The NPZ output stores computed GEPPETTO arrays and scalar diagnostics in
 the same row order without duplicating the original PINOCCHIO map columns. The
 script does not produce a merged global light-cone map.
 
-Advanced parallel mode is opt-in. `--segment-workers N` uses a thread pool over
-mass-map segments within one process. `--mpi-plc-parts` uses one MPI rank per
-split PLC catalogue part named like `pinocchio.RUN.plc.out.0`,
+Advanced parallel mode is opt-in. `--mpi-plc-parts` uses one MPI rank per split
+PLC catalogue part named like `pinocchio.RUN.plc.out.0`,
 `pinocchio.RUN.plc.out.1`, and so on; the MPI world size must equal the number
-of discovered parts. By default, each rank paints only its local halo subset,
-then rank 0 reduces and writes final segment outputs without temporary
-per-rank map files. With `--segment-workers 1`, MPI mode streams one
-segment at a time and bounds memory to one segment. With `--segment-workers N`
-for `N > 1`, each rank computes up to `N` segments ahead while reductions and
-writes still happen in deterministic segment order.
+of discovered parts. Each rank paints only its local halo subset, then rank 0
+reduces and writes final segment outputs without temporary per-rank map files.
+
+`--segment-workers N` is a bounded prefetch window over mass-map segments, not
+an `N`-fold speedup for one segment. The main thread reduces segments in
+deterministic order while worker threads can compute later segments, including
+while the main thread waits for other ranks in MPI. The per-halo
+`healpy.query_disc` loop remains Python/GIL-bound and is not directly
+parallelized by this option. With one worker, MPI mode streams one segment at a
+time. Memory grows approximately linearly with the worker count: for the
+16,560,128-pixel derivative workflow, one retained segment result is about
+0.88 GiB per rank before temporary pixel-index and JAX allocations.
+
+The checked-in Leonardo DCGP job uses 30 ranks on one 112-core node, three CPUs
+per rank, and three segment workers. Four workers per rank would require 120
+physical cores and therefore needs a different multi-node layout. Use
+`derivatives-profile` to print root-only per-segment and all-segment
+min/mean/max rank timings for compute, prefetched-result waiting, and MPI
+reduction; normal `derivatives` mode performs no timing gather.
 
 ```bash
 mpiexec -n 4 python examples/paint_halo_particles_for_pinocchio_segment.py \
@@ -249,7 +261,17 @@ mpiexec -n 4 python examples/paint_halo_particles_for_pinocchio_segment.py \
   --output-dir path/to/painted_nfw \
   --mode derivatives \
   --mpi-plc-parts \
-  --segment-workers 4
+  --segment-workers 3
+```
+
+`submit.sh` defaults to `derivatives-profile` and accepts `SEGMENT_WORKERS`,
+`GEPPETTO_MODE`, and `OUTDIR` overrides. For a controlled Leonardo comparison,
+submit separate one- and three-worker profile jobs on the same 30-rank,
+three-CPU-per-rank allocation:
+
+```bash
+sbatch --export=ALL,SEGMENT_WORKERS=1,GEPPETTO_MODE=derivatives-profile,OUTDIR=/path/to/profile_w1 submit.sh
+sbatch --export=ALL,SEGMENT_WORKERS=3,GEPPETTO_MODE=derivatives-profile,OUTDIR=/path/to/profile_w3 submit.sh
 ```
 
 ### Pipeline Modes
