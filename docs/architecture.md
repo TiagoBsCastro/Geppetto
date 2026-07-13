@@ -93,7 +93,9 @@ uses module-level compiled NFW kernels. Consequently, executable reuse depends
 on pair bucket, output size, catalogue shape, dtype, and derivative mode rather
 than every exact segment pair count. In concentration-derivative mode one
 linearization returns the primal map and applies the three JVP directions
-without repeating the primal paint.
+without repeating the primal paint. The hidden `--nfw-chunk-size` option is
+used only by the dense/debug path; it does not chunk the production sparse
+stencil or painter.
 
 The first non-NFW profile path is sparse-PLC only:
 
@@ -139,40 +141,25 @@ PLC `theta, phi` columns directly to map-basis unit vectors for PLC painting.
 The full PLC reader still uses Cartesian positions to compute radial distance
 `chi`, but not to define angular map directions.
 
-The PINOCCHIO calibration script also has hidden sparse-stencil audit flags for
-benchmarking HEALPix query choices without changing the default scientific
-path:
+The PINOCCHIO calibration script uses
+`healpy.query_disc(..., inclusive=False)`, which returns pixel centers inside
+the disc. GEPPETTO expands the query radius by one floating-point step and then
+applies its exact chord-distance cut, preserving support-boundary behavior.
+There is no alternate inclusive-query production path.
 
-```bash
-python examples/paint_halo_particles_for_pinocchio_segment.py ... \
-  --mode paint \
-  --stencil-diagnostics \
-  --stencil-query-mode inclusive
-
-python examples/paint_halo_particles_for_pinocchio_segment.py ... \
-  --mode paint \
-  --stencil-diagnostics \
-  --stencil-query-mode center
-
-python examples/paint_halo_particles_for_pinocchio_segment.py ... \
-  --mode paint \
-  --stencil-compare-query-modes
-```
-
-`center` is the production default and uses
-`healpy.query_disc(..., inclusive=False)`, which returns the exact set of pixel
-centers inside the disc. GEPPETTO expands the query radius by one floating-point
-step and still applies its exact chord-distance cut, preserving support-boundary
-behavior. `inclusive` remains an audit reference that queries overlapping
-pixels before applying the same cut. The comparison mode is single-segment only
-and reports stencil timing, query counts, kept-pair counts, and painted-map
-differences.
+For smooth truncation, sparse geometry is made finite at
+`Rmax = R_delta + taper_radius_factor * width`, with
+`width = truncation_width_fraction * R_delta`. At the default radius factor of
+10 the logistic taper is about `4.5e-5`; the smaller nonzero tail outside
+`Rmax` is omitted. This finite stencil cutoff is an additional approximation,
+distinct from the existing lack of exact mass conservation in the tapered NFW
+profile.
 
 The same calibration script has an opt-in mixed parallel mode. In
 `--mpi-plc-parts` mode, rank `r` reads only `--plc-catalog.r`; the number of MPI
 ranks must match the number of contiguous split PLC parts. Each rank computes
 partial compact segment maps, then sums additive arrays and diagnostics for each
-segment on rank 0 before writing the final NPZ/FITS outputs. At
+segment on rank 0 before writing the final compressed NPZ output. At
 `--segment-workers 1`, MPI mode is fully streamed and holds one segment payload
 at a time. At higher worker counts, it uses a bounded ordered pipeline: each
 rank computes up to `N` segments ahead, but reductions and writes remain
@@ -187,6 +174,13 @@ and stencil-phase min/mean/max values. Stencil phases cover `query_disc`,
 compact lookup, `pix2vec`/filter, concatenation, JAX transfer, and residual host
 work. Profile-only phase values and sub-pixel-radius counts remain log-only;
 normal paint and derivative modes add no timing collective.
+
+The NPZ payload contains only the painted NFW count-equivalent array and, when
+requested, its three concentration-parameter derivative arrays. Compact pixel
+IDs, HEALPix metadata, and source map values remain in the original PINOCCHIO
+FITS segment. The CSV manifest records the source segment path and scientific
+parameters needed to interpret the row-aligned arrays, but omits reproducible
+counts, sums, and timing diagnostics.
 
 ## Box mode
 

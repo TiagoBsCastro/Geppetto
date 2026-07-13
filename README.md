@@ -200,9 +200,6 @@ python examples/paint_halo_particles_for_pinocchio_segment.py \
   --mode derivatives
 ```
 
-Optionally add `--output-fits path/to/painted.seg001.fits` to write a compact
-HEALPix FITS table containing the painted NFW map in the `TEMPERATURE` column.
-
 ### All Segments
 
 ```bash
@@ -215,22 +212,22 @@ python examples/paint_halo_particles_for_pinocchio_segment.py \
   --mode derivatives
 ```
 
-All-segments mode writes one segment-local NPZ and one segment-local FITS file
-per input mass-map segment:
+All-segments mode writes one compressed segment-local NPZ per input mass-map
+segment and one provenance manifest:
 
 ```text
 painted_nfw.seg000.npz
-painted_nfw.seg000.fits
 painted_nfw.seg001.npz
-painted_nfw.seg001.fits
 painted_nfw_manifest.csv
 ```
 
-The FITS output preserves the corresponding PINOCCHIO segment's compact
-`PIXEL` list, row ordering, `NSIDE`, `ORDERING`, segment index, and segment
-bounds. The NPZ output stores computed GEPPETTO arrays and scalar diagnostics in
-the same row order without duplicating the original PINOCCHIO map columns. The
-script does not produce a merged global light-cone map.
+Every NPZ contains only `nfw_particle_counts`; derivative modes add the three
+derivative arrays listed above. Pixel identifiers and HEALPix metadata are not
+copied: array row `i` corresponds to row `i` in the original PINOCCHIO mass-map
+FITS file named by `mass_map_path` in the manifest. The manifest records input
+paths, segment bounds, numerical precision, and physical painter parameters;
+it omits reproducible counts, sums, and performance diagnostics. The script
+does not produce a merged global light-cone map.
 
 Advanced parallel mode is opt-in. `--mpi-plc-parts` uses one MPI rank per split
 PLC catalogue part named like `pinocchio.RUN.plc.out.0`,
@@ -238,21 +235,27 @@ PLC catalogue part named like `pinocchio.RUN.plc.out.0`,
 of discovered parts. Each rank paints only its local halo subset, then rank 0
 reduces and writes final segment outputs without temporary per-rank map files.
 
-The sparse stencil uses `healpy.query_disc(..., inclusive=False)` by default.
-Healpy defines this as the exact set of pixel centers inside the query disc,
-which matches GEPPETTO's subsequent chord-distance support cut. The hidden
-`--stencil-query-mode inclusive` path remains available as a conservative audit
-reference; it returns overlapping boundary pixels that the exact support cut
-then discards.
+The sparse stencil uses `healpy.query_disc(..., inclusive=False)`. Healpy
+returns pixel centers inside the query disc; GEPPETTO expands the angular query
+radius by one floating-point step and then applies the exact chord-distance
+support cut. This is the sole production query path.
+
+The finite sparse support is
+`Rmax = R_delta + nfw_taper_radius_factor * width`, where
+`width = truncation_width_fraction * R_delta`. The default factor of 10 cuts
+the stencil where the logistic taper is already about `4.5e-5`, but still
+drops the nonzero tail beyond `Rmax`. This finite-support approximation is
+separate from the known fact that the smooth taper itself is not exactly mass
+conserving.
 
 The normal PINOCCHIO sparse path automatically remaps stencil halo indices to
 the constant rank-local catalogue and zero-pads pair arrays to the next power
 of two. Module-level JIT kernels are then reused by segments in the same pair
 bucket. Reported sparse-pair diagnostics retain the unpadded count, and padding
-never changes NPZ/FITS map shapes or values. Derivative mode obtains the primal
+never changes NPZ map shapes or values. Derivative mode obtains the primal
 map and all three concentration JVP maps from one compiled invocation. The
 hidden `--nfw-chunk-size` control remains limited to the dense/debug painter;
-it does not configure sparse bucketing.
+it does not chunk or configure the default sparse painter.
 
 `--segment-workers N` is a bounded prefetch window over mass-map segments, not
 an `N`-fold speedup for one segment. The main thread reduces segments in
@@ -261,15 +264,18 @@ while the main thread waits for other ranks in MPI. The per-halo
 `healpy.query_disc` loop remains Python/GIL-bound and is not directly
 parallelized by this option. With one worker, MPI mode streams one segment at a
 time. Memory grows approximately linearly with the worker count: for the
-16,560,128-pixel derivative workflow, one retained segment result is about
-0.88 GiB per rank before temporary pixel-index and JAX allocations.
+16,560,128-pixel float64 derivative workflow, the four retained output arrays
+occupy about 0.49 GiB per rank before temporary pixel-index, stencil, and JAX
+allocations. Compressed NPZ size is data-dependent.
 
 The checked-in Leonardo DCGP job uses 30 ranks on one 112-core node, three CPUs
-per rank, and three segment workers. Four workers per rank would require 120
-physical cores and therefore needs a different multi-node layout. Use
-`derivatives-profile` to print root-only per-segment and all-segment
-min/mean/max rank timings for compute, prefetched-result waiting, and MPI
-reduction; normal `derivatives` mode performs no timing gather.
+per rank, and three segment workers. The CPU request bounds concurrent worker
+activity and prevents oversubscription; it is not an estimate of linear
+speedup. Testing four workers per rank should also raise `--cpus-per-task`, so
+30 such tasks no longer fit on one 112-core node. Use `derivatives-profile` to
+print root-only per-segment and all-segment min/mean/max rank timings for
+compute, prefetched-result waiting, and MPI reduction; normal `derivatives`
+mode performs no timing gather.
 
 ```bash
 mpiexec -n 4 python examples/paint_halo_particles_for_pinocchio_segment.py \
@@ -283,28 +289,21 @@ mpiexec -n 4 python examples/paint_halo_particles_for_pinocchio_segment.py \
   --segment-workers 3
 ```
 
-`submit.sh` defaults to `derivatives-profile` with center queries and accepts
-`SEGMENT_WORKERS`, `GEPPETTO_MODE`, `STENCIL_QUERY_MODE`, and `OUTDIR`
-overrides. For a controlled Leonardo comparison, submit separate one- and
-three-worker profile jobs on the same 30-rank, three-CPU-per-rank allocation:
+`submit.sh` defaults to `derivatives-profile` and accepts `SEGMENT_WORKERS`,
+`GEPPETTO_MODE`, and `OUTDIR` overrides. For a controlled Leonardo comparison,
+submit separate one- and three-worker profile jobs on the same 30-rank,
+three-CPU-per-rank allocation:
 
 ```bash
 sbatch --export=ALL,SEGMENT_WORKERS=1,GEPPETTO_MODE=derivatives-profile,OUTDIR=/path/to/profile_w1 submit.sh
 sbatch --export=ALL,SEGMENT_WORKERS=3,GEPPETTO_MODE=derivatives-profile,OUTDIR=/path/to/profile_w3 submit.sh
 ```
 
-`STENCIL_QUERY_MODE` also accepts `center` (the default) or `inclusive` for a
-controlled query comparison. Profile jobs use the existing single timing
-gather per segment to report root-only stencil totals split into `query_disc`,
-compact lookup, `pix2vec`/filter, concatenation, JAX transfer, and residual
-time. Profile-only phase values and sub-pixel-radius counts are not added to NPZ
-or FITS outputs; the explicit `--stencil-diagnostics` audit flag retains its
-existing saved scalar counters.
-
-```bash
-sbatch --export=ALL,STENCIL_QUERY_MODE=inclusive,OUTDIR=/path/to/profile_inclusive submit.sh
-sbatch --export=ALL,STENCIL_QUERY_MODE=center,OUTDIR=/path/to/profile_center submit.sh
-```
+Profile jobs use the existing single timing gather per segment to report
+root-only stencil totals split into `query_disc`, compact lookup,
+`pix2vec`/filter, concatenation, JAX transfer, and residual time. Profile-only
+phase values and sub-pixel-radius counts are log-only and are not written to
+the NPZ or manifest.
 
 ### Pipeline Modes
 

@@ -11,9 +11,11 @@
 
 set -eo pipefail
 
-# The run has 30 split PLC files, so it requires 30 MPI ranks. Three segment
-# workers per rank use 90 of Leonardo DCGP's 112 physical cores. Four workers
-# per rank would require 120 cores and therefore cannot fit on one node.
+# The run has 30 split PLC files, so it requires 30 MPI ranks. Three workers per
+# rank reproduce the measured bounded-pipeline configuration; they overlap
+# segment work and MPI waits but do not imply linear three-way speedup within a
+# segment. A four-worker test should also request four CPUs per task to avoid
+# oversubscription, and 30 such tasks cannot fit on this 112-core node.
 
 module purge
 
@@ -50,21 +52,14 @@ export MASSMAP_GLOB="/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L
 export OUTDIR="${OUTDIR:-/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/geppetto_reduced}"
 export GEPPETTO_MODE="${GEPPETTO_MODE:-derivatives-profile}"
 export SEGMENT_WORKERS="${SEGMENT_WORKERS:-$SLURM_CPUS_PER_TASK}"
-export STENCIL_QUERY_MODE="${STENCIL_QUERY_MODE:-center}"
 
 if ((SEGMENT_WORKERS < 1 || SEGMENT_WORKERS > SLURM_CPUS_PER_TASK)); then
 	echo "SEGMENT_WORKERS must be between 1 and SLURM_CPUS_PER_TASK" >&2
 	exit 2
 fi
-if [[ "${STENCIL_QUERY_MODE}" != "center" && "${STENCIL_QUERY_MODE}" != "inclusive" ]]; then
-	echo "STENCIL_QUERY_MODE must be center or inclusive" >&2
-	exit 2
-fi
-
 mkdir -p "${OUTDIR}"
 echo "GEPPETTO mode: ${GEPPETTO_MODE}"
 echo "Segment workers: ${SEGMENT_WORKERS}"
-echo "Stencil query mode: ${STENCIL_QUERY_MODE}"
 echo "Output directory: ${OUTDIR}"
 
 srun --cpu-bind=cores python examples/paint_halo_particles_for_pinocchio_segment.py \
@@ -75,5 +70,4 @@ srun --cpu-bind=cores python examples/paint_halo_particles_for_pinocchio_segment
 	--output-dir "${OUTDIR}" \
 	--mode "${GEPPETTO_MODE}" \
 	--mpi-plc-parts \
-	--segment-workers "${SEGMENT_WORKERS}" \
-	--stencil-query-mode "${STENCIL_QUERY_MODE}"
+	--segment-workers "${SEGMENT_WORKERS}"

@@ -3,20 +3,19 @@
 This diagnostic script reads a PINOCCHIO parameter file, mass-sheet table,
 on-the-fly HEALPix mass-map FITS files, and a PLC halo catalogue. It can run on
 one selected segment or on all existing segments discovered from a glob. For
-each segment it writes computed arrays whose rows follow the compact pixel
-domain of the corresponding ``*.massmap.segXXX.fits`` file:
-
-    halo_particle_counts: point-halo resolved mass / particle mass
-    nfw_particle_counts: projected NFW one-halo mass / particle mass
+each segment it writes a compressed NPZ containing the projected NFW one-halo
+mass divided by the PINOCCHIO particle mass. Array rows follow the compact
+pixel domain of the corresponding ``*.massmap.segXXX.fits`` file.
 
 The NFW map is intended for calibrating a concentration--mass relation against
 a theoretical prediction while preserving PINOCCHIO's segment bounds and
 compact pixel ordering. In derivative modes the script also saves map-level
 derivatives with respect to concentration amplitude, mass slope, and redshift
 slope. HEALPix stencil construction is fixed geometry and is not differentiated.
-In all-segments mode the output is one lean NPZ and one compact NFW FITS map per
-input segment; the FITS file carries the compact ``PIXEL`` list and HEALPix
-metadata. No global light-cone map is merged in this script.
+In all-segments mode the output is one lean NPZ per input segment plus a small
+CSV provenance manifest. Pixel indices and HEALPix metadata remain in the
+original PINOCCHIO FITS files and are not duplicated. No global light-cone map
+is merged in this script.
 
 Precision policy
 ----------------
@@ -115,7 +114,6 @@ from geppetto import (
     ConcentrationParams,
     NFWProfileParams,
     paint_lightcone_particle_count_map,
-    paint_lightcone_particle_count_map_sparse,
 )
 from geppetto.catalog import LightconeHaloCatalog, LightconeSparseStencil
 from geppetto.io import (
@@ -131,7 +129,7 @@ from geppetto.io import (
     read_pinocchio_mass_sheets,
     read_pinocchio_parameter_file,
 )
-from geppetto.profiles import nfw_projected_surface_density, nfw_scale_radius_and_density
+from geppetto.profiles import nfw_scale_radius_and_density
 
 # Kept as a module attribute for regression tests proving the default sparse
 # calibration path never calls the dense validation builder.
@@ -162,12 +160,8 @@ class CalibrationSegmentResult:
     segment_index: int
     mass_map_path: Path
     output_npz: Path
-    output_fits: Path | None
     bounds: dict[str, float]
     inclusive_upper: bool
-    mass_map: PinocchioMassMap
-    halo_particle_counts: np.ndarray
-    diagnostics: dict[str, float | int]
     nfw_diagnostics: dict[str, bool | float | int | str | np.ndarray]
     profile_stencil_diagnostics: StencilBuildDiagnostics | None = None
 
@@ -224,7 +218,6 @@ class StencilBuildDiagnostics:
     n_inside_domain_total: int = 0
     n_kept_pairs_total: int = 0
     n_subpixel_radius_halos: int = 0
-    query_mode: str = "center"
     elapsed_seconds: float = 0.0
     query_disc_seconds: float = 0.0
     compact_lookup_seconds: float = 0.0
@@ -313,7 +306,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        help="Directory for all-segments painted NFW NPZ/FITS outputs and manifest",
+        help="Directory for all-segments painted NFW NPZ outputs and manifest",
     )
     parser.add_argument(
         "--catalog-format",
@@ -343,7 +336,6 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Read a light PLC catalogue without Cartesian positions",
     )
-    parser.add_argument("--output-fits", type=Path, help="Optional output HEALPix FITS table")
     parser.add_argument(
         "--last-segment-inclusive",
         action="store_true",
@@ -423,22 +415,6 @@ def parse_args() -> argparse.Namespace:
         help=argparse.SUPPRESS,
     )
     parser.add_argument(
-        "--stencil-query-mode",
-        choices=("inclusive", "center"),
-        default="center",
-        help=argparse.SUPPRESS,
-    )
-    parser.add_argument(
-        "--stencil-diagnostics",
-        action="store_true",
-        help=argparse.SUPPRESS,
-    )
-    parser.add_argument(
-        "--stencil-compare-query-modes",
-        action="store_true",
-        help=argparse.SUPPRESS,
-    )
-    parser.add_argument(
         "--mpi-plc-parts",
         action="store_true",
         help=argparse.SUPPRESS,
@@ -471,15 +447,9 @@ def validate_segment_workflow_args(args: argparse.Namespace) -> str:
             "(--mass-map, --sheet-index, --output) or all-segments inputs "
             "(--mass-map-glob, --output-dir), not both."
         )
-    if args.output_fits is not None and any(all_segment_args):
-        raise ValueError("--output-fits is only supported in single-segment mode")
     if all(single_segment_args) and not any(all_segment_args):
         return "single"
     if all(all_segment_args) and not any(single_segment_args):
-        if args.stencil_compare_query_modes:
-            raise ValueError(
-                "--stencil-compare-query-modes is currently supported only in single-segment mode"
-            )
         return "all"
     raise ValueError(
         "Provide either --mass-map, --sheet-index, --output "
@@ -591,8 +561,6 @@ def validate_mpi_workflow_args(
         raise ValueError("--segment-workers must be at least 1")
     if mpi_context.size > 1 and not bool(getattr(args, "mpi_plc_parts", False)):
         raise ValueError("MPI world size > 1 requires --mpi-plc-parts")
-    if mpi_context.enabled and bool(getattr(args, "stencil_compare_query_modes", False)):
-        raise ValueError("--stencil-compare-query-modes is not supported with --mpi-plc-parts")
     if mpi_context.enabled:
         parts = discover_plc_catalog_parts(Path(args.plc_catalog))
         validate_mpi_plc_part_count(parts, mpi_context.size)
@@ -638,14 +606,11 @@ def discover_mass_map_segments(pattern: str) -> list[tuple[int, Path]]:
     return sorted(segments, key=lambda item: item[0])
 
 
-def segment_output_paths(output_dir: Path, segment_index: int) -> dict[str, Path]:
-    """Return all-segments output paths for one segment index."""
+def segment_output_path(output_dir: Path, segment_index: int) -> Path:
+    """Return the compressed NPZ output path for one segment index."""
 
     tag = f"seg{segment_index:03d}"
-    return {
-        "npz": output_dir / f"painted_nfw.{tag}.npz",
-        "fits": output_dir / f"painted_nfw.{tag}.fits",
-    }
+    return output_dir / f"painted_nfw.{tag}.npz"
 
 
 def load_lightcone_catalog(
@@ -867,79 +832,6 @@ def select_segment_mask(
     return (values >= lo) & (values < hi)
 
 
-def halo_rows_in_mass_map(
-    catalog: LightconeHaloCatalog,
-    mask: np.ndarray,
-    mass_map: PinocchioMassMap,
-    pixel_index: MassMapPixelIndex | None = None,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Map selected halo directions to compact mass-map rows."""
-
-    try:
-        import healpy as hp
-    except ImportError as exc:  # pragma: no cover - exercised only without io extra
-        raise RuntimeError("halo pixel binning requires healpy; install geppetto[io]") from exc
-
-    validate_mass_map(mass_map)
-    validate_catalog_for_binning(catalog)
-
-    mass = np.asarray(catalog.mass)
-    mask = np.asarray(mask, dtype=bool)
-    if mask.ndim != 1 or mask.shape[0] != mass.shape[0]:
-        raise ValueError("mask must have shape (n_halo,)")
-
-    uv = np.asarray(catalog.unit_vector)[mask]
-    if uv.shape[0] == 0:
-        empty_rows = np.empty((0,), dtype=np.int64)
-        empty_inside = np.empty((0,), dtype=bool)
-        return empty_rows, empty_inside
-
-    if pixel_index is None:
-        pixel_index = MassMapPixelIndex.from_mass_map(mass_map)
-    halo_pix = hp.vec2pix(mass_map.nside, uv[:, 0], uv[:, 1], uv[:, 2], nest=False)
-    rows = pixel_index.lookup(halo_pix)
-    inside_pixel_domain = rows >= 0
-    return rows, inside_pixel_domain
-
-
-def _accumulate_halo_particle_counts(
-    catalog: LightconeHaloCatalog,
-    mask: np.ndarray,
-    mass_map: PinocchioMassMap,
-    particle_mass_msun_h: float,
-    rows: np.ndarray,
-    inside_pixel_domain: np.ndarray,
-) -> np.ndarray:
-    if particle_mass_msun_h <= 0.0:
-        raise ValueError("particle_mass_msun_h must be positive")
-
-    out = np.zeros(np.asarray(mass_map.temperature).shape, dtype=np.float64)
-    selected_masses = np.asarray(catalog.mass)[mask][inside_pixel_domain]
-    selected_rows = rows[inside_pixel_domain]
-    np.add.at(out, selected_rows, selected_masses / particle_mass_msun_h)
-    return out
-
-
-def build_halo_particle_count_map(
-    catalog: LightconeHaloCatalog,
-    mask: np.ndarray,
-    mass_map: PinocchioMassMap,
-    particle_mass_msun_h: float,
-    pixel_index: MassMapPixelIndex | None = None,
-) -> np.ndarray:
-    """Build the compact halo-particle-count map for selected halos."""
-
-    rows, inside_pixel_domain = halo_rows_in_mass_map(catalog, mask, mass_map, pixel_index)
-    return _accumulate_halo_particle_counts(
-        catalog,
-        np.asarray(mask, dtype=bool),
-        mass_map,
-        particle_mass_msun_h,
-        rows,
-        inside_pixel_domain,
-    )
-
-
 def selected_lightcone_catalog(catalog: LightconeHaloCatalog, mask: np.ndarray) -> LightconeHaloCatalog:
     """Return the segment-selected catalogue as JAX arrays for differentiable painters."""
 
@@ -1077,7 +969,6 @@ def build_lightcone_sparse_stencil_for_mass_map_local(
     catalog: LightconeHaloCatalog,
     rmax_mpc_h: np.ndarray,
     *,
-    query_mode: str = "center",
     collect_diagnostics: bool = False,
     pixel_index: MassMapPixelIndex | None = None,
     profile_phases: bool = False,
@@ -1089,9 +980,6 @@ def build_lightcone_sparse_stencil_for_mass_map_local(
     outside JAX; the differentiable sparse painter receives only the retained
     local halo-pixel pairs.
     """
-
-    if query_mode not in ("inclusive", "center"):
-        raise ValueError("query_mode must be 'inclusive' or 'center'")
 
     try:
         import healpy as hp
@@ -1125,8 +1013,7 @@ def build_lightcone_sparse_stencil_for_mass_map_local(
     pix_id_chunks: list[np.ndarray] = []
     halo_id_chunks: list[np.ndarray] = []
     r_perp_chunks: list[np.ndarray] = []
-    diagnostics = StencilBuildDiagnostics(query_mode=query_mode)
-    inclusive = query_mode == "inclusive"
+    diagnostics = StencilBuildDiagnostics()
     max_pixel_radius = float(hp.max_pixrad(mass_map.nside)) if profile_phases else None
 
     for halo_id, (halo_vector, chi_i, rmax_i) in enumerate(
@@ -1136,9 +1023,7 @@ def build_lightcone_sparse_stencil_for_mass_map_local(
         alpha_max = 2.0 * np.arcsin(min(1.0, float(rmax_i) / (2.0 * float(chi_i))))
         if max_pixel_radius is not None and alpha_max <= max_pixel_radius:
             diagnostics.n_subpixel_radius_halos += 1
-        query_radius = alpha_max
-        if not inclusive:
-            query_radius = min(float(np.pi), float(np.nextafter(alpha_max, np.inf)))
+        query_radius = min(float(np.pi), float(np.nextafter(alpha_max, np.inf)))
 
         phase_start = perf_counter() if profile_phases else None
         queried_pixels = np.asarray(
@@ -1146,7 +1031,7 @@ def build_lightcone_sparse_stencil_for_mass_map_local(
                 mass_map.nside,
                 halo_vector.astype(np.float64, copy=False),
                 query_radius,
-                inclusive=inclusive,
+                inclusive=False,
                 nest=False,
             ),
             dtype=np.int64,
@@ -1228,39 +1113,6 @@ def build_lightcone_sparse_stencil_for_mass_map_local(
     return stencil
 
 
-def stencil_diagnostics_to_dict(diag: StencilBuildDiagnostics) -> dict[str, float | int | str]:
-    """Return NPZ-safe scalar diagnostics for a stencil build."""
-
-    return {
-        "stencil_query_mode": diag.query_mode,
-        "stencil_query_pixels_total": int(diag.n_query_pixels_total),
-        "stencil_inside_domain_total": int(diag.n_inside_domain_total),
-        "stencil_kept_pairs_total": int(diag.n_kept_pairs_total),
-        "stencil_inside_over_query": float(diag.inside_over_query),
-        "stencil_kept_over_query": float(diag.kept_over_query),
-        "stencil_kept_over_inside": float(diag.kept_over_inside),
-        "stencil_build_seconds": float(diag.elapsed_seconds),
-    }
-
-
-def print_stencil_diagnostics(diag: StencilBuildDiagnostics) -> None:
-    """Print HEALPix query diagnostics for one sparse-stencil build."""
-
-    print("Sparse-stencil HEALPix query diagnostics:")
-    print(f"  Query mode: {diag.query_mode}")
-    print(f"  Halos processed: {diag.n_halos}")
-    print(f"  Halos with query pixels: {diag.n_halos_with_query_pixels}")
-    print(f"  Halos with compact-domain pixels: {diag.n_halos_with_inside_pixels}")
-    print(f"  Halos with kept pairs: {diag.n_halos_with_kept_pairs}")
-    print(f"  Queried HEALPix pixels: {diag.n_query_pixels_total}")
-    print(f"  Inside compact domain: {diag.n_inside_domain_total}")
-    print(f"  Kept halo-pixel pairs: {diag.n_kept_pairs_total}")
-    print(f"  Inside/query fraction: {diag.inside_over_query:.6g}")
-    print(f"  Kept/query fraction: {diag.kept_over_query:.6g}")
-    print(f"  Kept/inside fraction: {diag.kept_over_inside:.6g}")
-    print(f"  Stencil build time [s]: {diag.elapsed_seconds:.6g}")
-
-
 def print_stencil_profile(diag: StencilBuildDiagnostics) -> None:
     """Print detailed host-side stencil timing without saving it to outputs."""
 
@@ -1280,237 +1132,6 @@ def print_stencil_profile(diag: StencilBuildDiagnostics) -> None:
         f"inside {diag.n_inside_domain_total}; kept {diag.n_kept_pairs_total}; "
         f"sub-pixel radii {diag.n_subpixel_radius_halos}"
     )
-
-
-def print_stencil_query_mode_comparison(
-    comparison: dict[str, bool | float | int | str],
-) -> None:
-    """Print an inclusive-vs-center sparse-stencil comparison report."""
-
-    print("Stencil query-mode comparison:")
-    print(f"  inclusive stencil time [s]: {comparison['inclusive_stencil_seconds']:.6g}")
-    print(f"  center stencil time [s]: {comparison['center_stencil_seconds']:.6g}")
-    print(f"  inclusive queried pixels: {comparison['inclusive_query_pixels_total']}")
-    print(f"  center queried pixels: {comparison['center_query_pixels_total']}")
-    print(f"  inclusive kept pairs: {comparison['inclusive_kept_pairs_total']}")
-    print(f"  center kept pairs: {comparison['center_kept_pairs_total']}")
-    print(f"  max abs map difference: {comparison['max_abs_map_difference']:.12g}")
-    print(f"  sum abs map difference: {comparison['sum_abs_map_difference']:.12g}")
-    print(f"  relative sum difference: {comparison['relative_sum_difference']:.12g}")
-    print(f"  differing pixels: {comparison['differing_pixels']}")
-    print(f"  maps allclose: {comparison['maps_allclose']}")
-
-
-def compare_stencil_query_modes(
-    mass_map: PinocchioMassMap,
-    selected_catalog: LightconeHaloCatalog,
-    rmax_mpc_h: np.ndarray,
-    metadata: PinocchioRunMetadata,
-    particle_mass_msun_h: float,
-    pixel_area_sr: float,
-    concentration_params: ConcentrationParams,
-    profile_params: NFWProfileParams,
-    *,
-    profile: bool = False,
-    pixel_index: MassMapPixelIndex | None = None,
-) -> tuple[jax.Array, LightconeSparseStencil, dict[str, bool | float | int | str]]:
-    """Build inclusive and center stencils, paint both maps, and compare them."""
-
-    stencils: dict[str, LightconeSparseStencil] = {}
-    diagnostics_by_mode: dict[str, StencilBuildDiagnostics] = {}
-    maps: dict[str, jax.Array] = {}
-
-    for query_mode in ("inclusive", "center"):
-        with timed_stage(f"NFW local sparse stencil ({query_mode})", profile):
-            stencil, diag = build_lightcone_sparse_stencil_for_mass_map_local(
-                mass_map,
-                selected_catalog,
-                rmax_mpc_h,
-                query_mode=query_mode,
-                collect_diagnostics=True,
-                pixel_index=pixel_index,
-            )
-        with timed_stage(f"NFW particle map ({query_mode})", profile):
-            counts = paint_lightcone_particle_count_map_sparse(
-                stencil,
-                selected_catalog,
-                particle_mass_msun_h=particle_mass_msun_h,
-                pixel_area_sr=pixel_area_sr,
-                cosmology=metadata.cosmology,
-                concentration_params=concentration_params,
-                profile_params=profile_params,
-            )
-            counts.block_until_ready()
-        stencils[query_mode] = stencil
-        diagnostics_by_mode[query_mode] = diag
-        maps[query_mode] = counts
-
-    inclusive_map = np.asarray(maps["inclusive"])
-    center_map = np.asarray(maps["center"])
-    abs_diff = np.abs(inclusive_map - center_map)
-    inclusive_sum = float(np.sum(inclusive_map))
-    center_sum = float(np.sum(center_map))
-    relative_sum_difference = abs(inclusive_sum - center_sum) / max(abs(inclusive_sum), 1.0)
-    inclusive_diag = diagnostics_by_mode["inclusive"]
-    center_diag = diagnostics_by_mode["center"]
-
-    comparison: dict[str, bool | float | int | str] = {
-        "inclusive_stencil_seconds": float(inclusive_diag.elapsed_seconds),
-        "center_stencil_seconds": float(center_diag.elapsed_seconds),
-        "inclusive_query_pixels_total": int(inclusive_diag.n_query_pixels_total),
-        "center_query_pixels_total": int(center_diag.n_query_pixels_total),
-        "inclusive_inside_domain_total": int(inclusive_diag.n_inside_domain_total),
-        "center_inside_domain_total": int(center_diag.n_inside_domain_total),
-        "inclusive_kept_pairs_total": int(inclusive_diag.n_kept_pairs_total),
-        "center_kept_pairs_total": int(center_diag.n_kept_pairs_total),
-        "inclusive_inside_over_query": float(inclusive_diag.inside_over_query),
-        "center_inside_over_query": float(center_diag.inside_over_query),
-        "inclusive_kept_over_query": float(inclusive_diag.kept_over_query),
-        "center_kept_over_query": float(center_diag.kept_over_query),
-        "inclusive_kept_over_inside": float(inclusive_diag.kept_over_inside),
-        "center_kept_over_inside": float(center_diag.kept_over_inside),
-        "max_abs_map_difference": float(np.max(abs_diff)) if abs_diff.size else 0.0,
-        "sum_abs_map_difference": float(np.sum(abs_diff)),
-        "relative_sum_difference": float(relative_sum_difference),
-        "differing_pixels": int(np.count_nonzero(inclusive_map != center_map)),
-        "maps_allclose": bool(
-            np.allclose(
-                inclusive_map,
-                center_map,
-                rtol=1.0e-6,
-                atol=1.0e-10,
-            )
-        ),
-    }
-    return maps["inclusive"], stencils["inclusive"], comparison
-
-
-def nfw_sparse_total_particle_count(
-    stencil: LightconeSparseStencil,
-    catalog: LightconeHaloCatalog,
-    particle_mass_msun_h: float,
-    pixel_area_sr: float,
-    cosmology: Any,
-    concentration_params: ConcentrationParams,
-    profile_params: NFWProfileParams,
-):
-    """Sum sparse NFW projected mass directly in PINOCCHIO particle-count units.
-
-    The stencil contains fixed halo-pixel geometry with ``r_perp`` in comoving
-    ``Mpc/h``. Halo masses are ``Msun/h`` and radial distances are comoving
-    ``Mpc/h``. The returned scalar is ``sum(Sigma * chi**2 * pixel_area_sr)``
-    divided by ``particle_mass_msun_h``. It is differentiable with respect to
-    halo/profile quantities and profile/concentration parameters, while the
-    retained sparse pair set remains fixed.
-    """
-
-    if particle_mass_msun_h <= 0.0:
-        raise ValueError("particle_mass_msun_h must be positive")
-    if pixel_area_sr <= 0.0:
-        raise ValueError("pixel_area_sr must be positive")
-
-    halo_id = jnp.asarray(stencil.halo_id, dtype=jnp.int32)
-    mass = catalog.mass[halo_id]
-    redshift = catalog.redshift[halo_id]
-    chi = catalog.chi[halo_id]
-    sigma = nfw_projected_surface_density(
-        stencil.r_perp,
-        mass,
-        redshift,
-        cosmology,
-        concentration_params,
-        profile_params,
-    )
-    contribution = sigma * (chi**2) * pixel_area_sr / particle_mass_msun_h
-    if stencil.pair_weight is not None:
-        contribution = contribution * jnp.asarray(
-            stencil.pair_weight,
-            dtype=contribution.dtype,
-        )
-    return jnp.sum(contribution)
-
-
-def nfw_concentration_map_derivatives(
-    stencil: LightconeSparseStencil,
-    selected_catalog: LightconeHaloCatalog,
-    mass_map: PinocchioMassMap,
-    metadata: PinocchioRunMetadata,
-    particle_mass_msun_h: float,
-    concentration_amplitude: float,
-    concentration_mass_slope: float,
-    concentration_redshift_slope: float,
-    concentration_mass_pivot: float,
-    truncation_width_fraction: float,
-    profile: bool = False,
-) -> dict[str, float | str | np.ndarray]:
-    """Return compact-map JVP derivatives with respect to concentration parameters.
-
-    The sparse stencil geometry and retained pair set are fixed. Derivatives are
-    taken only with respect to concentration amplitude, mass slope, and redshift
-    slope; ``mass_pivot`` remains fixed.
-    """
-
-    if particle_mass_msun_h <= 0.0:
-        raise ValueError("particle_mass_msun_h must be positive")
-    if concentration_mass_pivot <= 0.0:
-        raise ValueError("concentration_mass_pivot must be positive")
-
-    pixel_area_sr = healpix_pixel_area_sr(mass_map.nside)
-    theta = jnp.asarray(
-        [
-            concentration_amplitude,
-            concentration_mass_slope,
-            concentration_redshift_slope,
-        ],
-        dtype=selected_catalog.mass.dtype,
-    )
-
-    def paint_map_from_theta(theta):
-        concentration_params = ConcentrationParams(
-            amplitude=theta[0],
-            mass_slope=theta[1],
-            redshift_slope=theta[2],
-            mass_pivot=concentration_mass_pivot,
-        )
-        profile_params = NFWProfileParams(
-            truncation_width_fraction=truncation_width_fraction,
-        )
-        return paint_lightcone_particle_count_map_sparse(
-            stencil,
-            selected_catalog,
-            particle_mass_msun_h=particle_mass_msun_h,
-            pixel_area_sr=pixel_area_sr,
-            cosmology=metadata.cosmology,
-            concentration_params=concentration_params,
-            profile_params=profile_params,
-        )
-
-    basis = jnp.eye(theta.shape[0], dtype=theta.dtype)
-    with timed_stage("NFW map concentration JVPs", profile):
-        dmaps = jax.vmap(
-            lambda direction: jax.jvp(
-                paint_map_from_theta,
-                (theta,),
-                (direction,),
-            )[1]
-        )(basis)
-        dmaps.block_until_ready()
-
-    d_amp = dmaps[0]
-    d_mass_slope = dmaps[1]
-    d_redshift_slope = dmaps[2]
-
-    with timed_stage("NFW map concentration derivatives to numpy", profile):
-        d_amp_np = np.asarray(d_amp)
-        d_mass_slope_np = np.asarray(d_mass_slope)
-        d_redshift_slope_np = np.asarray(d_redshift_slope)
-
-    return {
-        "nfw_map_derivatives": "concentration",
-        "d_nfw_particle_counts_d_concentration_amplitude": d_amp_np,
-        "d_nfw_particle_counts_d_concentration_mass_slope": d_mass_slope_np,
-        "d_nfw_particle_counts_d_concentration_redshift_slope": d_redshift_slope_np,
-    }
 
 
 def paint_bucketed_nfw_sparse_map(
@@ -1614,9 +1235,6 @@ def run_nfw_calibration_pipeline(
     dense_demo: bool = False,
     compute_map_derivatives: bool = False,
     profile: bool = False,
-    stencil_query_mode: str = "center",
-    stencil_diagnostics: bool = False,
-    stencil_compare_query_modes: bool = False,
     verbose: bool = True,
     pixel_index: MassMapPixelIndex | None = None,
     stencil_profile_recorder: StencilProfileRecorder | None = None,
@@ -1639,8 +1257,6 @@ def run_nfw_calibration_pipeline(
         raise ValueError("truncation_width_fraction must be positive")
     if dense_demo and compute_map_derivatives:
         raise ValueError("map-level concentration derivatives are only supported for sparse mode")
-    if dense_demo and (stencil_diagnostics or stencil_compare_query_modes):
-        raise ValueError("stencil diagnostics are only supported for sparse mode")
     if chunk_size is not None and chunk_size <= 0:
         chunk_size = None
     if profile and stencil_profile_recorder is None:
@@ -1665,8 +1281,6 @@ def run_nfw_calibration_pipeline(
     )
     stencil = None
     bucketed_stencil = None
-    stencil_diag = None
-    comparison_diagnostics: dict[str, bool | float | int | str] = {}
     nfw_particle_counts = None
     map_derivative_diagnostics: dict[str, float | str | np.ndarray] = {
         "nfw_map_derivatives": "none"
@@ -1681,60 +1295,40 @@ def run_nfw_calibration_pipeline(
                 profile_params,
                 taper_radius_factor,
             )
-        if stencil_compare_query_modes:
-            nfw_particle_counts, stencil, comparison_diagnostics = compare_stencil_query_modes(
+        with timed_stage("NFW local sparse stencil", profile):
+            collect_stencil_diagnostics = stencil_profile_recorder is not None
+            stencil_result = build_lightcone_sparse_stencil_for_mass_map_local(
                 mass_map,
                 selected_catalog,
                 rmax,
-                metadata,
-                particle_mass_msun_h,
-                pixel_area_sr,
-                concentration_params,
-                profile_params,
-                profile=profile,
+                collect_diagnostics=collect_stencil_diagnostics,
                 pixel_index=pixel_index,
+                profile_phases=collect_stencil_diagnostics,
             )
+        if collect_stencil_diagnostics:
+            stencil, collected_stencil_diag = stencil_result
+            assert stencil_profile_recorder is not None
+            stencil_profile_recorder.diagnostics = collected_stencil_diag
         else:
-            with timed_stage("NFW local sparse stencil", profile):
-                collect_stencil_diagnostics = (
-                    stencil_diagnostics or stencil_profile_recorder is not None
-                )
-                stencil_result = build_lightcone_sparse_stencil_for_mass_map_local(
-                    mass_map,
-                    selected_catalog,
-                    rmax,
-                    query_mode=stencil_query_mode,
-                    collect_diagnostics=collect_stencil_diagnostics,
-                    pixel_index=pixel_index,
-                    profile_phases=stencil_profile_recorder is not None,
-                )
-            if collect_stencil_diagnostics:
-                stencil, collected_stencil_diag = stencil_result
-                if stencil_diagnostics:
-                    stencil_diag = collected_stencil_diag
-                if stencil_profile_recorder is not None:
-                    stencil_profile_recorder.diagnostics = collected_stencil_diag
-            else:
-                stencil = stencil_result
+            stencil = stencil_result
         sparse_pair_count = int(stencil.size)
-        if not stencil_compare_query_modes:
-            with timed_stage("NFW sparse JIT bucket", profile):
-                bucketed_stencil = bucket_sparse_stencil_for_rank_catalog(
-                    stencil,
-                    mask,
-                    int(catalog.mass.shape[0]),
-                    profile_diagnostics=(
-                        None
-                        if stencil_profile_recorder is None
-                        else stencil_profile_recorder.diagnostics
-                    ),
-                )
-            if (
-                verbose
-                and stencil_profile_recorder is not None
-                and stencil_profile_recorder.diagnostics is not None
-            ):
-                print_stencil_profile(stencil_profile_recorder.diagnostics)
+        with timed_stage("NFW sparse JIT bucket", profile):
+            bucketed_stencil = bucket_sparse_stencil_for_rank_catalog(
+                stencil,
+                mask,
+                int(catalog.mass.shape[0]),
+                profile_diagnostics=(
+                    None
+                    if stencil_profile_recorder is None
+                    else stencil_profile_recorder.diagnostics
+                ),
+            )
+        if (
+            verbose
+            and stencil_profile_recorder is not None
+            and stencil_profile_recorder.diagnostics is not None
+        ):
+            print_stencil_profile(stencil_profile_recorder.diagnostics)
         if verbose:
             print("NFW sparse stencil:")
             print(f"  Selected halos: {n_halo}")
@@ -1745,10 +1339,6 @@ def run_nfw_calibration_pipeline(
                 "  Sparse compression factor: "
                 f"{_compression_factor(dense_pair_count, sparse_pair_count):.12g}"
             )
-            if stencil_diag is not None:
-                print_stencil_diagnostics(stencil_diag)
-            if comparison_diagnostics:
-                print_stencil_query_mode_comparison(comparison_diagnostics)
     else:
         with timed_stage("NFW dense pixel vectors", profile):
             pixel_unit_vectors = jnp.asarray(
@@ -1769,24 +1359,6 @@ def run_nfw_calibration_pipeline(
                 chunk_size=chunk_size,
             )
             nfw_particle_counts.block_until_ready()
-    elif stencil_compare_query_modes:
-        assert nfw_particle_counts is not None
-        nfw_particle_counts.block_until_ready()
-        if compute_map_derivatives:
-            assert stencil is not None
-            map_derivative_diagnostics = nfw_concentration_map_derivatives(
-                stencil,
-                selected_catalog,
-                mass_map,
-                metadata,
-                particle_mass_msun_h,
-                concentration_amplitude=concentration_amplitude,
-                concentration_mass_slope=concentration_mass_slope,
-                concentration_redshift_slope=concentration_redshift_slope,
-                concentration_mass_pivot=concentration_mass_pivot,
-                truncation_width_fraction=truncation_width_fraction,
-                profile=profile,
-            )
     else:
         assert bucketed_stencil is not None
         nfw_particle_counts, map_derivative_diagnostics = paint_bucketed_nfw_sparse_map(
@@ -1828,276 +1400,69 @@ def run_nfw_calibration_pipeline(
         "nfw_concentration_mass_pivot": float(concentration_mass_pivot),
         "nfw_truncation_width_fraction": float(truncation_width_fraction),
     }
-    if stencil_diag is not None:
-        diagnostics.update(stencil_diagnostics_to_dict(stencil_diag))
-    if comparison_diagnostics:
-        diagnostics.update(comparison_diagnostics)
-        if stencil_diagnostics:
-            diagnostics.update(
-                {
-                    "stencil_query_mode": "inclusive",
-                    "stencil_query_pixels_total": int(
-                        comparison_diagnostics["inclusive_query_pixels_total"]
-                    ),
-                    "stencil_inside_domain_total": int(
-                        comparison_diagnostics["inclusive_inside_domain_total"]
-                    ),
-                    "stencil_kept_pairs_total": int(
-                        comparison_diagnostics["inclusive_kept_pairs_total"]
-                    ),
-                    "stencil_inside_over_query": float(
-                        comparison_diagnostics["inclusive_inside_over_query"]
-                    ),
-                    "stencil_kept_over_query": float(
-                        comparison_diagnostics["inclusive_kept_over_query"]
-                    ),
-                    "stencil_kept_over_inside": float(
-                        comparison_diagnostics["inclusive_kept_over_inside"]
-                    ),
-                    "stencil_build_seconds": float(
-                        comparison_diagnostics["inclusive_stencil_seconds"]
-                    ),
-                }
-            )
     diagnostics.update(map_derivative_diagnostics)
     return diagnostics
 
 
-def diagnostics_for_map(
-    catalog: LightconeHaloCatalog,
-    mask: np.ndarray,
-    mass_map: PinocchioMassMap,
-    out: np.ndarray,
-    particle_mass_msun_h: float,
-    inside_pixel_domain: np.ndarray,
-) -> dict[str, float | int]:
-    """Return scalar diagnostics for printed and saved summaries."""
-
-    return {
-        "particle_mass_msun_h": float(particle_mass_msun_h),
-        "n_halos_total": int(np.asarray(catalog.mass).shape[0]),
-        "n_halos_in_segment": int(np.count_nonzero(mask)),
-        "n_halos_in_segment_and_pixels": int(np.count_nonzero(inside_pixel_domain)),
-        "sum_halo_particle_counts": float(np.sum(out)),
-        "sum_pinocchio_mass_map_values": float(np.sum(mass_map.temperature)),
-    }
-
-
-def _resolve_output_path(output: Path | argparse.Namespace) -> Path:
-    if isinstance(output, Path):
-        return output
-    return Path(output.output)
-
-
 def save_npz(
-    output: Path | argparse.Namespace,
-    out: np.ndarray,
-    bounds: dict[str, float],
-    metadata: PinocchioRunMetadata,
-    diagnostics: dict[str, float | int],
-    nfw_diagnostics: dict[str, bool | float | int | str | np.ndarray] | None = None,
-) -> None:
-    """Save the diagnostic map and metadata to the requested ``.npz`` file."""
-
-    payload = {
-        "halo_particle_counts": out,
-        "sheet_index": int(bounds["sheet_index"]),
-        "z_lo": float(bounds["z_lo"]),
-        "z_hi": float(bounds["z_hi"]),
-        "a_lo": float(bounds["a_lo"]),
-        "a_hi": float(bounds["a_hi"]),
-        "chi_lo_mpc_h": float(bounds["chi_lo_mpc_h"]),
-        "chi_hi_mpc_h": float(bounds["chi_hi_mpc_h"]),
-        "particle_mass_msun_h": float(metadata.particle_mass_msun_h),
-        "n_halos_total": int(diagnostics["n_halos_total"]),
-        "n_halos_in_segment": int(diagnostics["n_halos_in_segment"]),
-        "n_halos_in_segment_and_pixels": int(diagnostics["n_halos_in_segment_and_pixels"]),
-        "sum_halo_particle_counts": float(diagnostics["sum_halo_particle_counts"]),
-    }
-    if nfw_diagnostics is not None:
-        payload.update(nfw_diagnostics)
-
-    np.savez(_resolve_output_path(output), **payload)
-
-
-def _pixel_column_format(pixels: np.ndarray) -> tuple[str, np.ndarray]:
-    if pixels.size and (
-        np.min(pixels) < np.iinfo(np.int32).min or np.max(pixels) > np.iinfo(np.int32).max
-    ):
-        return "1K", pixels.astype(np.int64)
-    return "1J", pixels.astype(np.int32)
-
-
-def write_output_fits(
-    path: Path,
-    out: np.ndarray,
-    mass_map: PinocchioMassMap,
-    bounds: dict[str, float],
-    diagnostics: dict[str, float | int],
-) -> None:
-    """Write an optional HEALPix FITS binary table matching the compact domain."""
-
-    try:
-        from astropy.io import fits
-    except ImportError as exc:  # pragma: no cover - exercised only without io extra
-        raise RuntimeError("FITS output requires astropy; install geppetto[io]") from exc
-
-    pixels = np.asarray(mass_map.pixel, dtype=np.int64)
-    pixel_format, pixel_values = _pixel_column_format(pixels)
-    table = fits.BinTableHDU.from_columns(
-        [
-            fits.Column(name="PIXEL", format=pixel_format, array=pixel_values),
-            fits.Column(name="TEMPERATURE", format="1D", array=out.astype(np.float64)),
-        ],
-        name="HEALPIX",
-    )
-
-    reserved_keys = {
-        "XTENSION",
-        "BITPIX",
-        "NAXIS",
-        "NAXIS1",
-        "NAXIS2",
-        "PCOUNT",
-        "GCOUNT",
-        "TFIELDS",
-        "EXTNAME",
-        "CHECKSUM",
-        "DATASUM",
-    }
-    reserved_prefixes = ("TTYPE", "TFORM", "TUNIT", "TDIM", "TSCAL", "TZERO", "TNULL", "TDISP")
-    for key, value in mass_map.header.items():
-        key = str(key).upper()
-        if key in reserved_keys or any(key.startswith(prefix) for prefix in reserved_prefixes):
-            continue
-        try:
-            table.header[key] = value
-        except (TypeError, ValueError):
-            continue
-
-    table.header["PIXTYPE"] = "HEALPIX"
-    table.header["ORDERING"] = mass_map.ordering
-    table.header["NSIDE"] = int(mass_map.nside)
-    table.header["INDXSCHM"] = mass_map.index_scheme or "EXPLICIT"
-    table.header["SHEETIDX"] = int(bounds["sheet_index"])
-    table.header["ZLO"] = float(bounds["z_lo"])
-    table.header["ZHI"] = float(bounds["z_hi"])
-    table.header["ALO"] = float(bounds["a_lo"])
-    table.header["AHI"] = float(bounds["a_hi"])
-    table.header["CHILO"] = float(bounds["chi_lo_mpc_h"])
-    table.header["CHIHI"] = float(bounds["chi_hi_mpc_h"])
-    table.header["PMASS"] = float(diagnostics["particle_mass_msun_h"])
-    table.header["NHALSEG"] = int(diagnostics["n_halos_in_segment"])
-    table.header["NHALPIX"] = int(diagnostics["n_halos_in_segment_and_pixels"])
-    table.header["MAPTYPE"] = "HALO_PARTICLE_COUNT"
-    table.header["COMMENT"] = "Diagnostic halo-catalog particle-count map."
-    table.header["COMMENT"] = "TEMPERATURE is halo mass / PINOCCHIO particle mass."
-    table.header["COMMENT"] = "This is not the original PINOCCHIO on-the-fly mass map."
-    fits.HDUList([fits.PrimaryHDU(), table]).writeto(path, overwrite=True)
-
-
-def write_nfw_painted_fits(
-    path: Path,
-    nfw_particle_counts: np.ndarray,
-    mass_map: PinocchioMassMap,
-    bounds: dict[str, float],
+    output: Path,
     nfw_diagnostics: dict[str, bool | float | int | str | np.ndarray],
 ) -> None:
-    """Write a compact HEALPix FITS table for the painted NFW map."""
+    """Save only computed training arrays in a compressed NPZ container."""
 
-    try:
-        from astropy.io import fits
-    except ImportError as exc:  # pragma: no cover - exercised only without io extra
-        raise RuntimeError("FITS output requires astropy; install geppetto[io]") from exc
+    map_key = "nfw_particle_counts"
+    nfw_map = np.asarray(nfw_diagnostics[map_key])
+    if nfw_map.ndim != 1:
+        raise ValueError("nfw_particle_counts must be one-dimensional")
 
-    pixels = np.asarray(mass_map.pixel, dtype=np.int64)
-    nfw_particle_counts = np.asarray(nfw_particle_counts, dtype=np.float64)
-    if nfw_particle_counts.shape != pixels.shape:
-        raise RuntimeError("NFW map shape does not match mass_map.pixel")
-
-    pixel_format, pixel_values = _pixel_column_format(pixels)
-    table = fits.BinTableHDU.from_columns(
-        [
-            fits.Column(name="PIXEL", format=pixel_format, array=pixel_values),
-            fits.Column(
-                name="TEMPERATURE",
-                format="1D",
-                array=nfw_particle_counts.astype(np.float64),
-            ),
-        ],
-        name="HEALPIX",
+    payload = {map_key: nfw_map}
+    derivative_keys = (
+        "d_nfw_particle_counts_d_concentration_amplitude",
+        "d_nfw_particle_counts_d_concentration_mass_slope",
+        "d_nfw_particle_counts_d_concentration_redshift_slope",
     )
+    if nfw_diagnostics.get("nfw_map_derivatives", "none") == "concentration":
+        for key in derivative_keys:
+            derivative = np.asarray(nfw_diagnostics[key])
+            if derivative.shape != nfw_map.shape:
+                raise ValueError(f"{key} must match nfw_particle_counts shape")
+            payload[key] = derivative
 
-    reserved_keys = {
-        "XTENSION",
-        "BITPIX",
-        "NAXIS",
-        "NAXIS1",
-        "NAXIS2",
-        "PCOUNT",
-        "GCOUNT",
-        "TFIELDS",
-        "EXTNAME",
-        "CHECKSUM",
-        "DATASUM",
-    }
-    reserved_prefixes = ("TTYPE", "TFORM", "TUNIT", "TDIM", "TSCAL", "TZERO", "TNULL", "TDISP")
-    for key, value in mass_map.header.items():
-        key = str(key).upper()
-        if key in reserved_keys or any(key.startswith(prefix) for prefix in reserved_prefixes):
-            continue
-        try:
-            table.header[key] = value
-        except (TypeError, ValueError):
-            continue
-
-    table.header["PIXTYPE"] = "HEALPIX"
-    table.header["ORDERING"] = mass_map.ordering
-    table.header["NSIDE"] = int(mass_map.nside)
-    table.header["INDXSCHM"] = mass_map.index_scheme or "EXPLICIT"
-    table.header["SHEETIDX"] = int(bounds["sheet_index"])
-    table.header["ZLO"] = float(bounds["z_lo"])
-    table.header["ZHI"] = float(bounds["z_hi"])
-    table.header["ALO"] = float(bounds["a_lo"])
-    table.header["AHI"] = float(bounds["a_hi"])
-    table.header["CHILO"] = float(bounds["chi_lo_mpc_h"])
-    table.header["CHIHI"] = float(bounds["chi_hi_mpc_h"])
-    table.header["PMASS"] = float(nfw_diagnostics["particle_mass_msun_h"])
-    table.header["MAPTYPE"] = "NFW_PARTICLE_COUNT"
-    table.header["CONCAMP"] = float(nfw_diagnostics["nfw_concentration_amplitude"])
-    table.header["CONCMSLP"] = float(nfw_diagnostics["nfw_concentration_mass_slope"])
-    table.header["CONCZSLP"] = float(nfw_diagnostics["nfw_concentration_redshift_slope"])
-    table.header["CONCPIV"] = float(nfw_diagnostics["nfw_concentration_mass_pivot"])
-    table.header["TRUNCW"] = float(nfw_diagnostics["nfw_truncation_width_fraction"])
-    table.header["COMMENT"] = "TEMPERATURE contains painted NFW particle-count-equivalent values."
-    table.header["COMMENT"] = (
-        "Compact pixel domain matches the corresponding PINOCCHIO mass-map segment."
-    )
-    fits.HDUList([fits.PrimaryHDU(), table]).writeto(path, overwrite=True)
+    np.savez_compressed(Path(output), **payload)
 
 
 def write_manifest(path: Path, rows: list[dict[str, object]]) -> None:
-    """Write an all-segments CSV manifest."""
+    """Write an all-segments scientific-provenance CSV manifest."""
 
-    base_columns = [
+    columns = [
         "segment_index",
+        "parameter_file",
+        "sheets_file",
+        "plc_catalog",
         "mass_map_path",
         "output_npz",
-        "output_fits",
         "z_lo",
         "z_hi",
         "chi_lo_mpc_h",
         "chi_hi_mpc_h",
         "inclusive_upper",
-        "n_halos_in_segment",
-        "n_halos_in_segment_and_pixels",
-        "nfw_selected_halo_count",
-        "nfw_compact_pixel_count",
-        "nfw_sparse_pair_count",
-        "nfw_sum_particle_counts",
+        "catalog_format",
+        "redshift_mode",
+        "bounds_mode",
+        "light_plc",
+        "hubble_table",
+        "particle_mass_msun_h",
+        "jax_precision",
+        "pipeline_mode",
+        "nfw_paint_mode",
         "nfw_map_derivatives",
+        "nfw_concentration_amplitude",
+        "nfw_concentration_mass_slope",
+        "nfw_concentration_redshift_slope",
+        "nfw_concentration_mass_pivot_msun_h",
+        "nfw_truncation_width_fraction",
+        "nfw_taper_radius_factor",
     ]
-    columns = list(base_columns)
 
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="") as handle:
@@ -2122,26 +1487,6 @@ def print_segment_summary(bounds: dict[str, float], inclusive_upper: bool) -> No
     print(
         "  chi range   = "
         f"{_range_text(bounds['chi_lo_mpc_h'], bounds['chi_hi_mpc_h'], inclusive_upper)} Mpc/h"
-    )
-
-
-def print_output_summary(
-    diagnostics: dict[str, float | int],
-    out: np.ndarray,
-    mass_map: PinocchioMassMap,
-) -> None:
-    """Print the final comparison summary."""
-
-    print("Halo particle-count map summary:")
-    print(f"  Read {diagnostics['n_halos_total']} total halos")
-    print(f"  Selected {diagnostics['n_halos_in_segment']} halos in segment bounds")
-    print(f"  Kept {diagnostics['n_halos_in_segment_and_pixels']} halos inside map pixel domain")
-    print(f"  Output pixels: {len(out)}")
-    print(f"  PINOCCHIO map pixels: {len(mass_map.temperature)}")
-    print(f"  Sum halo particle counts: {diagnostics['sum_halo_particle_counts']:.12g}")
-    print(
-        "  Sum PINOCCHIO on-the-fly map values: "
-        f"{diagnostics['sum_pinocchio_mass_map_values']:.12g}"
     )
 
 
@@ -2180,7 +1525,6 @@ def compute_calibration_for_segment(
     segment_index: int,
     mass_map_path: Path,
     output_npz: Path,
-    output_fits: Path | None,
     catalog: LightconeHaloCatalog,
     sheets: Any,
     metadata: PinocchioRunMetadata,
@@ -2215,37 +1559,6 @@ def compute_calibration_for_segment(
 
     if verbose:
         print_segment_summary(bounds, inclusive_upper)
-    with timed_stage("point-halo rows", stage_profile):
-        rows, inside_pixel_domain = halo_rows_in_mass_map(
-            catalog,
-            mask,
-            mass_map,
-            pixel_index,
-        )
-    with timed_stage("point-halo accumulation", stage_profile):
-        out = _accumulate_halo_particle_counts(
-            catalog,
-            mask,
-            mass_map,
-            particle_mass,
-            rows,
-            inside_pixel_domain,
-        )
-
-    if out.shape != np.asarray(mass_map.temperature).shape:
-        raise RuntimeError("output map shape does not match mass_map.temperature")
-    if len(out) != len(mass_map.pixel):
-        raise RuntimeError("output map length does not match mass_map.pixel")
-
-    with timed_stage("point-halo diagnostics", stage_profile):
-        diagnostics = diagnostics_for_map(
-            catalog,
-            mask,
-            mass_map,
-            out,
-            particle_mass,
-            inside_pixel_domain,
-        )
     stencil_profile_recorder = StencilProfileRecorder() if profile else None
     with timed_stage(nfw_stage_label(args.mode), stage_profile):
         nfw_diagnostics = run_nfw_calibration_pipeline(
@@ -2265,24 +1578,21 @@ def compute_calibration_for_segment(
             dense_demo=args.nfw_dense_demo,
             compute_map_derivatives=compute_map_derivatives,
             profile=stage_profile,
-            stencil_query_mode=args.stencil_query_mode,
-            stencil_diagnostics=args.stencil_diagnostics,
-            stencil_compare_query_modes=args.stencil_compare_query_modes,
             verbose=verbose,
             pixel_index=pixel_index,
             stencil_profile_recorder=stencil_profile_recorder,
         )
 
+    nfw_map = np.asarray(nfw_diagnostics["nfw_particle_counts"])
+    if nfw_map.shape != np.asarray(mass_map.temperature).shape:
+        raise RuntimeError("NFW map shape does not match mass_map.temperature")
+
     return CalibrationSegmentResult(
         segment_index=int(segment_index),
         mass_map_path=Path(mass_map_path),
         output_npz=Path(output_npz),
-        output_fits=None if output_fits is None else Path(output_fits),
         bounds=bounds,
         inclusive_upper=bool(inclusive_upper),
-        mass_map=mass_map,
-        halo_particle_counts=out,
-        diagnostics=diagnostics,
         nfw_diagnostics=nfw_diagnostics,
         profile_stencil_diagnostics=(
             None if stencil_profile_recorder is None else stencil_profile_recorder.diagnostics
@@ -2290,34 +1600,49 @@ def compute_calibration_for_segment(
     )
 
 
-def calibration_manifest_row(result: CalibrationSegmentResult) -> dict[str, object]:
+def calibration_manifest_row(
+    result: CalibrationSegmentResult,
+    args: argparse.Namespace,
+    metadata: PinocchioRunMetadata,
+) -> dict[str, object]:
     """Return the manifest row for a computed or MPI-reduced segment."""
 
-    diagnostics = result.diagnostics
     nfw_diagnostics = result.nfw_diagnostics
     row: dict[str, object] = {
         "segment_index": int(result.segment_index),
+        "parameter_file": str(args.params),
+        "sheets_file": str(args.sheets),
+        "plc_catalog": str(args.plc_catalog),
         "mass_map_path": str(result.mass_map_path),
         "output_npz": str(result.output_npz),
-        "output_fits": "" if result.output_fits is None else str(result.output_fits),
         "z_lo": float(result.bounds["z_lo"]),
         "z_hi": float(result.bounds["z_hi"]),
         "chi_lo_mpc_h": float(result.bounds["chi_lo_mpc_h"]),
         "chi_hi_mpc_h": float(result.bounds["chi_hi_mpc_h"]),
         "inclusive_upper": bool(result.inclusive_upper),
-        "n_halos_in_segment": int(diagnostics["n_halos_in_segment"]),
-        "n_halos_in_segment_and_pixels": int(diagnostics["n_halos_in_segment_and_pixels"]),
-        "nfw_selected_halo_count": int(nfw_diagnostics["nfw_selected_halo_count"]),
-        "nfw_compact_pixel_count": int(nfw_diagnostics["nfw_compact_pixel_count"]),
-        "nfw_sparse_pair_count": int(nfw_diagnostics["nfw_sparse_pair_count"]),
-        "nfw_sum_particle_counts": float(nfw_diagnostics["nfw_sum_particle_counts"]),
+        "catalog_format": str(args.catalog_format),
+        "redshift_mode": str(args.redshift_mode),
+        "bounds_mode": str(args.bounds),
+        "light_plc": bool(args.light_plc),
+        "hubble_table": "" if args.hubble_table is None else str(args.hubble_table),
+        "particle_mass_msun_h": float(metadata.particle_mass_msun_h),
+        "jax_precision": str(args.jax_precision),
+        "pipeline_mode": str(args.mode),
+        "nfw_paint_mode": str(nfw_diagnostics["nfw_paint_mode"]),
         "nfw_map_derivatives": str(nfw_diagnostics["nfw_map_derivatives"]),
+        "nfw_concentration_amplitude": float(args.concentration_amplitude),
+        "nfw_concentration_mass_slope": float(args.concentration_mass_slope),
+        "nfw_concentration_redshift_slope": float(args.concentration_redshift_slope),
+        "nfw_concentration_mass_pivot_msun_h": float(args.concentration_mass_pivot),
+        "nfw_truncation_width_fraction": float(args.truncation_width_fraction),
+        "nfw_taper_radius_factor": float(args.nfw_taper_radius_factor),
     }
     return row
 
 
 def write_calibration_segment_outputs(
     result: CalibrationSegmentResult,
+    args: argparse.Namespace,
     metadata: PinocchioRunMetadata,
     *,
     profile: bool,
@@ -2325,33 +1650,14 @@ def write_calibration_segment_outputs(
 ) -> dict[str, object]:
     """Write one computed segment payload and return its manifest row."""
 
-    with timed_stage("save NPZ", profile):
-        save_npz(
-            result.output_npz,
-            result.halo_particle_counts,
-            result.bounds,
-            metadata,
-            result.diagnostics,
-            result.nfw_diagnostics,
-        )
-    if result.output_fits is not None:
-        with timed_stage("write NFW FITS", profile):
-            write_nfw_painted_fits(
-                result.output_fits,
-                np.asarray(result.nfw_diagnostics["nfw_particle_counts"]),
-                result.mass_map,
-                result.bounds,
-                result.nfw_diagnostics,
-            )
+    with timed_stage("save compressed NPZ", profile):
+        save_npz(result.output_npz, result.nfw_diagnostics)
 
     if verbose:
-        print_output_summary(result.diagnostics, result.halo_particle_counts, result.mass_map)
         print_nfw_calibration_summary(result.nfw_diagnostics)
         print(f"Wrote NPZ: {result.output_npz}")
-        if result.output_fits is not None:
-            print(f"Wrote NFW FITS: {result.output_fits}")
 
-    return calibration_manifest_row(result)
+    return calibration_manifest_row(result, args, metadata)
 
 
 def run_calibration_for_segment(
@@ -2359,7 +1665,6 @@ def run_calibration_for_segment(
     segment_index: int,
     mass_map_path: Path,
     output_npz: Path,
-    output_fits: Path | None,
     catalog: LightconeHaloCatalog,
     sheets: Any,
     metadata: PinocchioRunMetadata,
@@ -2375,7 +1680,6 @@ def run_calibration_for_segment(
         segment_index=segment_index,
         mass_map_path=mass_map_path,
         output_npz=output_npz,
-        output_fits=output_fits,
         catalog=catalog,
         sheets=sheets,
         metadata=metadata,
@@ -2388,6 +1692,7 @@ def run_calibration_for_segment(
     )
     return write_calibration_segment_outputs(
         result,
+        args,
         metadata,
         profile=profile,
         verbose=True,
@@ -2493,10 +1798,6 @@ def reduce_calibration_segment_result(
     if not mpi_context.enabled:
         return local_result
 
-    reduced_halo_counts = _mpi_reduce_array(
-        local_result.halo_particle_counts,
-        mpi_context,
-    )
     reduced_nfw_counts = _mpi_reduce_array(
         np.asarray(local_result.nfw_diagnostics["nfw_particle_counts"]),
         mpi_context,
@@ -2516,30 +1817,16 @@ def reduce_calibration_segment_result(
         if key in local_result.nfw_diagnostics
     }
 
-    diagnostic_integer_sum_keys = (
-        "n_halos_total",
-        "n_halos_in_segment",
-        "n_halos_in_segment_and_pixels",
-    )
     nfw_integer_sum_keys = (
         "nfw_selected_halo_count",
         "nfw_sparse_pair_count",
         "nfw_dense_pair_count",
-        "stencil_query_pixels_total",
-        "stencil_inside_domain_total",
-        "stencil_kept_pairs_total",
-    )
-    present_diagnostic_keys = tuple(
-        key for key in diagnostic_integer_sum_keys if key in local_result.diagnostics
     )
     present_nfw_keys = tuple(
         key for key in nfw_integer_sum_keys if key in local_result.nfw_diagnostics
     )
     integer_diagnostics = np.asarray(
-        [
-            *(local_result.diagnostics[key] for key in present_diagnostic_keys),
-            *(local_result.nfw_diagnostics[key] for key in present_nfw_keys),
-        ],
+        [local_result.nfw_diagnostics[key] for key in present_nfw_keys],
         dtype=np.int64,
     )
     reduced_integer_diagnostics = _mpi_reduce_array(integer_diagnostics, mpi_context)
@@ -2547,19 +1834,8 @@ def reduce_calibration_segment_result(
     if not mpi_context.is_root:
         return None
 
-    assert reduced_halo_counts is not None
     assert reduced_nfw_counts is not None
     assert reduced_integer_diagnostics is not None
-    n_diagnostic_values = len(present_diagnostic_keys)
-
-    diagnostics = dict(local_result.diagnostics)
-    for key, value in zip(
-        present_diagnostic_keys,
-        reduced_integer_diagnostics[:n_diagnostic_values],
-        strict=True,
-    ):
-        diagnostics[key] = int(value)
-    diagnostics["sum_halo_particle_counts"] = float(np.sum(reduced_halo_counts))
 
     nfw_diagnostics = dict(local_result.nfw_diagnostics)
     nfw_diagnostics["nfw_particle_counts"] = np.asarray(reduced_nfw_counts)
@@ -2568,7 +1844,7 @@ def reduce_calibration_segment_result(
         nfw_diagnostics[key] = np.asarray(value)
     for key, value in zip(
         present_nfw_keys,
-        reduced_integer_diagnostics[n_diagnostic_values:],
+        reduced_integer_diagnostics,
         strict=True,
     ):
         nfw_diagnostics[key] = int(value)
@@ -2579,28 +1855,12 @@ def reduce_calibration_segment_result(
         int(nfw_diagnostics["nfw_dense_pair_count"]),
         int(nfw_diagnostics["nfw_sparse_pair_count"]),
     )
-    if {
-        "stencil_query_pixels_total",
-        "stencil_inside_domain_total",
-        "stencil_kept_pairs_total",
-    }.issubset(nfw_diagnostics):
-        query = int(nfw_diagnostics["stencil_query_pixels_total"])
-        inside = int(nfw_diagnostics["stencil_inside_domain_total"])
-        kept = int(nfw_diagnostics["stencil_kept_pairs_total"])
-        nfw_diagnostics["stencil_inside_over_query"] = inside / query if query else 0.0
-        nfw_diagnostics["stencil_kept_over_query"] = kept / query if query else 0.0
-        nfw_diagnostics["stencil_kept_over_inside"] = kept / inside if inside else 0.0
-
     return CalibrationSegmentResult(
         segment_index=local_result.segment_index,
         mass_map_path=local_result.mass_map_path,
         output_npz=local_result.output_npz,
-        output_fits=local_result.output_fits,
         bounds=local_result.bounds,
         inclusive_upper=local_result.inclusive_upper,
-        mass_map=local_result.mass_map,
-        halo_particle_counts=np.asarray(reduced_halo_counts),
-        diagnostics=diagnostics,
         nfw_diagnostics=nfw_diagnostics,
     )
 
@@ -2627,7 +1887,7 @@ def run_segment_workflow(
 
     if workflow == "single":
         segments = [(int(args.sheet_index), Path(args.mass_map))]
-        output_specs = [(Path(args.output), args.output_fits)]
+        output_paths = [Path(args.output)]
         inclusive_values = [bool(args.last_segment_inclusive)]
     elif workflow == "all":
         segments = discover_mass_map_segments(str(args.mass_map_glob))
@@ -2635,11 +1895,10 @@ def run_segment_workflow(
         if mpi_context.is_root:
             output_dir.mkdir(parents=True, exist_ok=True)
         last_segment_index = max(segment_index for segment_index, _ in segments)
-        output_specs = []
+        output_paths = []
         inclusive_values = []
         for segment_index, _ in segments:
-            paths = segment_output_paths(output_dir, segment_index)
-            output_specs.append((paths["npz"], paths["fits"]))
+            output_paths.append(segment_output_path(output_dir, segment_index))
             inclusive_values.append(segment_index == last_segment_index)
     else:
         raise ValueError("workflow must be 'single' or 'all'")
@@ -2647,7 +1906,7 @@ def run_segment_workflow(
     segment_specs = list(
         zip(
             segments,
-            output_specs,
+            output_paths,
             inclusive_values,
             strict=True,
         )
@@ -2656,7 +1915,7 @@ def run_segment_workflow(
     manifest_rows = []
     profile_rank_timings: list[np.ndarray] = []
     if not mpi_context.enabled and segment_workers == 1:
-        for (segment_index, mass_map_path), (output_npz, output_fits), inclusive_upper in (
+        for (segment_index, mass_map_path), output_npz, inclusive_upper in (
             segment_specs
         ):
             manifest_rows.append(
@@ -2664,7 +1923,6 @@ def run_segment_workflow(
                     segment_index=segment_index,
                     mass_map_path=mass_map_path,
                     output_npz=output_npz,
-                    output_fits=output_fits,
                     catalog=catalog,
                     sheets=sheets,
                     metadata=metadata,
@@ -2678,13 +1936,12 @@ def run_segment_workflow(
     else:
 
         def compute_one(spec) -> ComputedCalibrationSegment:
-            (segment_index, mass_map_path), (output_npz, output_fits), inclusive_upper = spec
+            (segment_index, mass_map_path), output_npz, inclusive_upper = spec
             compute_start = perf_counter() if profile else None
             result = compute_calibration_for_segment(
                 segment_index=segment_index,
                 mass_map_path=mass_map_path,
                 output_npz=output_npz,
-                output_fits=output_fits,
                 catalog=catalog,
                 sheets=sheets,
                 metadata=metadata,
@@ -2738,6 +1995,7 @@ def run_segment_workflow(
                 return None
             return write_calibration_segment_outputs(
                 reduced_result,
+                args,
                 metadata,
                 profile=profile,
                 verbose=mpi_context.is_root,
@@ -2802,6 +2060,7 @@ def run_segment_workflow(
                 manifest_rows.append(
                     write_calibration_segment_outputs(
                         computed.result,
+                        args,
                         metadata,
                         profile=profile,
                         verbose=mpi_context.is_root,
