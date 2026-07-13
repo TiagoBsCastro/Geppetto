@@ -169,6 +169,7 @@ class CalibrationSegmentResult:
     halo_particle_counts: np.ndarray
     diagnostics: dict[str, float | int]
     nfw_diagnostics: dict[str, bool | float | int | str | np.ndarray]
+    profile_stencil_diagnostics: StencilBuildDiagnostics | None = None
 
 
 @dataclass(frozen=True)
@@ -186,13 +187,26 @@ class SegmentExecutionTiming:
     compute_seconds: float
     result_wait_seconds: float
     reduction_seconds: float
+    stencil_diagnostics: StencilBuildDiagnostics | None = None
 
     def as_array(self) -> np.ndarray:
+        stencil = self.stencil_diagnostics or StencilBuildDiagnostics()
         return np.asarray(
             (
                 self.compute_seconds,
                 self.result_wait_seconds,
                 self.reduction_seconds,
+                stencil.elapsed_seconds,
+                stencil.query_disc_seconds,
+                stencil.compact_lookup_seconds,
+                stencil.pix2vec_filter_seconds,
+                stencil.concatenate_seconds,
+                stencil.jax_transfer_seconds,
+                stencil.n_halos,
+                stencil.n_query_pixels_total,
+                stencil.n_inside_domain_total,
+                stencil.n_kept_pairs_total,
+                stencil.n_subpixel_radius_halos,
             ),
             dtype=np.float64,
         )
@@ -209,8 +223,27 @@ class StencilBuildDiagnostics:
     n_query_pixels_total: int = 0
     n_inside_domain_total: int = 0
     n_kept_pairs_total: int = 0
-    query_mode: str = "inclusive"
+    n_subpixel_radius_halos: int = 0
+    query_mode: str = "center"
     elapsed_seconds: float = 0.0
+    query_disc_seconds: float = 0.0
+    compact_lookup_seconds: float = 0.0
+    pix2vec_filter_seconds: float = 0.0
+    concatenate_seconds: float = 0.0
+    jax_transfer_seconds: float = 0.0
+
+    @property
+    def residual_seconds(self) -> float:
+        """Return stencil time not assigned to an explicitly timed phase."""
+
+        measured = (
+            self.query_disc_seconds
+            + self.compact_lookup_seconds
+            + self.pix2vec_filter_seconds
+            + self.concatenate_seconds
+            + self.jax_transfer_seconds
+        )
+        return max(0.0, self.elapsed_seconds - measured)
 
     @property
     def inside_over_query(self) -> float:
@@ -229,6 +262,13 @@ class StencilBuildDiagnostics:
         if self.n_inside_domain_total == 0:
             return 0.0
         return self.n_kept_pairs_total / self.n_inside_domain_total
+
+
+@dataclass
+class StencilProfileRecorder:
+    """Mutable side channel for profile-only stencil diagnostics."""
+
+    diagnostics: StencilBuildDiagnostics | None = None
 
 
 @contextmanager
@@ -385,7 +425,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--stencil-query-mode",
         choices=("inclusive", "center"),
-        default="inclusive",
+        default="center",
         help=argparse.SUPPRESS,
     )
     parser.add_argument(
@@ -961,6 +1001,8 @@ def bucket_sparse_stencil_for_rank_catalog(
     stencil: LightconeSparseStencil,
     selected_mask: np.ndarray,
     rank_catalog_size: int,
+    *,
+    profile_diagnostics: StencilBuildDiagnostics | None = None,
 ) -> LightconeSparseStencil:
     """Remap selected-catalogue IDs and zero-pad one sparse JIT bucket.
 
@@ -969,6 +1011,7 @@ def bucket_sparse_stencil_for_rank_catalog(
     kernels.
     """
 
+    bucket_start = perf_counter() if profile_diagnostics is not None else None
     if rank_catalog_size < 0:
         raise ValueError("rank_catalog_size must be non-negative")
     mask = np.asarray(selected_mask, dtype=bool)
@@ -1008,13 +1051,25 @@ def bucket_sparse_stencil_for_rank_catalog(
     padded_r_perp[:n_pair] = r_perp
     padded_pair_weight[:n_pair] = pair_weight
 
-    return LightconeSparseStencil(
+    transfer_start = perf_counter() if profile_diagnostics is not None else None
+    bucketed_stencil = LightconeSparseStencil(
         pix_id=jnp.asarray(padded_pix_id),
         halo_id=jnp.asarray(padded_halo_id),
         r_perp=jnp.asarray(padded_r_perp),
         n_pix=stencil.n_pix,
         pair_weight=jnp.asarray(padded_pair_weight),
     )
+    if profile_diagnostics is not None:
+        bucketed_stencil.pix_id.block_until_ready()
+        bucketed_stencil.halo_id.block_until_ready()
+        bucketed_stencil.r_perp.block_until_ready()
+        assert bucketed_stencil.pair_weight is not None
+        bucketed_stencil.pair_weight.block_until_ready()
+        assert transfer_start is not None
+        profile_diagnostics.jax_transfer_seconds += perf_counter() - transfer_start
+        assert bucket_start is not None
+        profile_diagnostics.elapsed_seconds += perf_counter() - bucket_start
+    return bucketed_stencil
 
 
 def build_lightcone_sparse_stencil_for_mass_map_local(
@@ -1022,9 +1077,10 @@ def build_lightcone_sparse_stencil_for_mass_map_local(
     catalog: LightconeHaloCatalog,
     rmax_mpc_h: np.ndarray,
     *,
-    query_mode: str = "inclusive",
+    query_mode: str = "center",
     collect_diagnostics: bool = False,
     pixel_index: MassMapPixelIndex | None = None,
+    profile_phases: bool = False,
 ) -> LightconeSparseStencil | tuple[LightconeSparseStencil, StencilBuildDiagnostics]:
     """Build a HEALPix-local sparse stencil on a compact PINOCCHIO map domain.
 
@@ -1044,6 +1100,7 @@ def build_lightcone_sparse_stencil_for_mass_map_local(
 
     validate_mass_map(mass_map)
     validate_catalog_for_binning(catalog)
+    build_start = perf_counter()
 
     pixels = np.asarray(mass_map.pixel, dtype=np.int64)
     n_pix = int(pixels.shape[0])
@@ -1070,55 +1127,76 @@ def build_lightcone_sparse_stencil_for_mass_map_local(
     r_perp_chunks: list[np.ndarray] = []
     diagnostics = StencilBuildDiagnostics(query_mode=query_mode)
     inclusive = query_mode == "inclusive"
-    t0 = perf_counter()
+    max_pixel_radius = float(hp.max_pixrad(mass_map.nside)) if profile_phases else None
 
     for halo_id, (halo_vector, chi_i, rmax_i) in enumerate(
         zip(halo_unit_vectors, halo_chi, rmax, strict=True)
     ):
         diagnostics.n_halos += 1
         alpha_max = 2.0 * np.arcsin(min(1.0, float(rmax_i) / (2.0 * float(chi_i))))
+        if max_pixel_radius is not None and alpha_max <= max_pixel_radius:
+            diagnostics.n_subpixel_radius_halos += 1
+        query_radius = alpha_max
+        if not inclusive:
+            query_radius = min(float(np.pi), float(np.nextafter(alpha_max, np.inf)))
+
+        phase_start = perf_counter() if profile_phases else None
         queried_pixels = np.asarray(
             hp.query_disc(
                 mass_map.nside,
                 halo_vector.astype(np.float64, copy=False),
-                alpha_max,
+                query_radius,
                 inclusive=inclusive,
                 nest=False,
             ),
             dtype=np.int64,
         )
+        if phase_start is not None:
+            diagnostics.query_disc_seconds += perf_counter() - phase_start
         diagnostics.n_query_pixels_total += int(queried_pixels.size)
         if queried_pixels.size == 0:
             continue
         diagnostics.n_halos_with_query_pixels += 1
 
+        phase_start = perf_counter() if profile_phases else None
         rows = pixel_index.lookup(queried_pixels)
         inside_domain = rows >= 0
         n_inside = int(np.count_nonzero(inside_domain))
+        if phase_start is not None:
+            diagnostics.compact_lookup_seconds += perf_counter() - phase_start
         diagnostics.n_inside_domain_total += n_inside
         if not np.any(inside_domain):
             continue
         diagnostics.n_halos_with_inside_pixels += 1
 
+        phase_start = perf_counter() if profile_phases else None
         local_pixels = queried_pixels[inside_domain]
         local_rows = rows[inside_domain]
         x, y, z = hp.pix2vec(mass_map.nside, local_pixels, nest=False)
         pixel_vectors = np.stack([x, y, z], axis=-1).astype(geometry_dtype, copy=False)
-        cosang = np.clip(pixel_vectors @ halo_vector, -1.0, 1.0)
+        cosang = np.clip(
+            pixel_vectors[:, 0] * halo_vector[0]
+            + pixel_vectors[:, 1] * halo_vector[1]
+            + pixel_vectors[:, 2] * halo_vector[2],
+            -1.0,
+            1.0,
+        )
         chord = np.sqrt(np.maximum(2.0 * (1.0 - cosang), 0.0))
         r_perp = chi_i * chord
         keep = r_perp <= float(rmax_i)
         n_keep = int(np.count_nonzero(keep))
+        if phase_start is not None:
+            diagnostics.pix2vec_filter_seconds += perf_counter() - phase_start
         diagnostics.n_kept_pairs_total += n_keep
-        if not np.any(keep):
+        if n_keep == 0:
             continue
         diagnostics.n_halos_with_kept_pairs += 1
 
         pix_id_chunks.append(local_rows[keep])
         halo_id_chunks.append(np.full(n_keep, halo_id, dtype=np.int64))
         r_perp_chunks.append(r_perp[keep])
-    diagnostics.elapsed_seconds = perf_counter() - t0
 
+    phase_start = perf_counter() if profile_phases else None
     if pix_id_chunks:
         pix_id = np.concatenate(pix_id_chunks)
         halo_id = np.concatenate(halo_id_chunks)
@@ -1127,13 +1205,22 @@ def build_lightcone_sparse_stencil_for_mass_map_local(
         pix_id = np.empty((0,), dtype=np.int64)
         halo_id = np.empty((0,), dtype=np.int64)
         r_perp = np.empty((0,), dtype=np.float64)
+    if phase_start is not None:
+        diagnostics.concatenate_seconds = perf_counter() - phase_start
 
+    phase_start = perf_counter() if profile_phases else None
     stencil = LightconeSparseStencil(
         pix_id=jnp.asarray(pix_id, dtype=jnp.int32),
         halo_id=jnp.asarray(halo_id, dtype=jnp.int32),
         r_perp=jnp.asarray(r_perp, dtype=jnp.asarray(catalog.chi).dtype),
         n_pix=n_pix,
     )
+    if phase_start is not None:
+        stencil.pix_id.block_until_ready()
+        stencil.halo_id.block_until_ready()
+        stencil.r_perp.block_until_ready()
+        diagnostics.jax_transfer_seconds = perf_counter() - phase_start
+    diagnostics.elapsed_seconds = perf_counter() - build_start
     if collect_diagnostics:
         if diagnostics.n_kept_pairs_total != int(pix_id.shape[0]):
             raise RuntimeError("stencil diagnostics kept-pair count does not match stencil size")
@@ -1172,6 +1259,27 @@ def print_stencil_diagnostics(diag: StencilBuildDiagnostics) -> None:
     print(f"  Kept/query fraction: {diag.kept_over_query:.6g}")
     print(f"  Kept/inside fraction: {diag.kept_over_inside:.6g}")
     print(f"  Stencil build time [s]: {diag.elapsed_seconds:.6g}")
+
+
+def print_stencil_profile(diag: StencilBuildDiagnostics) -> None:
+    """Print detailed host-side stencil timing without saving it to outputs."""
+
+    print(
+        "[profile] stencil phases (s): "
+        f"total {diag.elapsed_seconds:.3f}; "
+        f"query_disc {diag.query_disc_seconds:.3f}; "
+        f"compact lookup {diag.compact_lookup_seconds:.3f}; "
+        f"pix2vec/filter {diag.pix2vec_filter_seconds:.3f}; "
+        f"concatenate {diag.concatenate_seconds:.3f}; "
+        f"JAX transfer {diag.jax_transfer_seconds:.3f}; "
+        f"residual {diag.residual_seconds:.3f}"
+    )
+    print(
+        "[profile] stencil counts: "
+        f"halos {diag.n_halos}; queried {diag.n_query_pixels_total}; "
+        f"inside {diag.n_inside_domain_total}; kept {diag.n_kept_pairs_total}; "
+        f"sub-pixel radii {diag.n_subpixel_radius_halos}"
+    )
 
 
 def print_stencil_query_mode_comparison(
@@ -1506,11 +1614,12 @@ def run_nfw_calibration_pipeline(
     dense_demo: bool = False,
     compute_map_derivatives: bool = False,
     profile: bool = False,
-    stencil_query_mode: str = "inclusive",
+    stencil_query_mode: str = "center",
     stencil_diagnostics: bool = False,
     stencil_compare_query_modes: bool = False,
     verbose: bool = True,
     pixel_index: MassMapPixelIndex | None = None,
+    stencil_profile_recorder: StencilProfileRecorder | None = None,
 ) -> dict[str, bool | float | int | str | np.ndarray]:
     """Paint the NFW calibration map and optional concentration derivatives.
 
@@ -1534,6 +1643,8 @@ def run_nfw_calibration_pipeline(
         raise ValueError("stencil diagnostics are only supported for sparse mode")
     if chunk_size is not None and chunk_size <= 0:
         chunk_size = None
+    if profile and stencil_profile_recorder is None:
+        stencil_profile_recorder = StencilProfileRecorder()
 
     with timed_stage("NFW selected catalogue", profile):
         selected_catalog = selected_lightcone_catalog(catalog, mask)
@@ -1585,16 +1696,24 @@ def run_nfw_calibration_pipeline(
             )
         else:
             with timed_stage("NFW local sparse stencil", profile):
+                collect_stencil_diagnostics = (
+                    stencil_diagnostics or stencil_profile_recorder is not None
+                )
                 stencil_result = build_lightcone_sparse_stencil_for_mass_map_local(
                     mass_map,
                     selected_catalog,
                     rmax,
                     query_mode=stencil_query_mode,
-                    collect_diagnostics=stencil_diagnostics,
+                    collect_diagnostics=collect_stencil_diagnostics,
                     pixel_index=pixel_index,
+                    profile_phases=stencil_profile_recorder is not None,
                 )
-            if stencil_diagnostics:
-                stencil, stencil_diag = stencil_result
+            if collect_stencil_diagnostics:
+                stencil, collected_stencil_diag = stencil_result
+                if stencil_diagnostics:
+                    stencil_diag = collected_stencil_diag
+                if stencil_profile_recorder is not None:
+                    stencil_profile_recorder.diagnostics = collected_stencil_diag
             else:
                 stencil = stencil_result
         sparse_pair_count = int(stencil.size)
@@ -1604,7 +1723,18 @@ def run_nfw_calibration_pipeline(
                     stencil,
                     mask,
                     int(catalog.mass.shape[0]),
+                    profile_diagnostics=(
+                        None
+                        if stencil_profile_recorder is None
+                        else stencil_profile_recorder.diagnostics
+                    ),
                 )
+            if (
+                verbose
+                and stencil_profile_recorder is not None
+                and stencil_profile_recorder.diagnostics is not None
+            ):
+                print_stencil_profile(stencil_profile_recorder.diagnostics)
         if verbose:
             print("NFW sparse stencil:")
             print(f"  Selected halos: {n_halo}")
@@ -2116,6 +2246,7 @@ def compute_calibration_for_segment(
             particle_mass,
             inside_pixel_domain,
         )
+    stencil_profile_recorder = StencilProfileRecorder() if profile else None
     with timed_stage(nfw_stage_label(args.mode), stage_profile):
         nfw_diagnostics = run_nfw_calibration_pipeline(
             catalog,
@@ -2139,6 +2270,7 @@ def compute_calibration_for_segment(
             stencil_compare_query_modes=args.stencil_compare_query_modes,
             verbose=verbose,
             pixel_index=pixel_index,
+            stencil_profile_recorder=stencil_profile_recorder,
         )
 
     return CalibrationSegmentResult(
@@ -2152,6 +2284,9 @@ def compute_calibration_for_segment(
         halo_particle_counts=out,
         diagnostics=diagnostics,
         nfw_diagnostics=nfw_diagnostics,
+        profile_stencil_diagnostics=(
+            None if stencil_profile_recorder is None else stencil_profile_recorder.diagnostics
+        ),
     )
 
 
@@ -2316,13 +2451,36 @@ def print_rank_timing_summary(label: str, rank_timings: np.ndarray) -> None:
     """Print root-only min/mean/max rank timings for one segment or run."""
 
     rank_timings = np.asarray(rank_timings, dtype=np.float64)
-    if rank_timings.ndim != 2 or rank_timings.shape[1] != 3:
-        raise ValueError("rank timings must have shape (n_rank, 3)")
+    if rank_timings.ndim != 2 or rank_timings.shape[1] != 14:
+        raise ValueError("rank timings must have shape (n_rank, 14)")
     print(
         f"[profile] {label} rank min/mean/max (s): "
         f"compute {_timing_min_mean_max(rank_timings[:, 0])}; "
         f"result wait {_timing_min_mean_max(rank_timings[:, 1])}; "
         f"MPI reduce {_timing_min_mean_max(rank_timings[:, 2])}"
+    )
+    if not np.any(rank_timings[:, 3:]):
+        return
+
+    residual = np.maximum(
+        rank_timings[:, 3] - np.sum(rank_timings[:, 4:9], axis=1),
+        0.0,
+    )
+    print(
+        f"[profile] {label} stencil rank min/mean/max (s): "
+        f"total {_timing_min_mean_max(rank_timings[:, 3])}; "
+        f"query_disc {_timing_min_mean_max(rank_timings[:, 4])}; "
+        f"compact lookup {_timing_min_mean_max(rank_timings[:, 5])}; "
+        f"pix2vec/filter {_timing_min_mean_max(rank_timings[:, 6])}; "
+        f"concatenate {_timing_min_mean_max(rank_timings[:, 7])}; "
+        f"JAX transfer {_timing_min_mean_max(rank_timings[:, 8])}; "
+        f"residual {_timing_min_mean_max(residual)}"
+    )
+    counts = np.rint(np.sum(rank_timings[:, 9:14], axis=0)).astype(np.int64)
+    print(
+        f"[profile] {label} stencil counts (rank sum): "
+        f"halos {counts[0]}; queried {counts[1]}; inside {counts[2]}; "
+        f"kept {counts[3]}; sub-pixel radii {counts[4]}"
     )
 
 
@@ -2564,6 +2722,9 @@ def run_segment_workflow(
                         compute_seconds=computed.compute_seconds,
                         result_wait_seconds=result_wait_seconds,
                         reduction_seconds=reduction_seconds,
+                        stencil_diagnostics=(
+                            computed.result.profile_stencil_diagnostics
+                        ),
                     ),
                     mpi_context,
                 )

@@ -159,9 +159,13 @@ python examples/paint_halo_particles_for_pinocchio_segment.py ... \
   --stencil-compare-query-modes
 ```
 
-`inclusive` keeps the current `healpy.query_disc(..., inclusive=True)` path.
-`center` uses `inclusive=False`. The comparison mode is single-segment only and
-reports stencil timing, query counts, kept-pair counts, and painted-map
+`center` is the production default and uses
+`healpy.query_disc(..., inclusive=False)`, which returns the exact set of pixel
+centers inside the disc. GEPPETTO expands the query radius by one floating-point
+step and still applies its exact chord-distance cut, preserving support-boundary
+behavior. `inclusive` remains an audit reference that queries overlapping
+pixels before applying the same cut. The comparison mode is single-segment only
+and reports stencil timing, query counts, kept-pair counts, and painted-map
 differences.
 
 The same calibration script has an opt-in mixed parallel mode. In
@@ -178,9 +182,11 @@ workers form a bounded prefetch window: they can overlap later segment work
 with MPI waiting, but they do not directly parallelize the Python per-halo
 `healpy.query_disc` loop inside one segment. Retained map memory scales roughly
 linearly with the worker count. In profile modes, one small timing buffer per
-segment is gathered to rank 0 to report rank compute, result-wait, and reduction
-min/mean/max values; normal paint and derivative modes add no timing
-collective.
+segment is gathered to rank 0 to report rank compute, result-wait, reduction,
+and stencil-phase min/mean/max values. Stencil phases cover `query_disc`,
+compact lookup, `pix2vec`/filter, concatenation, JAX transfer, and residual host
+work. Profile-only phase values and sub-pixel-radius counts remain log-only;
+normal paint and derivative modes add no timing collective.
 
 ## Box mode
 

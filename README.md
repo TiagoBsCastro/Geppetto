@@ -238,6 +238,13 @@ PLC catalogue part named like `pinocchio.RUN.plc.out.0`,
 of discovered parts. Each rank paints only its local halo subset, then rank 0
 reduces and writes final segment outputs without temporary per-rank map files.
 
+The sparse stencil uses `healpy.query_disc(..., inclusive=False)` by default.
+Healpy defines this as the exact set of pixel centers inside the query disc,
+which matches GEPPETTO's subsequent chord-distance support cut. The hidden
+`--stencil-query-mode inclusive` path remains available as a conservative audit
+reference; it returns overlapping boundary pixels that the exact support cut
+then discards.
+
 The normal PINOCCHIO sparse path automatically remaps stencil halo indices to
 the constant rank-local catalogue and zero-pads pair arrays to the next power
 of two. Module-level JIT kernels are then reused by segments in the same pair
@@ -276,14 +283,27 @@ mpiexec -n 4 python examples/paint_halo_particles_for_pinocchio_segment.py \
   --segment-workers 3
 ```
 
-`submit.sh` defaults to `derivatives-profile` and accepts `SEGMENT_WORKERS`,
-`GEPPETTO_MODE`, and `OUTDIR` overrides. For a controlled Leonardo comparison,
-submit separate one- and three-worker profile jobs on the same 30-rank,
-three-CPU-per-rank allocation:
+`submit.sh` defaults to `derivatives-profile` with center queries and accepts
+`SEGMENT_WORKERS`, `GEPPETTO_MODE`, `STENCIL_QUERY_MODE`, and `OUTDIR`
+overrides. For a controlled Leonardo comparison, submit separate one- and
+three-worker profile jobs on the same 30-rank, three-CPU-per-rank allocation:
 
 ```bash
 sbatch --export=ALL,SEGMENT_WORKERS=1,GEPPETTO_MODE=derivatives-profile,OUTDIR=/path/to/profile_w1 submit.sh
 sbatch --export=ALL,SEGMENT_WORKERS=3,GEPPETTO_MODE=derivatives-profile,OUTDIR=/path/to/profile_w3 submit.sh
+```
+
+`STENCIL_QUERY_MODE` also accepts `center` (the default) or `inclusive` for a
+controlled query comparison. Profile jobs use the existing single timing
+gather per segment to report root-only stencil totals split into `query_disc`,
+compact lookup, `pix2vec`/filter, concatenation, JAX transfer, and residual
+time. Profile-only phase values and sub-pixel-radius counts are not added to NPZ
+or FITS outputs; the explicit `--stencil-diagnostics` audit flag retains its
+existing saved scalar counters.
+
+```bash
+sbatch --export=ALL,STENCIL_QUERY_MODE=inclusive,OUTDIR=/path/to/profile_inclusive submit.sh
+sbatch --export=ALL,STENCIL_QUERY_MODE=center,OUTDIR=/path/to/profile_center submit.sh
 ```
 
 ### Pipeline Modes

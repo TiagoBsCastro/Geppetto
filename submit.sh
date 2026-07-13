@@ -50,13 +50,22 @@ export MASSMAP_GLOB="/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L
 export OUTDIR="${OUTDIR:-/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/geppetto_reduced}"
 export GEPPETTO_MODE="${GEPPETTO_MODE:-derivatives-profile}"
 export SEGMENT_WORKERS="${SEGMENT_WORKERS:-$SLURM_CPUS_PER_TASK}"
+export STENCIL_QUERY_MODE="${STENCIL_QUERY_MODE:-center}"
 
 if ((SEGMENT_WORKERS < 1 || SEGMENT_WORKERS > SLURM_CPUS_PER_TASK)); then
 	echo "SEGMENT_WORKERS must be between 1 and SLURM_CPUS_PER_TASK" >&2
 	exit 2
 fi
+if [[ "${STENCIL_QUERY_MODE}" != "center" && "${STENCIL_QUERY_MODE}" != "inclusive" ]]; then
+	echo "STENCIL_QUERY_MODE must be center or inclusive" >&2
+	exit 2
+fi
 
 mkdir -p "${OUTDIR}"
+echo "GEPPETTO mode: ${GEPPETTO_MODE}"
+echo "Segment workers: ${SEGMENT_WORKERS}"
+echo "Stencil query mode: ${STENCIL_QUERY_MODE}"
+echo "Output directory: ${OUTDIR}"
 
 srun --cpu-bind=cores python examples/paint_halo_particles_for_pinocchio_segment.py \
 	--params "${PARAMS}" \
@@ -66,4 +75,5 @@ srun --cpu-bind=cores python examples/paint_halo_particles_for_pinocchio_segment
 	--output-dir "${OUTDIR}" \
 	--mode "${GEPPETTO_MODE}" \
 	--mpi-plc-parts \
-	--segment-workers "${SEGMENT_WORKERS}"
+	--segment-workers "${SEGMENT_WORKERS}" \
+	--stencil-query-mode "${STENCIL_QUERY_MODE}"

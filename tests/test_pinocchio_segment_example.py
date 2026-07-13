@@ -162,7 +162,7 @@ def _workflow_args(**overrides) -> SimpleNamespace:
         "nfw_chunk_size": 1,
         "nfw_taper_radius_factor": 10.0,
         "nfw_dense_demo": False,
-        "stencil_query_mode": "inclusive",
+        "stencil_query_mode": "center",
         "stencil_diagnostics": False,
         "stencil_compare_query_modes": False,
         "mpi_plc_parts": False,
@@ -264,6 +264,27 @@ def test_example_script_help_runs():
     assert "--mpi-output-mode" not in result.stdout
     assert "--segment-workers" not in result.stdout
     assert "--jax-precision" not in result.stdout
+
+
+def test_parse_args_defaults_to_center_stencil_queries(monkeypatch):
+    module = _load_example_module()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(EXAMPLE_PATH),
+            "--params",
+            "params.txt",
+            "--sheets",
+            "sheets.out",
+            "--plc-catalog",
+            "plc.out",
+        ],
+    )
+
+    args = module.parse_args()
+
+    assert args.stencil_query_mode == "center"
 
 
 def test_example_script_rejects_removed_mpi_output_mode():
@@ -508,14 +529,30 @@ def test_gather_segment_execution_timings_uses_root_receive_buffer(capsys):
             assert root == 0
             assert receive_buffer is not None
             receive_buffer[0] = send_buffer
-            receive_buffer[1] = send_buffer + np.array([1.0, 2.0, 3.0])
+            receive_buffer[1] = 2.0 * send_buffer
 
+    stencil_diagnostics = module.StencilBuildDiagnostics(
+        n_halos=10,
+        n_query_pixels_total=20,
+        n_inside_domain_total=15,
+        n_kept_pairs_total=12,
+        n_subpixel_radius_halos=8,
+        elapsed_seconds=10.0,
+        query_disc_seconds=2.0,
+        compact_lookup_seconds=1.0,
+        pix2vec_filter_seconds=3.0,
+        concatenate_seconds=0.5,
+        jax_transfer_seconds=1.0,
+    )
+
+    timing = module.SegmentExecutionTiming(
+        compute_seconds=2.0,
+        result_wait_seconds=0.5,
+        reduction_seconds=0.25,
+        stencil_diagnostics=stencil_diagnostics,
+    )
     gathered = module.gather_segment_execution_timings(
-        module.SegmentExecutionTiming(
-            compute_seconds=2.0,
-            result_wait_seconds=0.5,
-            reduction_seconds=0.25,
-        ),
+        timing,
         module.MpiContext(
             enabled=True,
             comm=RootGatherComm(),
@@ -525,16 +562,16 @@ def test_gather_segment_execution_timings_uses_root_receive_buffer(capsys):
     )
 
     assert gathered is not None
-    np.testing.assert_allclose(
-        gathered,
-        [[2.0, 0.5, 0.25], [3.0, 2.5, 3.25]],
-    )
+    np.testing.assert_allclose(gathered, [timing.as_array(), 2.0 * timing.as_array()])
     module.print_rank_timing_summary("segment 004", gathered)
     captured = capsys.readouterr().out
     assert "[profile] segment 004 rank min/mean/max (s)" in captured
-    assert "compute 2.000/2.500/3.000" in captured
-    assert "result wait 0.500/1.500/2.500" in captured
-    assert "MPI reduce 0.250/1.750/3.250" in captured
+    assert "compute 2.000/3.000/4.000" in captured
+    assert "result wait 0.500/0.750/1.000" in captured
+    assert "MPI reduce 0.250/0.375/0.500" in captured
+    assert "segment 004 stencil rank min/mean/max (s)" in captured
+    assert "query_disc 2.000/3.000/4.000" in captured
+    assert "stencil counts (rank sum): halos 30" in captured
 
 
 def test_gather_segment_execution_timings_non_root_has_no_receive_buffer():
@@ -561,7 +598,8 @@ def test_gather_segment_execution_timings_non_root_has_no_receive_buffer():
     )
 
     assert gathered is None
-    np.testing.assert_allclose(comm.send_buffer, [1.0, 0.2, 0.1])
+    expected = module.SegmentExecutionTiming(1.0, 0.2, 0.1).as_array()
+    np.testing.assert_allclose(comm.send_buffer, expected)
     assert comm.send_buffer.dtype == np.dtype(np.float64)
 
 
@@ -1006,7 +1044,7 @@ def test_run_calibration_for_segment_saves_stencil_diagnostics(tmp_path, monkeyp
     )
 
     with np.load(output_npz) as data:
-        assert str(data["stencil_query_mode"]) == "inclusive"
+        assert str(data["stencil_query_mode"]) == "center"
         assert "stencil_query_pixels_total" in data
         assert "stencil_inside_domain_total" in data
         assert "stencil_kept_pairs_total" in data
@@ -1014,6 +1052,9 @@ def test_run_calibration_for_segment_saves_stencil_diagnostics(tmp_path, monkeyp
         assert "stencil_kept_over_query" in data
         assert "stencil_kept_over_inside" in data
         assert "stencil_build_seconds" in data
+        assert "query_disc_seconds" not in data
+        assert "compact_lookup_seconds" not in data
+        assert "jax_transfer_seconds" not in data
         assert int(data["stencil_query_pixels_total"]) >= int(data["stencil_inside_domain_total"])
         assert int(data["stencil_inside_domain_total"]) >= int(data["stencil_kept_pairs_total"])
 
@@ -1480,6 +1521,8 @@ def test_run_nfw_calibration_pipeline_profile_mode_prints_timing(capsys):
     assert "NFW particle map" in captured.out
     assert "NFW particle map to numpy" in captured.out
     assert "NFW map concentration JVPs" not in captured.out
+    assert "[profile] stencil phases (s)" in captured.out
+    assert "[profile] stencil counts:" in captured.out
 
 
 def test_run_nfw_calibration_pipeline_derivatives_profile_mode_does_both(capsys):
@@ -2287,7 +2330,7 @@ def test_run_segment_workflow_mpi_profile_gathers_root_timing_summaries(
 
     assert rows == [{"segment_index": 0}, {"segment_index": 1}]
     assert len(comm.send_buffers) == 2
-    assert all(buffer.shape == (3,) for buffer in comm.send_buffers)
+    assert all(buffer.shape == (14,) for buffer in comm.send_buffers)
     captured = capsys.readouterr().out
     assert "[profile] segment 000 rank min/mean/max (s)" in captured
     assert "[profile] segment 001 rank min/mean/max (s)" in captured
@@ -2474,6 +2517,134 @@ def test_local_sparse_stencil_query_modes_and_validation():
         )
 
 
+@pytest.mark.parametrize("nside", [1, 4, 16])
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_center_stencil_matches_inclusive_exact_filter_for_random_catalog(nside, dtype):
+    hp = pytest.importorskip("healpy")
+    module = _load_example_module()
+    rng = np.random.default_rng(20260713 + nside)
+    n_halo = 24
+    z = rng.uniform(-1.0, 1.0, n_halo)
+    phi = rng.uniform(0.0, 2.0 * np.pi, n_halo)
+    radial = np.sqrt(1.0 - z**2)
+    unit_vector = np.column_stack(
+        (radial * np.cos(phi), radial * np.sin(phi), z)
+    ).astype(dtype)
+    chi = np.linspace(800.0, 1400.0, n_halo, dtype=dtype)
+    alpha = np.linspace(0.05, 2.0, n_halo) * hp.max_pixrad(nside)
+    rmax = 2.0 * chi * np.sin(0.5 * alpha)
+    catalog = _catalog(
+        unit_vector=unit_vector,
+        mass=np.full(n_halo, 1.0e13, dtype=dtype),
+        redshift=np.linspace(0.1, 0.5, n_halo, dtype=dtype),
+        chi=chi,
+    )
+    pixels = np.arange(hp.nside2npix(nside), dtype=np.int64)
+    mass_map = _mass_map(pixels, temperature=np.zeros_like(pixels), nside=nside)
+
+    inclusive = module.build_lightcone_sparse_stencil_for_mass_map_local(
+        mass_map,
+        catalog,
+        rmax,
+        query_mode="inclusive",
+    )
+    center = module.build_lightcone_sparse_stencil_for_mass_map_local(
+        mass_map,
+        catalog,
+        rmax,
+        query_mode="center",
+    )
+
+    np.testing.assert_array_equal(center.pix_id, inclusive.pix_id)
+    np.testing.assert_array_equal(center.halo_id, inclusive.halo_id)
+    np.testing.assert_allclose(center.r_perp, inclusive.r_perp, rtol=0.0, atol=0.0)
+
+
+def test_center_stencil_keeps_pixel_at_exact_support_boundary():
+    hp = pytest.importorskip("healpy")
+    module = _load_example_module()
+    nside = 8
+    halo_pixel = 100
+    neighbour = int(
+        hp.get_all_neighbours(nside, halo_pixel, nest=False)[0]
+    )
+    halo_vector = np.asarray(hp.pix2vec(nside, halo_pixel), dtype=np.float64)
+    neighbour_vector = np.asarray(hp.pix2vec(nside, neighbour), dtype=np.float64)
+    chi = 1000.0
+    rmax = chi * np.sqrt(2.0 * (1.0 - np.dot(halo_vector, neighbour_vector)))
+    catalog = _catalog(
+        unit_vector=halo_vector[None, :],
+        mass=np.array([1.0e13]),
+        redshift=np.array([0.2]),
+        chi=np.array([chi]),
+    )
+    pixels = np.arange(hp.nside2npix(nside), dtype=np.int64)
+    mass_map = _mass_map(pixels, temperature=np.zeros_like(pixels), nside=nside)
+
+    inclusive = module.build_lightcone_sparse_stencil_for_mass_map_local(
+        mass_map,
+        catalog,
+        np.array([rmax]),
+        query_mode="inclusive",
+    )
+    center = module.build_lightcone_sparse_stencil_for_mass_map_local(
+        mass_map,
+        catalog,
+        np.array([rmax]),
+        query_mode="center",
+    )
+
+    assert neighbour in np.asarray(inclusive.pix_id)
+    np.testing.assert_array_equal(center.pix_id, inclusive.pix_id)
+    np.testing.assert_array_equal(center.halo_id, inclusive.halo_id)
+    np.testing.assert_allclose(center.r_perp, inclusive.r_perp, rtol=0.0, atol=0.0)
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_center_and_inclusive_queries_paint_identical_maps_and_derivatives(dtype):
+    hp = pytest.importorskip("healpy")
+    module = _load_example_module()
+    nside = 8
+    halo_pixels = np.array([10, 100, 300], dtype=np.int64)
+    unit_vector = np.stack(hp.pix2vec(nside, halo_pixels), axis=-1).astype(dtype)
+    catalog = _catalog(
+        unit_vector=unit_vector,
+        mass=np.array([1.0e13, 2.0e13, 3.0e13], dtype=dtype),
+        redshift=np.array([0.2, 0.3, 0.4], dtype=dtype),
+        chi=np.array([800.0, 1000.0, 1200.0], dtype=dtype),
+    )
+    pixels = np.arange(hp.nside2npix(nside), dtype=np.int64)
+    mass_map = _mass_map(pixels, temperature=np.zeros_like(pixels), nside=nside)
+    metadata = SimpleNamespace(cosmology=Cosmology())
+    results = {}
+
+    for query_mode in ("inclusive", "center"):
+        results[query_mode] = module.run_nfw_calibration_pipeline(
+            catalog,
+            np.ones(len(catalog.mass), dtype=bool),
+            mass_map,
+            metadata,
+            particle_mass_msun_h=1.0e10,
+            pipeline_mode="derivatives",
+            compute_map_derivatives=True,
+            stencil_query_mode=query_mode,
+        )
+
+    array_keys = (
+        "nfw_particle_counts",
+        "d_nfw_particle_counts_d_concentration_amplitude",
+        "d_nfw_particle_counts_d_concentration_mass_slope",
+        "d_nfw_particle_counts_d_concentration_redshift_slope",
+    )
+    for key in array_keys:
+        np.testing.assert_allclose(
+            results["center"][key],
+            results["inclusive"][key],
+            rtol=0.0,
+            atol=0.0,
+        )
+
+
 @pytest.mark.parametrize("query_mode", ["inclusive", "center"])
 def test_local_sparse_stencil_diagnostics_counters(query_mode):
     hp = pytest.importorskip("healpy")
@@ -2503,6 +2674,41 @@ def test_local_sparse_stencil_diagnostics_counters(query_mode):
     assert diag.n_kept_pairs_total == len(np.asarray(stencil.pix_id))
     assert diag.query_mode == query_mode
     assert diag.elapsed_seconds >= 0.0
+
+
+def test_local_sparse_stencil_profile_separates_phases():
+    hp = pytest.importorskip("healpy")
+    module = _load_example_module()
+    pixels = np.array([0, 5], dtype=np.int64)
+    unit_vector = np.stack(hp.pix2vec(1, pixels), axis=-1)
+    catalog = _catalog(
+        unit_vector=unit_vector,
+        mass=np.array([1.0e13, 2.0e13]),
+        redshift=np.array([0.2, 0.25]),
+        chi=np.array([1000.0, 1100.0]),
+    )
+    mass_map = _mass_map(pixels, temperature=np.array([100.0, 200.0]), nside=1)
+
+    _, diag = module.build_lightcone_sparse_stencil_for_mass_map_local(
+        mass_map,
+        catalog,
+        rmax_mpc_h=np.array([1.0, 1.0]),
+        query_mode="center",
+        collect_diagnostics=True,
+        profile_phases=True,
+    )
+
+    phase_seconds = (
+        diag.query_disc_seconds,
+        diag.compact_lookup_seconds,
+        diag.pix2vec_filter_seconds,
+        diag.concatenate_seconds,
+        diag.jax_transfer_seconds,
+    )
+    assert all(value >= 0.0 for value in phase_seconds)
+    assert sum(phase_seconds) <= diag.elapsed_seconds
+    assert diag.residual_seconds >= 0.0
+    assert diag.n_subpixel_radius_halos == 2
 
 
 def test_center_query_mode_has_no_more_query_pixels_than_inclusive():
