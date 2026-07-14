@@ -353,7 +353,14 @@ def run_validation(args: argparse.Namespace) -> tuple[Path, Path, Path]:
     except ImportError as exc:  # pragma: no cover - optional install
         raise ImportError("map validation requires healpy; install geppetto[io]") from exc
     try:
-        pixel_window = np.asarray(hp.pixwin(nside, lmax=lmax))[ell]
+        # FITS-backed healpy tables use big-endian floats. JAX requires native
+        # endian arrays, so force a native contiguous copy at the I/O boundary.
+        pixel_window = np.array(
+            hp.pixwin(nside, lmax=lmax),
+            dtype=np.float64,
+            copy=True,
+            order="C",
+        )[ell]
     except (OSError, KeyError) as exc:
         raise ValueError(
             "HEALPix pixel-window data are unavailable; install/cache the healpy-data "

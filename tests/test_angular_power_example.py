@@ -52,7 +52,11 @@ def _write_hmf(path, redshift):
 def test_angular_power_validation_end_to_end(tmp_path, monkeypatch):
     hp = pytest.importorskip("healpy")
     fits = pytest.importorskip("astropy.io.fits")
-    monkeypatch.setattr(hp, "pixwin", lambda nside, lmax: np.ones(lmax + 1))
+    monkeypatch.setattr(
+        hp,
+        "pixwin",
+        lambda nside, lmax: np.ones(lmax + 1, dtype=">f8"),
+    )
     module = _load_example_module()
     nside = 4
     pixels = np.arange(hp.nside2npix(nside), dtype=np.int64)
