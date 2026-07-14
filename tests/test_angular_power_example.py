@@ -1,0 +1,142 @@
+import csv
+import importlib.util
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+import numpy as np
+import pytest
+
+
+def _load_example_module():
+    path = (
+        Path(__file__).parents[1]
+        / "examples"
+        / "validate_pinocchio_angular_power.py"
+    )
+    spec = importlib.util.spec_from_file_location("validate_pinocchio_angular_power", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _cosmology_row(a, chi, omega_m, growth, k, power):
+    values = np.ones(20, dtype=np.float64)
+    values[0] = a
+    values[2] = chi
+    values[3] = chi * a
+    values[4] = omega_m
+    values[5] = -1.0
+    values[6] = growth
+    values[18] = k
+    values[19] = power
+    return " ".join(str(value) for value in values)
+
+
+def _write_hmf(path, redshift):
+    path.write_text(
+        "\n".join(
+            [
+                f"# Mass function for redshift {redshift:.6f}",
+                "1e12 1e-15 1e-15 1e-15 100 1e-15 1",
+                "1e13 2e-17 2e-17 2e-17 20 2e-17 1",
+                "1e14 1e-19 1e-19 1e-19 1 1e-19 1",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_angular_power_validation_end_to_end(tmp_path, monkeypatch):
+    hp = pytest.importorskip("healpy")
+    fits = pytest.importorskip("astropy.io.fits")
+    monkeypatch.setattr(hp, "pixwin", lambda nside, lmax: np.ones(lmax + 1))
+    module = _load_example_module()
+    nside = 4
+    pixels = np.arange(hp.nside2npix(nside), dtype=np.int64)
+    manifest_rows = []
+    for index, (z_lo, z_hi) in enumerate(((0.0, 0.1), (0.1, 0.2))):
+        mass_map_path = tmp_path / f"pinocchio.test.massmap.seg{index:03d}.fits"
+        temperature = 20.0 + 0.5 * np.sin(0.1 * pixels + index)
+        columns = [
+            fits.Column(name="PIXEL", format="K", array=pixels),
+            fits.Column(name="TEMPERATURE", format="D", array=temperature),
+        ]
+        hdu = fits.BinTableHDU.from_columns(columns, name="HEALPIX")
+        hdu.header["NSIDE"] = nside
+        hdu.header["ORDERING"] = "RING"
+        hdu.header["INDXSCHM"] = "EXPLICIT"
+        fits.HDUList([fits.PrimaryHDU(), hdu]).writeto(mass_map_path)
+        output_npz = tmp_path / f"painted_nfw_seg{index:03d}.npz"
+        np.savez_compressed(
+            output_npz,
+            nfw_particle_counts=1.0 + 0.1 * np.cos(0.2 * pixels + index),
+        )
+        manifest_rows.append(
+            {
+                "segment_index": index,
+                "mass_map_path": mass_map_path,
+                "output_npz": output_npz,
+                "z_lo": z_lo,
+                "z_hi": z_hi,
+                "nfw_concentration_amplitude": 5.71,
+                "nfw_concentration_mass_slope": -0.084,
+                "nfw_concentration_redshift_slope": -0.47,
+                "nfw_concentration_mass_pivot_msun_h": 2.0e12,
+                "nfw_overdensity_mode": "constant",
+                "nfw_overdensity": 200.0,
+                "nfw_reference_density": "critical",
+                "theta_resolution_rad": 0.01,
+            }
+        )
+
+    manifest = tmp_path / "painted_nfw_manifest.csv"
+    with manifest.open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(manifest_rows[0]))
+        writer.writeheader()
+        writer.writerows(manifest_rows)
+
+    cosmology = tmp_path / "pinocchio.test.cosmology.out"
+    cosmology.write_text(
+        "\n".join(
+            [
+                "# Cosmological quantities used in PINOCCHIO (h=0.700000)",
+                _cosmology_row(0.5, 2000.0, 0.75, 0.5, 0.001, 1000.0),
+                _cosmology_row(1.0 / 1.2, 550.0, 0.4, 0.82, 0.01, 5000.0),
+                _cosmology_row(1.0 / 1.1, 280.0, 0.35, 0.91, 0.1, 1000.0),
+                _cosmology_row(1.0, 0.0, 0.3, 1.0, 10.0, 1.0),
+            ]
+        ),
+        encoding="utf-8",
+    )
+    for redshift in (0.0, 0.1, 0.2):
+        _write_hmf(tmp_path / f"pinocchio.{redshift:.4f}.test.mf.out", redshift)
+
+    output_dir = tmp_path / "validation"
+    outputs = module.run_validation(
+        SimpleNamespace(
+            manifest=manifest,
+            cosmology_table=cosmology,
+            hmf_glob=str(tmp_path / "*.mf.out"),
+            output_dir=output_dir,
+            ell_max=7,
+            ell_min_compare=2,
+            ell_bin_width=3,
+            ell_exact_max=0,
+            radial_order=4,
+            profile_order=6,
+            exact_relative_tolerance=1.0e-3,
+            jax_precision="float64",
+        )
+    )
+
+    assert all(path.exists() for path in outputs)
+    with np.load(outputs[0], allow_pickle=False) as result:
+        assert result["ell"].shape == (6,)
+        assert result["observed_shell"].shape == (2, 6)
+        assert result["shell_total"].shape == (2, 6)
+        assert result["summed_total"].shape == (6,)
+    assert len(outputs[1].read_text(encoding="utf-8").splitlines()) > 2
+    assert len(outputs[2].read_text(encoding="utf-8").splitlines()) == 3

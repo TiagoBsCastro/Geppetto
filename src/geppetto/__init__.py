@@ -25,15 +25,29 @@ from geppetto.painters import (
     paint_lightcone_surface_density_tabulated_sparse,
 )
 from geppetto.profiles import NFWProfileParams, TabulatedProjectedProfileParams
+from geppetto.theory import (
+    AngularPowerSpectra,
+    HaloMassFunctionTable,
+    LinearTheoryTable,
+    exact_linear_shell_cls,
+    hybrid_angular_power_spectra,
+    limber_shell_cls,
+    linear_matter_power,
+    nfw_fourier_profile,
+    one_halo_matter_power,
+)
 
 __all__ = [
     "AdaptiveLightconeStencil",
     "AngularAssignmentParams",
+    "AngularPowerSpectra",
     "ConcentrationParams",
     "Cosmology",
     "HaloCatalog",
+    "HaloMassFunctionTable",
     "LightconeHaloCatalog",
     "LightconeSparseStencil",
+    "LinearTheoryTable",
     "NFWProfileParams",
     "TabulatedProjectedProfileParams",
     "bryan_norman_virial_overdensity",
@@ -41,7 +55,12 @@ __all__ = [
     "density_at_points_chunked",
     "duffy08_all_200c",
     "duffy08_relaxed_200c",
+    "exact_linear_shell_cls",
     "from_spherical_lightcone",
+    "hybrid_angular_power_spectra",
+    "limber_shell_cls",
+    "linear_matter_power",
+    "nfw_fourier_profile",
     "omega_m_at_redshift",
     "paint_box_density_grid",
     "paint_lightcone_particle_count_map_sparse",
@@ -49,6 +68,7 @@ __all__ = [
     "paint_lightcone_surface_density",
     "paint_lightcone_surface_density_sparse",
     "paint_lightcone_surface_density_tabulated_sparse",
+    "one_halo_matter_power",
 ]
 
 __version__ = "0.1.0"

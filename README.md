@@ -30,6 +30,37 @@ concentration-mass parameters. APIs and physical models are still evolving.
 GEPPETTO does **not** replace PINOCCHIO lightcone generation and does not merge
 one-halo maps with PINOCCHIO's two-halo maps automatically.
 
+## Angular-Power Scientific Validation
+
+GEPPETTO includes a linear-plus-one-halo prediction for the angular spectra of
+the combined PINOCCHIO uncollapsed-particle and painted-halo count maps:
+
+```text
+P_mm(k,z) = P_linear(k,z) + P_1h(k,z)
+```
+
+The linear spectrum, growth, distances, and background density are read from
+PINOCCHIO's `*.cosmology.out`. The one-halo term uses measured `*.mf.out` mass
+functions and the same concentration relation and mass definition recorded in
+`painted_nfw_manifest.csv`. Exact spherical-Bessel projection is used through
+`ell=100`; Limber projection is used above that and for the one-halo term.
+
+Run the map comparison after painting all segments:
+
+```bash
+python examples/validate_pinocchio_angular_power.py \
+  --manifest /path/to/painted_nfw_manifest.csv \
+  --cosmology-table /path/to/pinocchio.RUN.cosmology.out \
+  --hmf-glob '/path/to/pinocchio.*.RUN.mf.out' \
+  --output-dir /path/to/angular-power-validation
+```
+
+The command writes lean NPZ and CSV products containing measured and predicted
+spectra, particle shot noise, shell weights, resolved HMF mass fractions, and
+the low-k one-halo/linear ratio. It does not write another copy of any map.
+See [docs/angular_power_validation.md](docs/angular_power_validation.md) for
+the equations, units, estimator limitations, and output definitions.
+
 ## Installation
 
 GEPPETTO is currently installed from the GitHub repository. The recommended
@@ -43,7 +74,7 @@ cd Geppetto
 mamba create -n geppetto-dev python=3.12
 mamba activate geppetto-dev
 
-python -m pip install -e '.[io,dev]'
+python -m pip install -e '.[io,theory,dev]'
 ```
 
 Installation extras:
@@ -52,7 +83,9 @@ Installation extras:
 - `python -m pip install -e '.[io]'` adds `astropy`, `healpy`, and `h5py` for
   FITS, HEALPix, HDF5, and PINOCCHIO reader workflows.
 - `python -m pip install -e '.[dev]'` adds `pytest`, `ruff`, and `mypy`.
-- `python -m pip install -e '.[io,dev]'` is recommended for running all
+- `python -m pip install -e '.[theory]'` adds SciPy for exact low-multipole
+  spherical-Bessel projection.
+- `python -m pip install -e '.[io,theory,dev]'` is recommended for running all
   examples and tests.
 
 Verify the installation:

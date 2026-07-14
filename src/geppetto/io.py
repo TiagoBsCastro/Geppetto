@@ -26,6 +26,7 @@ from geppetto.catalog import (
 )
 from geppetto.cosmology import Cosmology, rho_mean_comoving
 from geppetto.profiles import TabulatedProjectedProfileParams
+from geppetto.theory import HaloMassFunctionTable, LinearTheoryTable
 
 
 class PinocchioCatalogError(ValueError):
@@ -1057,6 +1058,170 @@ def read_pinocchio_mass_function(path: PathLike) -> PinocchioMassFunction:
     )
 
 
+def read_pinocchio_cosmology_table(path: PathLike) -> LinearTheoryTable:
+    """Read ``*.cosmology.out`` into a GEPPETTO linear-theory table.
+
+    PINOCCHIO stores comoving distance in physical ``Mpc``, wavenumber in
+    ``Mpc^-1``, and power in ``Mpc^3``. This adapter converts them to
+    ``Mpc/h``, ``h/Mpc``, and ``(Mpc/h)^3`` respectively. The power spectrum is
+    the ``z=0`` linear spectrum; column 7 supplies its time-dependent growth.
+    """
+
+    source = Path(path)
+    data = _load_numeric_table(source, expected_columns=20, label="cosmology table")
+    if data.shape[0] < 2:
+        raise PinocchioCatalogError(
+            f"PINOCCHIO cosmology table must contain at least two rows: {source}"
+        )
+    h = _parse_cosmology_h(source)
+    if h <= 0.0:
+        raise PinocchioCatalogError(
+            f"PINOCCHIO cosmology-table h must be positive: {source}"
+        )
+
+    scale_factor = np.asarray(data[:, 0], dtype=np.float64)
+    order = np.argsort(scale_factor)
+    scale_factor = scale_factor[order]
+    if np.any(scale_factor <= 0.0) or np.any(np.diff(scale_factor) <= 0.0):
+        raise PinocchioCatalogError(
+            f"PINOCCHIO cosmology scale factors must be positive and unique: {source}"
+        )
+    present_index = np.flatnonzero(np.isclose(scale_factor, 1.0, rtol=0.0, atol=1.0e-6))
+    if present_index.size != 1:
+        raise PinocchioCatalogError(
+            f"PINOCCHIO cosmology table must include one a=1 row: {source}"
+        )
+    present_stop = int(present_index[0]) + 1
+    order = order[:present_stop]
+    scale_factor = scale_factor[:present_stop]
+    chi_mpc_h = np.asarray(data[order, 2], dtype=np.float64) * h
+    omega_m = np.asarray(data[order, 4], dtype=np.float64)
+    growth = np.asarray(data[order, 6], dtype=np.float64)
+    if np.any(chi_mpc_h < 0.0) or np.any(np.diff(chi_mpc_h) > 1.0e-8):
+        raise PinocchioCatalogError(
+            f"PINOCCHIO comoving distance must decrease with scale factor: {source}"
+        )
+    if np.any(omega_m <= 0.0) or np.any(growth <= 0.0):
+        raise PinocchioCatalogError(
+            f"PINOCCHIO Omega_m and linear growth must be positive: {source}"
+        )
+    if not np.isclose(growth[-1], 1.0, rtol=5.0e-3, atol=5.0e-6):
+        raise PinocchioCatalogError(
+            f"PINOCCHIO linear growth must be normalized to one at a=1: {source}"
+        )
+
+    k_h_mpc = np.asarray(data[:, 18], dtype=np.float64) / h
+    power_mpc_h3 = np.asarray(data[:, 19], dtype=np.float64) * h**3
+    k_order = np.argsort(k_h_mpc)
+    k_h_mpc = k_h_mpc[k_order]
+    power_mpc_h3 = power_mpc_h3[k_order]
+    if (
+        np.any(k_h_mpc <= 0.0)
+        or np.any(np.diff(k_h_mpc) <= 0.0)
+        or np.any(power_mpc_h3 <= 0.0)
+    ):
+        raise PinocchioCatalogError(
+            f"PINOCCHIO power-spectrum k and P(k) must be positive with unique k: {source}"
+        )
+
+    return LinearTheoryTable(
+        h=float(h),
+        omega_m0=float(omega_m[-1]),
+        scale_factor=jnp.asarray(scale_factor),
+        chi_mpc_h=jnp.asarray(chi_mpc_h),
+        omega_m=jnp.asarray(omega_m),
+        growth=jnp.asarray(growth),
+        k_h_mpc=jnp.asarray(k_h_mpc),
+        power_mpc_h3=jnp.asarray(power_mpc_h3),
+    )
+
+
+def read_pinocchio_mass_function_series(
+    paths: list[PathLike] | tuple[PathLike, ...],
+    *,
+    required_redshifts: np.ndarray | None = None,
+    redshift_tolerance: float = 1.0e-6,
+) -> HaloMassFunctionTable:
+    """Read measured PINOCCHIO HMF snapshots on a common log-mass grid.
+
+    Column 2 of every ``*.mf.out`` file is converted from ``dn/dM`` in
+    ``Mpc^-3 Msun^-1 h^4`` to ``dn/dlnM`` in ``(Mpc/h)^-3``. Native mass
+    centres from all files form the common grid. Interpolation is linear in
+    density so measured zero-count bins remain zero; values outside a file's
+    measured mass range are also zero.
+    """
+
+    if not paths:
+        raise PinocchioCatalogError("at least one PINOCCHIO mass-function file is required")
+    if redshift_tolerance <= 0.0:
+        raise PinocchioCatalogError("redshift_tolerance must be positive")
+
+    tables = [read_pinocchio_mass_function(path) for path in paths]
+    if any(table.redshift is None for table in tables):
+        missing = [str(table.source) for table in tables if table.redshift is None]
+        raise PinocchioCatalogError(
+            "cannot parse redshift from PINOCCHIO mass-function header: "
+            + ", ".join(missing)
+        )
+    redshifts = np.asarray([float(table.redshift) for table in tables], dtype=np.float64)
+    if np.any(redshifts < 0.0):
+        raise PinocchioCatalogError("PINOCCHIO mass-function redshifts must be non-negative")
+    if np.unique(redshifts).size != redshifts.size:
+        raise PinocchioCatalogError("PINOCCHIO mass-function redshifts must be unique")
+
+    if required_redshifts is not None:
+        required = np.asarray(required_redshifts, dtype=np.float64)
+        if required.ndim != 1 or not np.all(np.isfinite(required)):
+            raise PinocchioCatalogError("required_redshifts must be a finite 1D array")
+        missing = [
+            value
+            for value in required
+            if not np.any(np.isclose(redshifts, value, rtol=0.0, atol=redshift_tolerance))
+        ]
+        if missing:
+            values = ", ".join(f"{value:g}" for value in missing)
+            raise PinocchioCatalogError(
+                f"missing PINOCCHIO mass functions at required redshifts: {values}"
+            )
+
+    native_log_mass: list[np.ndarray] = []
+    native_dndlnm: list[np.ndarray] = []
+    for table in tables:
+        mass = np.asarray(table.mass_msun_h, dtype=np.float64)
+        number_density = np.asarray(table.number_density, dtype=np.float64)
+        if mass.ndim != 1 or mass.size < 2 or np.any(mass <= 0.0):
+            raise PinocchioCatalogError(
+                f"PINOCCHIO HMF masses must be a positive 1D grid: {table.source}"
+            )
+        if np.any(number_density < 0.0):
+            raise PinocchioCatalogError(
+                f"PINOCCHIO measured HMF cannot be negative: {table.source}"
+            )
+        order = np.argsort(mass)
+        mass = mass[order]
+        if np.any(np.diff(mass) <= 0.0):
+            raise PinocchioCatalogError(
+                f"PINOCCHIO HMF mass centres must be unique: {table.source}"
+            )
+        native_log_mass.append(np.log(mass))
+        native_dndlnm.append(mass * number_density[order])
+
+    common_log_mass = np.unique(np.concatenate(native_log_mass))
+    resampled = np.stack(
+        [
+            np.interp(common_log_mass, log_mass, dndlnm, left=0.0, right=0.0)
+            for log_mass, dndlnm in zip(native_log_mass, native_dndlnm, strict=True)
+        ]
+    )
+    scale_factor = 1.0 / (1.0 + redshifts)
+    order = np.argsort(scale_factor)
+    return HaloMassFunctionTable(
+        scale_factor=jnp.asarray(scale_factor[order]),
+        log_mass_msun_h=jnp.asarray(common_log_mass),
+        dndlnm_mpc_h3=jnp.asarray(resampled[order]),
+    )
+
+
 def read_pinocchio_mass_map_fits(path: PathLike) -> PinocchioMassMap:
     """Read a PINOCCHIO HEALPix mass-map FITS binary table.
 
@@ -1592,6 +1757,27 @@ def _parse_redshift_from_header(path: Path) -> float | None:
         if match:
             return float(match.group(1))
     return None
+
+
+def _parse_cosmology_h(path: Path) -> float:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError) as exc:
+        raise PinocchioCatalogError(
+            f"Cannot read PINOCCHIO cosmology-table header: {path}"
+        ) from exc
+    for line in lines:
+        if not line.lstrip().startswith("#"):
+            break
+        match = re.search(
+            r"\bh\s*=\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)",
+            line,
+        )
+        if match:
+            return float(match.group(1))
+    raise PinocchioCatalogError(
+        f"PINOCCHIO cosmology-table header is missing h=<value>: {path}"
+    )
 
 
 def _parse_snapshot_redshift(path: Path) -> float | None:

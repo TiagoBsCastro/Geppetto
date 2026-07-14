@@ -44,6 +44,9 @@ io = [
 mpi = [
   "mpi4py>=4.0"
 ]
+theory = [
+  "scipy>=1.10"
+]
 
 [project.urls]
 Repository = "https://github.com/TiagoBsCastro/GEPPETTO"

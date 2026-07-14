@@ -13,10 +13,12 @@ from geppetto.io import (
     read_pinocchio_binary_lightcone_catalog,
     read_pinocchio_binary_lightcone_light_catalog,
     read_pinocchio_binary_snapshot_catalog,
+    read_pinocchio_cosmology_table,
     read_pinocchio_hubble_table,
     read_pinocchio_lightcone_catalog,
     read_pinocchio_lightcone_light_catalog,
     read_pinocchio_mass_function,
+    read_pinocchio_mass_function_series,
     read_pinocchio_mass_map_fits,
     read_pinocchio_mass_sheets,
     read_pinocchio_nz,
@@ -25,6 +27,105 @@ from geppetto.io import (
     validate_tabulated_projected_profile_params,
 )
 from geppetto.profiles import TabulatedProjectedProfileParams
+
+
+def _cosmology_row(
+    scale_factor: float,
+    chi_mpc: float,
+    omega_m: float,
+    growth: float,
+    k_mpc: float,
+    power_mpc3: float,
+) -> str:
+    values = np.zeros(20, dtype=np.float64)
+    values[0] = scale_factor
+    values[1] = 1.0
+    values[2] = chi_mpc
+    values[3] = chi_mpc * scale_factor
+    values[4] = omega_m
+    values[5] = -1.0
+    values[6] = growth
+    values[7:14] = 1.0
+    values[14:18] = 1.0
+    values[18] = k_mpc
+    values[19] = power_mpc3
+    return " ".join(f"{value:.12g}" for value in values)
+
+
+def test_read_pinocchio_cosmology_table_converts_units_and_trims_future(tmp_path):
+    path = tmp_path / "pinocchio.demo.cosmology.out"
+    path.write_text(
+        "\n".join(
+            [
+                "# Cosmological quantities used in PINOCCHIO (h=0.500000)",
+                _cosmology_row(0.5, 1000.0, 0.7, 0.5, 0.1, 100.0),
+                _cosmology_row(1.0, 0.0, 0.3, 1.0, 0.2, 200.0),
+                _cosmology_row(1.2, 0.0, 0.2, 1.1, 0.3, 300.0),
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    table = read_pinocchio_cosmology_table(path)
+
+    assert table.h == 0.5
+    assert table.omega_m0 == 0.3
+    np.testing.assert_allclose(table.scale_factor, [0.5, 1.0])
+    np.testing.assert_allclose(table.chi_mpc_h, [500.0, 0.0])
+    np.testing.assert_allclose(table.k_h_mpc, [0.2, 0.4, 0.6])
+    np.testing.assert_allclose(table.power_mpc_h3, [12.5, 25.0, 37.5])
+
+
+def _write_hmf(path: Path, redshift: float, rows: list[tuple[float, float, int]]) -> None:
+    path.write_text(
+        "\n".join(
+            [
+                f"# Mass function for redshift {redshift:.6f}",
+                *[
+                    f"{mass} {density} {density} {density} {count} {density} 1.0"
+                    for mass, density, count in rows
+                ],
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_read_pinocchio_mass_function_series_uses_measured_density_and_boundaries(
+    tmp_path,
+):
+    first = tmp_path / "pinocchio.0.0000.demo.mf.out"
+    second = tmp_path / "pinocchio.1.0000.demo.mf.out"
+    _write_hmf(first, 0.0, [(1.0e12, 1.0e-15, 10), (2.0e12, 0.0, 0)])
+    _write_hmf(second, 1.0, [(1.0e12, 2.0e-15, 20), (3.0e12, 1.0e-16, 1)])
+
+    series = read_pinocchio_mass_function_series(
+        (first, second),
+        required_redshifts=np.array([0.0, 1.0]),
+    )
+
+    np.testing.assert_allclose(series.scale_factor, [0.5, 1.0])
+    np.testing.assert_allclose(
+        np.exp(series.log_mass_msun_h),
+        [1.0e12, 2.0e12, 3.0e12],
+        rtol=2.0e-6,
+    )
+    # z=0 is the final row after sorting by increasing scale factor. Its native
+    # zero-count bin remains exactly zero and values above its range stay zero.
+    assert series.dndlnm_mpc_h3[1, 1] == 0.0
+    assert series.dndlnm_mpc_h3[1, 2] == 0.0
+    assert series.dndlnm_mpc_h3[1, 0] == pytest.approx(1.0e-3)
+
+
+def test_mass_function_series_requires_every_requested_boundary(tmp_path):
+    path = tmp_path / "pinocchio.0.0000.demo.mf.out"
+    _write_hmf(path, 0.0, [(1.0e12, 1.0e-15, 10), (2.0e12, 5.0e-16, 2)])
+
+    with pytest.raises(PinocchioCatalogError, match="required redshifts: 0.5"):
+        read_pinocchio_mass_function_series(
+            (path,),
+            required_redshifts=np.array([0.0, 0.5]),
+        )
 
 
 @pytest.mark.parametrize(
