@@ -118,17 +118,15 @@ from geppetto._sparse_jit import (
     paint_nfw_particle_count_map_sparse_jit,
 )
 from geppetto import (
-    ConcentrationParams,
+    AngularAssignmentParams,
     NFWProfileParams,
-    paint_lightcone_particle_count_map,
 )
-from geppetto.catalog import LightconeHaloCatalog, LightconeSparseStencil
+from geppetto.catalog import AdaptiveLightconeStencil, LightconeHaloCatalog
+from geppetto.cosmology import halo_radius_delta_comoving
 from geppetto.io import (
     PinocchioMassMap,
     PinocchioRunMetadata,
     build_lightcone_sparse_stencil_bruteforce,
-    healpix_pixel_area_sr,
-    healpix_pixel_unit_vectors,
     read_pinocchio_hubble_table,
     read_pinocchio_lightcone_catalog,
     read_pinocchio_lightcone_light_catalog,
@@ -136,7 +134,7 @@ from geppetto.io import (
     read_pinocchio_mass_sheets,
     read_pinocchio_parameter_file,
 )
-from geppetto.profiles import nfw_scale_radius_and_density
+from geppetto.profiles import nfw_halo_overdensity
 
 # Kept as a module attribute for regression tests proving the default sparse
 # calibration path never calls the dense validation builder.
@@ -154,6 +152,7 @@ class MpiContext:
     rank: int = 0
     size: int = 1
     sum_op: Any | None = None
+    max_op: Any | None = None
 
     @property
     def is_root(self) -> bool:
@@ -232,6 +231,17 @@ class ExecutionProvenance:
     git_commit: str
 
 
+@dataclass(frozen=True)
+class ResolvedAngularAssignment:
+    """Adaptive angular controls resolved for one native HEALPix NSIDE."""
+
+    theta_resolution_rad: float
+    theta_resolution_source: Literal["automatic", "explicit"]
+    n_resolution: int
+    theta_map_rad: float
+    max_required_supersampling_level: int
+
+
 def default_halo_mass_definition() -> HaloMassDefinition:
     """Return the legacy 200c interpretation for direct Python callers."""
 
@@ -286,10 +296,15 @@ class SegmentExecutionTiming:
                 stencil.concatenate_seconds,
                 stencil.jax_transfer_seconds,
                 stencil.n_halos,
+                stencil.n_unresolved_ngp,
+                stencil.n_native_resolved,
+                stencil.n_supersampled,
+                stencil.n_zero_sample_ngp_fallbacks,
                 stencil.n_query_pixels_total,
-                stencil.n_inside_domain_total,
-                stencil.n_kept_pairs_total,
-                stencil.n_subpixel_radius_halos,
+                stencil.n_global_profile_samples,
+                stencil.n_retained_profile_samples,
+                stencil.max_requested_supersampling_level,
+                stencil.max_used_supersampling_level,
             ),
             dtype=np.float64,
         )
@@ -297,23 +312,24 @@ class SegmentExecutionTiming:
 
 @dataclass
 class StencilBuildDiagnostics:
-    """Host-side counters for HEALPix sparse-stencil construction."""
+    """Host-side counters for adaptive HEALPix stencil construction."""
 
     n_halos: int = 0
-    n_halos_with_query_pixels: int = 0
-    n_halos_with_inside_pixels: int = 0
-    n_halos_with_kept_pairs: int = 0
+    n_unresolved_ngp: int = 0
+    n_native_resolved: int = 0
+    n_supersampled: int = 0
+    n_zero_sample_ngp_fallbacks: int = 0
+    max_requested_supersampling_level: int = 0
+    max_used_supersampling_level: int = 0
     n_query_pixels_total: int = 0
-    n_inside_domain_total: int = 0
-    n_kept_pairs_total: int = 0
-    n_subpixel_radius_halos: int = 0
+    n_global_profile_samples: int = 0
+    n_retained_profile_samples: int = 0
     elapsed_seconds: float = 0.0
     query_disc_seconds: float = 0.0
     compact_lookup_seconds: float = 0.0
     pix2vec_filter_seconds: float = 0.0
     concatenate_seconds: float = 0.0
     jax_transfer_seconds: float = 0.0
-    halo_has_kept_pair: np.ndarray | None = None
 
     @property
     def residual_seconds(self) -> float:
@@ -329,22 +345,10 @@ class StencilBuildDiagnostics:
         return max(0.0, self.elapsed_seconds - measured)
 
     @property
-    def inside_over_query(self) -> float:
-        if self.n_query_pixels_total == 0:
+    def retained_over_global(self) -> float:
+        if self.n_global_profile_samples == 0:
             return 0.0
-        return self.n_inside_domain_total / self.n_query_pixels_total
-
-    @property
-    def kept_over_query(self) -> float:
-        if self.n_query_pixels_total == 0:
-            return 0.0
-        return self.n_kept_pairs_total / self.n_query_pixels_total
-
-    @property
-    def kept_over_inside(self) -> float:
-        if self.n_inside_domain_total == 0:
-            return 0.0
-        return self.n_kept_pairs_total / self.n_inside_domain_total
+        return self.n_retained_profile_samples / self.n_global_profile_samples
 
 
 @dataclass
@@ -492,26 +496,23 @@ def parse_args() -> argparse.Namespace:
         help="Reference density for the NFW spherical-overdensity mass.",
     )
     parser.add_argument(
-        "--truncation-width-fraction",
+        "--theta-resolution-rad",
         type=float,
-        default=0.05,
-        help="Smooth truncation-width fraction for the NFW profile.",
+        help=(
+            "Unresolved halo angular radius in radians. Defaults to half the "
+            "maximum native HEALPix pixel radius."
+        ),
     )
     parser.add_argument(
-        "--nfw-chunk-size",
+        "--n-resolution",
         type=int,
-        default=1024,
-        help=argparse.SUPPRESS,
+        default=4,
+        help="Minimum angular samples across a resolved halo radius.",
     )
     parser.add_argument(
-        "--nfw-taper-radius-factor",
-        type=float,
-        default=10.0,
-        help=argparse.SUPPRESS,
-    )
-    parser.add_argument(
-        "--nfw-dense-demo",
-        action="store_true",
+        "--nfw-sample-chunk-size",
+        type=int,
+        default=65536,
         help=argparse.SUPPRESS,
     )
     parser.add_argument(
@@ -676,6 +677,7 @@ def initialize_mpi_context(requested: bool) -> MpiContext:
         rank=rank,
         size=size,
         sum_op=MPI.SUM,
+        max_op=MPI.MAX,
     )
 
 
@@ -1093,39 +1095,79 @@ def selected_lightcone_catalog(catalog: LightconeHaloCatalog, mask: np.ndarray) 
     )
 
 
-def nfw_stencil_rmax_mpc_h(
+def nfw_support_rdelta_mpc_h(
     catalog: LightconeHaloCatalog,
     metadata: PinocchioRunMetadata,
-    concentration_params: ConcentrationParams,
     profile_params: NFWProfileParams,
-    taper_radius_factor: float,
 ) -> np.ndarray:
-    """Return fixed sparse-stencil NFW support radii in comoving ``Mpc/h``."""
+    """Return concentration-independent hard NFW support radii in ``Mpc/h``."""
 
-    if taper_radius_factor < 0.0:
-        raise ValueError("taper_radius_factor must be non-negative")
-
-    r_delta, _, _, _ = nfw_scale_radius_and_density(
+    overdensity = nfw_halo_overdensity(
+        catalog.redshift,
+        metadata.cosmology,
+        profile_params,
+    )
+    r_delta = halo_radius_delta_comoving(
         catalog.mass,
         catalog.redshift,
         metadata.cosmology,
-        concentration_params,
-        profile_params,
+        overdensity=overdensity,
+        reference_density=profile_params.reference_density,
     )
-    r_delta_np = np.asarray(r_delta, dtype=np.float64)
-    if not profile_params.smooth_truncation:
-        return r_delta_np
-
-    width = float(profile_params.truncation_width_fraction) * r_delta_np
-    return r_delta_np + float(taper_radius_factor) * width
+    values = np.asarray(r_delta, dtype=np.float64)
+    if not np.all(np.isfinite(values)) or np.any(values <= 0.0):
+        raise ValueError("NFW r_delta values must be finite and positive")
+    return values
 
 
-def _compression_factor(dense_pair_count: int, sparse_pair_count: int) -> float:
-    if sparse_pair_count > 0:
-        return float(dense_pair_count) / float(sparse_pair_count)
-    if dense_pair_count > 0:
-        return float("inf")
-    return 1.0
+def resolve_angular_assignment(
+    nside: int,
+    params: AngularAssignmentParams,
+) -> ResolvedAngularAssignment:
+    """Resolve and validate the two adaptive angular controls."""
+
+    try:
+        import healpy as hp
+    except ImportError as exc:  # pragma: no cover - exercised only without io extra
+        raise RuntimeError("adaptive NFW assignment requires healpy") from exc
+
+    if not hp.isnsideok(nside):
+        raise ValueError(f"native NSIDE={nside} is invalid")
+    if params.n_resolution < 1:
+        raise ValueError("n_resolution must be at least 1")
+    theta_map = float(np.sqrt(hp.nside2pixarea(nside)))
+    if params.theta_resolution_rad is None:
+        theta_resolution = 0.5 * float(hp.max_pixrad(nside))
+        source: Literal["automatic", "explicit"] = "automatic"
+    else:
+        theta_resolution = float(params.theta_resolution_rad)
+        source = "explicit"
+    if not np.isfinite(theta_resolution) or theta_resolution <= 0.0:
+        raise ValueError("theta_resolution_rad must be finite and positive")
+    target_scale = float(params.n_resolution) * theta_map
+    if theta_resolution > target_scale:
+        raise ValueError(
+            "theta_resolution_rad must not exceed n_resolution * theta_map: "
+            f"{theta_resolution:.12g} > {target_scale:.12g}"
+        )
+
+    ratio = target_scale / theta_resolution
+    max_level = max(0, int(np.ceil(np.log2(ratio))))
+    if max_level > 0 and not hp.isnsideok(nside, nest=True):
+        raise ValueError(f"native NSIDE={nside} is invalid for NESTED supersampling")
+    child_nside = nside * (1 << max_level)
+    if not hp.isnsideok(child_nside, nest=True):
+        raise ValueError(
+            "adaptive controls require an invalid child NSIDE: "
+            f"native={nside}, level={max_level}, child={child_nside}"
+        )
+    return ResolvedAngularAssignment(
+        theta_resolution_rad=theta_resolution,
+        theta_resolution_source=source,
+        n_resolution=int(params.n_resolution),
+        theta_map_rad=theta_map,
+        max_required_supersampling_level=max_level,
+    )
 
 
 def sparse_pair_bucket_size(n_pair: int) -> int:
@@ -1138,14 +1180,14 @@ def sparse_pair_bucket_size(n_pair: int) -> int:
     return 1 << (n_pair - 1).bit_length()
 
 
-def bucket_sparse_stencil_for_rank_catalog(
-    stencil: LightconeSparseStencil,
+def bucket_adaptive_stencil_for_rank_catalog(
+    stencil: AdaptiveLightconeStencil,
     selected_mask: np.ndarray,
     rank_catalog_size: int,
     *,
     profile_diagnostics: StencilBuildDiagnostics | None = None,
-) -> LightconeSparseStencil:
-    """Remap selected-catalogue IDs and zero-pad one sparse JIT bucket.
+) -> AdaptiveLightconeStencil:
+    """Remap selected-catalogue IDs and pad one adaptive JIT bucket.
 
     The returned halo IDs index the full rank-local catalogue, whose shape is
     constant across segments. Geometry and padding remain outside differentiable
@@ -1159,12 +1201,16 @@ def bucket_sparse_stencil_for_rank_catalog(
     if mask.shape != (rank_catalog_size,):
         raise ValueError("selected_mask must match the rank-local catalogue length")
 
-    pix_id = np.asarray(stencil.pix_id, dtype=np.int32)
-    local_halo_id = np.asarray(stencil.halo_id, dtype=np.int64)
-    r_perp = np.asarray(stencil.r_perp)
+    compact_row = np.asarray(stencil.sample_compact_row, dtype=np.int32)
+    local_halo_id = np.asarray(stencil.sample_halo_id, dtype=np.int64)
+    r_perp = np.asarray(stencil.sample_r_perp)
+    solid_angle = np.asarray(stencil.sample_solid_angle_sr, dtype=r_perp.dtype)
+    valid = np.asarray(stencil.sample_valid, dtype=bool)
+    in_compact = np.asarray(stencil.sample_in_compact, dtype=bool)
     n_pair = int(r_perp.shape[0])
-    if pix_id.shape != (n_pair,) or local_halo_id.shape != (n_pair,):
-        raise ValueError("sparse stencil fields must be one-dimensional and equal length")
+    pair_shapes = (compact_row.shape, local_halo_id.shape, solid_angle.shape, valid.shape, in_compact.shape)
+    if any(shape != (n_pair,) for shape in pair_shapes):
+        raise ValueError("adaptive sample fields must be one-dimensional and equal length")
 
     selected_halo_ids = np.flatnonzero(mask)
     if local_halo_id.size and (
@@ -1173,39 +1219,59 @@ def bucket_sparse_stencil_for_rank_catalog(
         raise ValueError("stencil halo IDs do not index the selected catalogue")
     rank_halo_id = selected_halo_ids[local_halo_id].astype(np.int32, copy=False)
 
-    if stencil.pair_weight is None:
-        pair_weight = np.ones(n_pair, dtype=r_perp.dtype)
-    else:
-        pair_weight = np.asarray(stencil.pair_weight, dtype=r_perp.dtype)
-        if pair_weight.shape != (n_pair,):
-            raise ValueError("stencil pair weights must match the pair count")
-    if not np.all(np.isfinite(pair_weight)) or np.any(pair_weight < 0.0):
-        raise ValueError("stencil pair weights must be finite and non-negative")
+    if not np.all(valid):
+        raise ValueError("unpadded adaptive samples must all be valid")
+    if not np.all(np.isfinite(solid_angle)) or np.any(solid_angle <= 0.0):
+        raise ValueError("adaptive sample solid angles must be finite and positive")
 
     bucket_size = sparse_pair_bucket_size(n_pair)
-    padded_pix_id = np.zeros(bucket_size, dtype=np.int32)
+    padded_compact_row = np.zeros(bucket_size, dtype=np.int32)
     padded_halo_id = np.zeros(bucket_size, dtype=np.int32)
     padded_r_perp = np.ones(bucket_size, dtype=r_perp.dtype)
-    padded_pair_weight = np.zeros(bucket_size, dtype=r_perp.dtype)
-    padded_pix_id[:n_pair] = pix_id
+    padded_solid_angle = np.zeros(bucket_size, dtype=r_perp.dtype)
+    padded_valid = np.zeros(bucket_size, dtype=bool)
+    padded_in_compact = np.zeros(bucket_size, dtype=bool)
+    padded_compact_row[:n_pair] = compact_row
     padded_halo_id[:n_pair] = rank_halo_id
     padded_r_perp[:n_pair] = r_perp
-    padded_pair_weight[:n_pair] = pair_weight
+    padded_solid_angle[:n_pair] = solid_angle
+    padded_valid[:n_pair] = True
+    padded_in_compact[:n_pair] = in_compact
+
+    selected_count = selected_halo_ids.size
+    selected_shapes = (
+        np.asarray(stencil.ngp_compact_row).shape,
+        np.asarray(stencil.ngp_active).shape,
+        np.asarray(stencil.ngp_in_compact).shape,
+        np.asarray(stencil.resolved_halo_mask).shape,
+    )
+    if any(shape != (selected_count,) for shape in selected_shapes):
+        raise ValueError("adaptive per-halo fields must match the selected catalogue")
+    rank_ngp_row = np.zeros(rank_catalog_size, dtype=np.int32)
+    rank_ngp_active = np.zeros(rank_catalog_size, dtype=bool)
+    rank_ngp_in_compact = np.zeros(rank_catalog_size, dtype=bool)
+    rank_resolved = np.zeros(rank_catalog_size, dtype=bool)
+    rank_ngp_row[selected_halo_ids] = np.asarray(stencil.ngp_compact_row, dtype=np.int32)
+    rank_ngp_active[selected_halo_ids] = np.asarray(stencil.ngp_active, dtype=bool)
+    rank_ngp_in_compact[selected_halo_ids] = np.asarray(stencil.ngp_in_compact, dtype=bool)
+    rank_resolved[selected_halo_ids] = np.asarray(stencil.resolved_halo_mask, dtype=bool)
 
     transfer_start = perf_counter() if profile_diagnostics is not None else None
-    bucketed_stencil = LightconeSparseStencil(
-        pix_id=jnp.asarray(padded_pix_id),
-        halo_id=jnp.asarray(padded_halo_id),
-        r_perp=jnp.asarray(padded_r_perp),
+    bucketed_stencil = AdaptiveLightconeStencil(
+        sample_compact_row=jnp.asarray(padded_compact_row),
+        sample_halo_id=jnp.asarray(padded_halo_id),
+        sample_r_perp=jnp.asarray(padded_r_perp),
+        sample_solid_angle_sr=jnp.asarray(padded_solid_angle),
+        sample_valid=jnp.asarray(padded_valid),
+        sample_in_compact=jnp.asarray(padded_in_compact),
+        ngp_compact_row=jnp.asarray(rank_ngp_row),
+        ngp_active=jnp.asarray(rank_ngp_active),
+        ngp_in_compact=jnp.asarray(rank_ngp_in_compact),
+        resolved_halo_mask=jnp.asarray(rank_resolved),
         n_pix=stencil.n_pix,
-        pair_weight=jnp.asarray(padded_pair_weight),
     )
     if profile_diagnostics is not None:
-        bucketed_stencil.pix_id.block_until_ready()
-        bucketed_stencil.halo_id.block_until_ready()
-        bucketed_stencil.r_perp.block_until_ready()
-        assert bucketed_stencil.pair_weight is not None
-        bucketed_stencil.pair_weight.block_until_ready()
+        jax.block_until_ready(bucketed_stencil)
         assert transfer_start is not None
         profile_diagnostics.jax_transfer_seconds += perf_counter() - transfer_start
         assert bucket_start is not None
@@ -1213,22 +1279,17 @@ def bucket_sparse_stencil_for_rank_catalog(
     return bucketed_stencil
 
 
-def build_lightcone_sparse_stencil_for_mass_map_local(
+def build_adaptive_lightcone_stencil_for_mass_map(
     mass_map: PinocchioMassMap,
     catalog: LightconeHaloCatalog,
-    rmax_mpc_h: np.ndarray,
+    r_delta_mpc_h: np.ndarray,
+    assignment_params: AngularAssignmentParams | None = None,
     *,
     collect_diagnostics: bool = False,
     pixel_index: MassMapPixelIndex | None = None,
     profile_phases: bool = False,
-) -> LightconeSparseStencil | tuple[LightconeSparseStencil, StencilBuildDiagnostics]:
-    """Build a HEALPix-local sparse stencil on a compact PINOCCHIO map domain.
-
-    The returned ``pix_id`` values are compact row indices into
-    ``mass_map.pixel``, not global HEALPix pixel numbers. Geometry is fixed
-    outside JAX; the differentiable sparse painter receives only the retained
-    local halo-pixel pairs.
-    """
+) -> AdaptiveLightconeStencil | tuple[AdaptiveLightconeStencil, StencilBuildDiagnostics]:
+    """Build global-support adaptive geometry for one compact RING map."""
 
     try:
         import healpy as hp
@@ -1238,6 +1299,9 @@ def build_lightcone_sparse_stencil_for_mass_map_local(
     validate_mass_map(mass_map)
     validate_catalog_for_binning(catalog)
     build_start = perf_counter()
+    if assignment_params is None:
+        assignment_params = AngularAssignmentParams()
+    resolved_assignment = resolve_angular_assignment(mass_map.nside, assignment_params)
 
     pixels = np.asarray(mass_map.pixel, dtype=np.int64)
     n_pix = int(pixels.shape[0])
@@ -1253,61 +1317,92 @@ def build_lightcone_sparse_stencil_for_mass_map_local(
     if np.any(halo_chi <= 0.0):
         raise ValueError("catalog.chi values must be positive for local stencil construction")
 
-    rmax = np.asarray(rmax_mpc_h, dtype=np.float64)
-    if rmax.shape != (n_halo,):
-        raise ValueError("rmax_mpc_h must have shape (n_halo,)")
-    if not np.all(np.isfinite(rmax)) or np.any(rmax < 0.0):
-        raise ValueError("rmax_mpc_h values must be finite and non-negative")
+    r_delta = np.asarray(r_delta_mpc_h, dtype=np.float64)
+    if r_delta.shape != (n_halo,):
+        raise ValueError("r_delta_mpc_h must have shape (n_halo,)")
+    if not np.all(np.isfinite(r_delta)) or np.any(r_delta <= 0.0):
+        raise ValueError("r_delta_mpc_h values must be finite and positive")
 
-    pix_id_chunks: list[np.ndarray] = []
+    compact_row_chunks: list[np.ndarray] = []
     halo_id_chunks: list[np.ndarray] = []
     r_perp_chunks: list[np.ndarray] = []
+    solid_angle_chunks: list[np.ndarray] = []
+    in_compact_chunks: list[np.ndarray] = []
     diagnostics = StencilBuildDiagnostics()
-    halo_has_kept_pair = np.zeros(n_halo, dtype=bool)
-    max_pixel_radius = float(hp.max_pixrad(mass_map.nside))
+    ngp_compact_row = np.zeros(n_halo, dtype=np.int32)
+    ngp_active = np.zeros(n_halo, dtype=bool)
+    ngp_in_compact = np.zeros(n_halo, dtype=bool)
+    resolved_halo_mask = np.zeros(n_halo, dtype=bool)
 
-    for halo_id, (halo_vector, chi_i, rmax_i) in enumerate(
-        zip(halo_unit_vectors, halo_chi, rmax, strict=True)
+    def assign_ngp(halo_id: int, halo_vector: np.ndarray) -> None:
+        host_ring = int(hp.vec2pix(mass_map.nside, *halo_vector, nest=False))
+        row = int(pixel_index.lookup(np.asarray([host_ring], dtype=np.int64))[0])
+        ngp_active[halo_id] = True
+        ngp_in_compact[halo_id] = row >= 0
+        ngp_compact_row[halo_id] = max(row, 0)
+
+    for halo_id, (halo_vector, chi_i, r_delta_i) in enumerate(
+        zip(halo_unit_vectors, halo_chi, r_delta, strict=True)
     ):
         diagnostics.n_halos += 1
-        alpha_max = 2.0 * np.arcsin(min(1.0, float(rmax_i) / (2.0 * float(chi_i))))
-        if alpha_max <= max_pixel_radius:
-            diagnostics.n_subpixel_radius_halos += 1
-        query_radius = min(float(np.pi), float(np.nextafter(alpha_max, np.inf)))
+        theta_h = 2.0 * np.arcsin(min(1.0, float(r_delta_i) / (2.0 * float(chi_i))))
+        if theta_h < resolved_assignment.theta_resolution_rad:
+            diagnostics.n_unresolved_ngp += 1
+            assign_ngp(halo_id, halo_vector)
+            continue
+
+        supersampled = theta_h < (
+            resolved_assignment.n_resolution * resolved_assignment.theta_map_rad
+        )
+        if supersampled:
+            requested_level = int(
+                np.ceil(
+                    np.log2(
+                        resolved_assignment.n_resolution
+                        * resolved_assignment.theta_map_rad
+                        / theta_h
+                    )
+                )
+            )
+            requested_level = max(1, requested_level)
+            diagnostics.max_requested_supersampling_level = max(
+                diagnostics.max_requested_supersampling_level,
+                requested_level,
+            )
+            diagnostics.max_used_supersampling_level = max(
+                diagnostics.max_used_supersampling_level,
+                requested_level,
+            )
+            query_nside = mass_map.nside * (1 << requested_level)
+            if not hp.isnsideok(query_nside, nest=True):
+                raise ValueError(
+                    "derived supersampling level requires an invalid child NSIDE: "
+                    f"native={mass_map.nside}, level={requested_level}, "
+                    f"child={query_nside}"
+                )
+            nest = True
+        else:
+            requested_level = 0
+            query_nside = mass_map.nside
+            nest = False
+        query_radius = min(float(np.pi), float(np.nextafter(theta_h, np.inf)))
 
         phase_start = perf_counter() if profile_phases else None
         queried_pixels = np.asarray(
             hp.query_disc(
-                mass_map.nside,
+                query_nside,
                 halo_vector.astype(np.float64, copy=False),
                 query_radius,
                 inclusive=False,
-                nest=False,
+                nest=nest,
             ),
             dtype=np.int64,
         )
         if phase_start is not None:
             diagnostics.query_disc_seconds += perf_counter() - phase_start
         diagnostics.n_query_pixels_total += int(queried_pixels.size)
-        if queried_pixels.size == 0:
-            continue
-        diagnostics.n_halos_with_query_pixels += 1
-
         phase_start = perf_counter() if profile_phases else None
-        rows = pixel_index.lookup(queried_pixels)
-        inside_domain = rows >= 0
-        n_inside = int(np.count_nonzero(inside_domain))
-        if phase_start is not None:
-            diagnostics.compact_lookup_seconds += perf_counter() - phase_start
-        diagnostics.n_inside_domain_total += n_inside
-        if not np.any(inside_domain):
-            continue
-        diagnostics.n_halos_with_inside_pixels += 1
-
-        phase_start = perf_counter() if profile_phases else None
-        local_pixels = queried_pixels[inside_domain]
-        local_rows = rows[inside_domain]
-        x, y, z = hp.pix2vec(mass_map.nside, local_pixels, nest=False)
+        x, y, z = hp.pix2vec(query_nside, queried_pixels, nest=nest)
         pixel_vectors = np.stack([x, y, z], axis=-1).astype(geometry_dtype, copy=False)
         cosang = np.clip(
             pixel_vectors[:, 0] * halo_vector[0]
@@ -1318,48 +1413,83 @@ def build_lightcone_sparse_stencil_for_mass_map_local(
         )
         chord = np.sqrt(np.maximum(2.0 * (1.0 - cosang), 0.0))
         r_perp = chi_i * chord
-        keep = r_perp <= float(rmax_i)
+        keep = r_perp <= float(r_delta_i)
         n_keep = int(np.count_nonzero(keep))
         if phase_start is not None:
             diagnostics.pix2vec_filter_seconds += perf_counter() - phase_start
-        diagnostics.n_kept_pairs_total += n_keep
         if n_keep == 0:
+            diagnostics.n_zero_sample_ngp_fallbacks += 1
+            assign_ngp(halo_id, halo_vector)
             continue
-        diagnostics.n_halos_with_kept_pairs += 1
-        halo_has_kept_pair[halo_id] = True
+        queried_pixels = queried_pixels[keep]
+        r_perp = r_perp[keep]
+        if supersampled:
+            parent_nested = queried_pixels // (4**requested_level)
+            parent_ring = np.asarray(
+                hp.nest2ring(mass_map.nside, parent_nested),
+                dtype=np.int64,
+            )
+            diagnostics.n_supersampled += 1
+        else:
+            parent_ring = queried_pixels
+            diagnostics.n_native_resolved += 1
+        phase_start = perf_counter() if profile_phases else None
+        rows = pixel_index.lookup(parent_ring)
+        in_compact = rows >= 0
+        safe_rows = np.where(in_compact, rows, 0).astype(np.int32, copy=False)
+        if phase_start is not None:
+            diagnostics.compact_lookup_seconds += perf_counter() - phase_start
 
-        pix_id_chunks.append(local_rows[keep])
+        resolved_halo_mask[halo_id] = True
+        diagnostics.n_global_profile_samples += n_keep
+        diagnostics.n_retained_profile_samples += int(np.count_nonzero(in_compact))
+        compact_row_chunks.append(safe_rows)
         halo_id_chunks.append(np.full(n_keep, halo_id, dtype=np.int64))
-        r_perp_chunks.append(r_perp[keep])
+        r_perp_chunks.append(r_perp)
+        solid_angle_chunks.append(
+            np.full(n_keep, hp.nside2pixarea(query_nside), dtype=geometry_dtype)
+        )
+        in_compact_chunks.append(in_compact)
 
     phase_start = perf_counter() if profile_phases else None
-    if pix_id_chunks:
-        pix_id = np.concatenate(pix_id_chunks)
+    if compact_row_chunks:
+        compact_row = np.concatenate(compact_row_chunks)
         halo_id = np.concatenate(halo_id_chunks)
         r_perp = np.concatenate(r_perp_chunks)
+        solid_angle = np.concatenate(solid_angle_chunks)
+        in_compact = np.concatenate(in_compact_chunks)
     else:
-        pix_id = np.empty((0,), dtype=np.int64)
+        compact_row = np.empty((0,), dtype=np.int32)
         halo_id = np.empty((0,), dtype=np.int64)
         r_perp = np.empty((0,), dtype=np.float64)
+        solid_angle = np.empty((0,), dtype=np.float64)
+        in_compact = np.empty((0,), dtype=bool)
     if phase_start is not None:
         diagnostics.concatenate_seconds = perf_counter() - phase_start
 
     phase_start = perf_counter() if profile_phases else None
-    stencil = LightconeSparseStencil(
-        pix_id=jnp.asarray(pix_id, dtype=jnp.int32),
-        halo_id=jnp.asarray(halo_id, dtype=jnp.int32),
-        r_perp=jnp.asarray(r_perp, dtype=jnp.asarray(catalog.chi).dtype),
+    stencil = AdaptiveLightconeStencil(
+        sample_compact_row=jnp.asarray(compact_row, dtype=jnp.int32),
+        sample_halo_id=jnp.asarray(halo_id, dtype=jnp.int32),
+        sample_r_perp=jnp.asarray(r_perp, dtype=jnp.asarray(catalog.chi).dtype),
+        sample_solid_angle_sr=jnp.asarray(
+            solid_angle,
+            dtype=jnp.asarray(catalog.chi).dtype,
+        ),
+        sample_valid=jnp.ones((r_perp.shape[0],), dtype=bool),
+        sample_in_compact=jnp.asarray(in_compact, dtype=bool),
+        ngp_compact_row=jnp.asarray(ngp_compact_row),
+        ngp_active=jnp.asarray(ngp_active),
+        ngp_in_compact=jnp.asarray(ngp_in_compact),
+        resolved_halo_mask=jnp.asarray(resolved_halo_mask),
         n_pix=n_pix,
     )
     if phase_start is not None:
-        stencil.pix_id.block_until_ready()
-        stencil.halo_id.block_until_ready()
-        stencil.r_perp.block_until_ready()
+        jax.block_until_ready(stencil)
         diagnostics.jax_transfer_seconds = perf_counter() - phase_start
     diagnostics.elapsed_seconds = perf_counter() - build_start
-    diagnostics.halo_has_kept_pair = halo_has_kept_pair
     if collect_diagnostics:
-        if diagnostics.n_kept_pairs_total != int(pix_id.shape[0]):
+        if diagnostics.n_global_profile_samples != int(r_perp.shape[0]):
             raise RuntimeError("stencil diagnostics kept-pair count does not match stencil size")
         return stencil, diagnostics
     return stencil
@@ -1381,28 +1511,33 @@ def print_stencil_profile(diag: StencilBuildDiagnostics) -> None:
     print(
         "[profile] stencil counts: "
         f"halos {diag.n_halos}; queried {diag.n_query_pixels_total}; "
-        f"inside {diag.n_inside_domain_total}; kept {diag.n_kept_pairs_total}; "
-        f"sub-pixel radii {diag.n_subpixel_radius_halos}"
+        f"global samples {diag.n_global_profile_samples}; "
+        f"retained samples {diag.n_retained_profile_samples}; "
+        f"NGP {diag.n_unresolved_ngp}; native {diag.n_native_resolved}; "
+        f"supersampled {diag.n_supersampled}; "
+        f"zero-query fallbacks {diag.n_zero_sample_ngp_fallbacks}; "
+        f"maximum level {diag.max_used_supersampling_level}"
     )
 
 
 def paint_bucketed_nfw_sparse_map(
-    stencil: LightconeSparseStencil,
+    stencil: AdaptiveLightconeStencil,
     rank_catalog: LightconeHaloCatalog,
     metadata: PinocchioRunMetadata,
     particle_mass_msun_h: float,
-    pixel_area_sr: float,
     concentration_amplitude: float,
     concentration_mass_slope: float,
     concentration_redshift_slope: float,
     concentration_mass_pivot: float,
-    truncation_width_fraction: float,
+    sample_chunk_size: int,
+    r_delta_rank_mpc_h: np.ndarray,
+    native_nside: int,
     mass_definition: ResolvedHaloMassDefinition | None = None,
     *,
     compute_map_derivatives: bool,
     profile: bool,
-) -> tuple[jax.Array, dict[str, float | str | np.ndarray]]:
-    """Paint one padded sparse bucket and optional concentration JVP maps."""
+) -> tuple[jax.Array, dict[str, float | int | str | np.ndarray]]:
+    """Paint one adaptive bucket and optional concentration JVP maps."""
 
     if mass_definition is None:
         mass_definition = default_halo_mass_definition().resolve(0)
@@ -1417,70 +1552,116 @@ def paint_bucketed_nfw_sparse_map(
     )
     scalar_dtype = theta.dtype
     particle_mass = jnp.asarray(particle_mass_msun_h, dtype=scalar_dtype)
-    pixel_area = jnp.asarray(pixel_area_sr, dtype=scalar_dtype)
     mass_pivot = jnp.asarray(concentration_mass_pivot, dtype=scalar_dtype)
-    truncation_width = jnp.asarray(truncation_width_fraction, dtype=scalar_dtype)
     overdensity = jnp.asarray(
         mass_definition.profile_overdensity,
         dtype=scalar_dtype,
     )
+    if sample_chunk_size <= 0:
+        raise ValueError("sample_chunk_size must be positive")
 
     if compute_map_derivatives:
         with timed_stage("NFW particle map + concentration JVPs", profile):
-            if stencil.size == 0:
-                particle_counts = jnp.zeros((stencil.n_pix,), dtype=scalar_dtype)
-                derivative_maps = jnp.zeros(
-                    (theta.shape[0], stencil.n_pix),
-                    dtype=scalar_dtype,
-                )
-            else:
-                particle_counts, derivative_maps = (
-                    paint_nfw_particle_count_map_and_concentration_jvps_jit(
-                        stencil,
-                        rank_catalog,
-                        theta,
-                        particle_mass,
-                        pixel_area,
-                        metadata.cosmology,
-                        mass_pivot,
-                        truncation_width,
-                        overdensity,
-                        overdensity_mode=mass_definition.profile_mode,
-                        reference_density=mass_definition.reference_density,
-                    )
-                )
-            jax.block_until_ready((particle_counts, derivative_maps))
-    else:
-        with timed_stage("NFW particle map", profile):
-            if stencil.size == 0:
-                particle_counts = jnp.zeros((stencil.n_pix,), dtype=scalar_dtype)
-            else:
-                particle_counts = paint_nfw_particle_count_map_sparse_jit(
+            result, derivative_maps, global_derivative_sums = (
+                paint_nfw_particle_count_map_and_concentration_jvps_jit(
                     stencil,
                     rank_catalog,
                     theta,
                     particle_mass,
-                    pixel_area,
                     metadata.cosmology,
                     mass_pivot,
-                    truncation_width,
                     overdensity,
                     overdensity_mode=mass_definition.profile_mode,
                     reference_density=mass_definition.reference_density,
+                    sample_chunk_size=sample_chunk_size,
                 )
-            particle_counts.block_until_ready()
+            )
+            jax.block_until_ready((result, derivative_maps, global_derivative_sums))
+    else:
+        with timed_stage("NFW particle map", profile):
+            result = paint_nfw_particle_count_map_sparse_jit(
+                stencil,
+                rank_catalog,
+                theta,
+                particle_mass,
+                metadata.cosmology,
+                mass_pivot,
+                overdensity,
+                overdensity_mode=mass_definition.profile_mode,
+                reference_density=mass_definition.reference_density,
+                sample_chunk_size=sample_chunk_size,
+            )
+            jax.block_until_ready(result)
 
+    invalid = np.asarray(result.invalid_normalization, dtype=bool)
+    if np.any(invalid):
+        halo_id = int(np.flatnonzero(invalid)[0])
+        sample_halo_id = np.asarray(stencil.sample_halo_id)
+        sample_valid = np.asarray(stencil.sample_valid, dtype=bool)
+        halo_samples = sample_valid & (sample_halo_id == halo_id)
+        sample_count = int(np.count_nonzero(halo_samples))
+        sample_areas = np.asarray(stencil.sample_solid_angle_sr)[halo_samples]
+        native_area = 4.0 * np.pi / (12 * native_nside**2)
+        branch = (
+            "native"
+            if sample_areas.size
+            and np.allclose(sample_areas, native_area, rtol=1.0e-12, atol=0.0)
+            else "supersampled"
+        )
+        query_nside = (
+            native_nside
+            if sample_areas.size == 0
+            else int(round(np.sqrt(np.pi / (3.0 * float(sample_areas[0])))))
+        )
+        mass = float(np.asarray(rank_catalog.mass)[halo_id])
+        redshift = float(np.asarray(rank_catalog.redshift)[halo_id])
+        chi = float(np.asarray(rank_catalog.chi)[halo_id])
+        r_delta = float(np.asarray(r_delta_rank_mpc_h)[halo_id])
+        theta_h = 2.0 * np.arcsin(min(1.0, r_delta / (2.0 * chi)))
+        concentration = concentration_amplitude * (
+            mass / concentration_mass_pivot
+        ) ** concentration_mass_slope * (1.0 + redshift) ** concentration_redshift_slope
+        normalization = float(np.asarray(result.halo_normalization_msun_h)[halo_id])
+        raise ValueError(
+            "invalid adaptive NFW normalization: "
+            f"rank-local halo={halo_id}, mass={mass:.12g} Msun/h, "
+            f"redshift={redshift:.12g}, chi={chi:.12g} Mpc/h, "
+            f"r_delta={r_delta:.12g} Mpc/h, theta_h={theta_h:.12g} rad, "
+            f"branch={branch}, query_nside={query_nside}, samples={sample_count}, "
+            f"concentration={concentration:.12g}, normalization={normalization:.12g}"
+        )
+
+    particle_counts = result.particle_counts
+    diagnostics: dict[str, float | int | str | np.ndarray] = {
+        "nfw_map_derivatives": "none",
+        "nfw_invalid_normalizations": int(np.count_nonzero(invalid)),
+        "nfw_assigned_global_particle_count": float(result.assigned_global_particle_count),
+        "nfw_retained_compact_particle_count": float(
+            result.retained_compact_particle_count
+        ),
+        "nfw_outside_compact_particle_count": float(result.outside_compact_particle_count),
+    }
     if not compute_map_derivatives:
-        return particle_counts, {"nfw_map_derivatives": "none"}
+        return particle_counts, diagnostics
 
     with timed_stage("NFW map concentration derivatives to numpy", profile):
         derivative_maps_np = np.asarray(derivative_maps)
-    return particle_counts, {
-        "nfw_map_derivatives": "concentration",
-        "d_nfw_particle_counts_d_concentration_amplitude": derivative_maps_np[0],
-        "d_nfw_particle_counts_d_concentration_mass_slope": derivative_maps_np[1],
-        "d_nfw_particle_counts_d_concentration_redshift_slope": derivative_maps_np[2],
-    }
+        global_derivative_sums_np = np.asarray(global_derivative_sums)
+    diagnostics.update(
+        {
+            "nfw_map_derivatives": "concentration",
+            "d_nfw_particle_counts_d_concentration_amplitude": derivative_maps_np[0],
+            "d_nfw_particle_counts_d_concentration_mass_slope": derivative_maps_np[1],
+            "d_nfw_particle_counts_d_concentration_redshift_slope": derivative_maps_np[2],
+            "nfw_global_derivative_sums": global_derivative_sums_np,
+            "nfw_compact_derivative_sums": np.sum(
+                derivative_maps_np,
+                axis=1,
+                dtype=np.float64,
+            ),
+        }
+    )
+    return particle_counts, diagnostics
 
 
 def run_nfw_calibration_pipeline(
@@ -1495,10 +1676,9 @@ def run_nfw_calibration_pipeline(
     concentration_mass_slope: float = -0.084,
     concentration_redshift_slope: float = -0.47,
     concentration_mass_pivot: float = 2.0e12,
-    truncation_width_fraction: float = 0.05,
-    chunk_size: int | None = 1024,
-    taper_radius_factor: float = 10.0,
-    dense_demo: bool = False,
+    theta_resolution_rad: float | None = None,
+    n_resolution: int = 4,
+    sample_chunk_size: int = 65536,
     compute_map_derivatives: bool = False,
     profile: bool = False,
     verbose: bool = True,
@@ -1520,12 +1700,8 @@ def run_nfw_calibration_pipeline(
         raise ValueError("concentration_amplitude must be positive")
     if concentration_mass_pivot <= 0.0:
         raise ValueError("concentration_mass_pivot must be positive")
-    if truncation_width_fraction <= 0.0:
-        raise ValueError("truncation_width_fraction must be positive")
-    if dense_demo and compute_map_derivatives:
-        raise ValueError("map-level concentration derivatives are only supported for sparse mode")
-    if chunk_size is not None and chunk_size <= 0:
-        chunk_size = None
+    if sample_chunk_size <= 0:
+        raise ValueError("sample_chunk_size must be positive")
     if profile and stencil_profile_recorder is None:
         stencil_profile_recorder = StencilProfileRecorder()
     if mass_definition is None:
@@ -1535,168 +1711,140 @@ def run_nfw_calibration_pipeline(
         selected_catalog = selected_lightcone_catalog(catalog, mask)
     selected_mass = np.asarray(selected_catalog.mass)
     selected_halo_mass_msun_h = float(np.sum(selected_mass, dtype=np.float64))
-    pixel_area_sr = healpix_pixel_area_sr(mass_map.nside)
-    n_halo = int(selected_catalog.mass.shape[0])
     n_pix = int(np.asarray(mass_map.pixel).shape[0])
-    dense_pair_count = n_halo * n_pix
-    pixel_unit_vectors = None
-
-    concentration_params = ConcentrationParams(
-        amplitude=concentration_amplitude,
-        mass_slope=concentration_mass_slope,
-        redshift_slope=concentration_redshift_slope,
-        mass_pivot=concentration_mass_pivot,
-    )
     profile_params = NFWProfileParams(
         overdensity=mass_definition.profile_overdensity,
         reference_density=mass_definition.reference_density,
-        truncation_width_fraction=truncation_width_fraction,
         overdensity_mode=mass_definition.profile_mode,
     )
-    stencil = None
-    bucketed_stencil = None
-    nfw_particle_counts = None
-    map_derivative_diagnostics: dict[str, float | str | np.ndarray] = {
-        "nfw_map_derivatives": "none"
-    }
-    sparse_pair_count = dense_pair_count
-    halos_with_zero_pairs = 0
-    mass_in_halos_with_zero_pairs_msun_h = 0.0
-    subpixel_support_halo_count = 0
-    if not dense_demo:
-        with timed_stage("NFW rmax", profile):
-            rmax = nfw_stencil_rmax_mpc_h(
-                selected_catalog,
-                metadata,
-                concentration_params,
-                profile_params,
-                taper_radius_factor,
-            )
-        with timed_stage("NFW local sparse stencil", profile):
-            stencil_result = build_lightcone_sparse_stencil_for_mass_map_local(
-                mass_map,
-                selected_catalog,
-                rmax,
-                collect_diagnostics=True,
-                pixel_index=pixel_index,
-                profile_phases=profile,
-            )
-        stencil, collected_stencil_diag = stencil_result
-        if stencil_profile_recorder is not None:
-            stencil_profile_recorder.diagnostics = collected_stencil_diag
-        subpixel_support_halo_count = collected_stencil_diag.n_subpixel_radius_halos
-        sparse_pair_count = int(stencil.size)
-        assert collected_stencil_diag.halo_has_kept_pair is not None
-        zero_pair_mask = ~collected_stencil_diag.halo_has_kept_pair
-        halos_with_zero_pairs = int(np.count_nonzero(zero_pair_mask))
-        mass_in_halos_with_zero_pairs_msun_h = float(
-            np.sum(selected_mass[zero_pair_mask], dtype=np.float64)
+    assignment_params = AngularAssignmentParams(theta_resolution_rad, n_resolution)
+    resolved_assignment = resolve_angular_assignment(mass_map.nside, assignment_params)
+    with timed_stage("NFW hard support radii", profile):
+        r_delta = nfw_support_rdelta_mpc_h(selected_catalog, metadata, profile_params)
+    with timed_stage("NFW adaptive global stencil", profile):
+        stencil, collected_stencil_diag = build_adaptive_lightcone_stencil_for_mass_map(
+            mass_map,
+            selected_catalog,
+            r_delta,
+            assignment_params,
+            collect_diagnostics=True,
+            pixel_index=pixel_index,
+            profile_phases=profile,
         )
-        with timed_stage("NFW sparse JIT bucket", profile):
-            bucketed_stencil = bucket_sparse_stencil_for_rank_catalog(
-                stencil,
-                mask,
-                int(catalog.mass.shape[0]),
-                profile_diagnostics=(
-                    None
-                    if stencil_profile_recorder is None
-                    else stencil_profile_recorder.diagnostics
-                ),
-            )
-        if (
-            verbose
-            and stencil_profile_recorder is not None
-            and stencil_profile_recorder.diagnostics is not None
-        ):
-            print_stencil_profile(stencil_profile_recorder.diagnostics)
-        if verbose:
-            print("NFW sparse stencil:")
-            print(f"  Selected halos: {n_halo}")
-            print(f"  Compact pixels: {n_pix}")
-            print(f"  Sparse halo-pixel pairs: {sparse_pair_count}")
-            print(f"  Dense pair count: {dense_pair_count}")
-            print(
-                "  Sparse compression factor: "
-                f"{_compression_factor(dense_pair_count, sparse_pair_count):.12g}"
-            )
-    else:
-        with timed_stage("NFW dense pixel vectors", profile):
-            pixel_unit_vectors = jnp.asarray(
-                healpix_pixel_unit_vectors(mass_map.nside, np.asarray(mass_map.pixel), nest=False)
-            )
+    if stencil_profile_recorder is not None:
+        stencil_profile_recorder.diagnostics = collected_stencil_diag
+    with timed_stage("NFW adaptive JIT bucket", profile):
+        bucketed_stencil = bucket_adaptive_stencil_for_rank_catalog(
+            stencil,
+            mask,
+            int(catalog.mass.shape[0]),
+            profile_diagnostics=collected_stencil_diag if profile else None,
+        )
+    if verbose and profile:
+        print_stencil_profile(collected_stencil_diag)
 
-    if dense_demo:
-        with timed_stage("NFW particle map", profile):
-            assert pixel_unit_vectors is not None
-            nfw_particle_counts = paint_lightcone_particle_count_map(
-                pixel_unit_vectors,
-                selected_catalog,
-                particle_mass_msun_h=particle_mass_msun_h,
-                pixel_area_sr=pixel_area_sr,
-                cosmology=metadata.cosmology,
-                concentration_params=concentration_params,
-                profile_params=profile_params,
-                chunk_size=chunk_size,
-            )
-            nfw_particle_counts.block_until_ready()
-    else:
-        assert bucketed_stencil is not None
-        nfw_particle_counts, map_derivative_diagnostics = paint_bucketed_nfw_sparse_map(
-            bucketed_stencil,
-            catalog,
-            metadata,
-            particle_mass_msun_h,
-            pixel_area_sr,
-            concentration_amplitude,
-            concentration_mass_slope,
-            concentration_redshift_slope,
-            concentration_mass_pivot,
-            truncation_width_fraction,
-            mass_definition,
-            compute_map_derivatives=compute_map_derivatives,
-            profile=profile,
-        )
+    r_delta_rank = np.zeros(int(catalog.mass.shape[0]), dtype=np.float64)
+    r_delta_rank[np.asarray(mask, dtype=bool)] = r_delta
+    nfw_particle_counts, map_derivative_diagnostics = paint_bucketed_nfw_sparse_map(
+        bucketed_stencil,
+        catalog,
+        metadata,
+        particle_mass_msun_h,
+        concentration_amplitude,
+        concentration_mass_slope,
+        concentration_redshift_slope,
+        concentration_mass_pivot,
+        sample_chunk_size,
+        r_delta_rank,
+        mass_map.nside,
+        mass_definition,
+        compute_map_derivatives=compute_map_derivatives,
+        profile=profile,
+    )
 
     total_counts = jnp.sum(nfw_particle_counts)
 
     with timed_stage("NFW particle map to numpy", profile):
         nfw_particle_counts_np = np.asarray(nfw_particle_counts)
 
-    painted_particle_count = float(total_counts)
     expected_particle_count = selected_halo_mass_msun_h / particle_mass_msun_h
-    painted_to_expected_ratio = (
-        painted_particle_count / expected_particle_count
-        if expected_particle_count > 0.0
-        else float("nan")
+    assigned_global_particle_count = float(
+        map_derivative_diagnostics["nfw_assigned_global_particle_count"]
     )
+    retained_compact_particle_count = float(
+        map_derivative_diagnostics["nfw_retained_compact_particle_count"]
+    )
+    outside_compact_particle_count = float(
+        map_derivative_diagnostics["nfw_outside_compact_particle_count"]
+    )
+    assigned_to_expected_ratio = (
+        assigned_global_particle_count / expected_particle_count
+        if expected_particle_count > 0.0
+        else 1.0
+    )
+    rtol = 5.0e-5 if nfw_particle_counts_np.dtype == np.float32 else 1.0e-10
+    if not np.isclose(
+        assigned_global_particle_count,
+        expected_particle_count,
+        rtol=rtol,
+        atol=rtol,
+    ):
+        raise RuntimeError(
+            "adaptive NFW assignment did not conserve global particle count: "
+            f"assigned={assigned_global_particle_count:.12g}, "
+            f"expected={expected_particle_count:.12g}"
+        )
+    if not np.isclose(
+        assigned_global_particle_count,
+        retained_compact_particle_count + outside_compact_particle_count,
+        rtol=rtol,
+        atol=rtol,
+    ):
+        raise RuntimeError("retained and outside particle counts do not sum to global count")
+    if not np.isclose(
+        float(total_counts),
+        retained_compact_particle_count,
+        rtol=rtol,
+        atol=rtol,
+    ):
+        raise RuntimeError("compact map sum does not match retained particle-count diagnostic")
 
     diagnostics: dict[str, bool | float | int | str | np.ndarray] = {
         "pipeline_mode": pipeline_mode,
         "particle_mass_msun_h": float(particle_mass_msun_h),
         "nfw_particle_counts": nfw_particle_counts_np,
-        "nfw_paint_mode": "dense" if dense_demo else "sparse",
+        "nfw_paint_mode": "adaptive_global_support",
         "nfw_selected_halo_count": int(selected_catalog.mass.shape[0]),
         "nfw_selected_halo_mass_msun_h": selected_halo_mass_msun_h,
-        "nfw_expected_particle_count": expected_particle_count,
-        "nfw_painted_particle_count": painted_particle_count,
-        "nfw_painted_to_expected_ratio": painted_to_expected_ratio,
-        "nfw_halos_with_zero_pairs": halos_with_zero_pairs,
-        "nfw_mass_in_halos_with_zero_pairs_msun_h": (
-            mass_in_halos_with_zero_pairs_msun_h
-        ),
-        "nfw_subpixel_support_halo_count": subpixel_support_halo_count,
+        "nfw_expected_global_particle_count": expected_particle_count,
+        "nfw_assigned_global_particle_count": assigned_global_particle_count,
+        "nfw_assigned_to_expected_ratio": assigned_to_expected_ratio,
+        "nfw_retained_compact_particle_count": retained_compact_particle_count,
+        "nfw_outside_compact_particle_count": outside_compact_particle_count,
         "nfw_compact_pixel_count": n_pix,
-        "nfw_sparse_pair_count": sparse_pair_count,
-        "nfw_dense_pair_count": dense_pair_count,
-        "nfw_sparse_compression_factor": _compression_factor(
-            dense_pair_count, sparse_pair_count
+        "nfw_global_profile_sample_count": collected_stencil_diag.n_global_profile_samples,
+        "nfw_retained_profile_sample_count": collected_stencil_diag.n_retained_profile_samples,
+        "nfw_unresolved_ngp_count": collected_stencil_diag.n_unresolved_ngp,
+        "nfw_native_resolved_count": collected_stencil_diag.n_native_resolved,
+        "nfw_supersampled_count": collected_stencil_diag.n_supersampled,
+        "nfw_zero_sample_ngp_fallback_count": (
+            collected_stencil_diag.n_zero_sample_ngp_fallbacks
         ),
+        "nfw_max_requested_supersampling_level": (
+            collected_stencil_diag.max_requested_supersampling_level
+        ),
+        "nfw_max_used_supersampling_level": collected_stencil_diag.max_used_supersampling_level,
+        "nfw_theta_resolution_rad": resolved_assignment.theta_resolution_rad,
+        "nfw_theta_resolution_source": resolved_assignment.theta_resolution_source,
+        "nfw_n_resolution": resolved_assignment.n_resolution,
+        "nfw_theta_map_rad": resolved_assignment.theta_map_rad,
+        "nfw_sample_chunk_size": int(sample_chunk_size),
         "nfw_sum_particle_counts": float(total_counts),
         "nfw_concentration_amplitude": float(concentration_amplitude),
         "nfw_concentration_mass_slope": float(concentration_mass_slope),
         "nfw_concentration_redshift_slope": float(concentration_redshift_slope),
         "nfw_concentration_mass_pivot": float(concentration_mass_pivot),
-        "nfw_truncation_width_fraction": float(truncation_width_fraction),
+        "nfw_profile_support": "hard_3d_r_delta_los_projection",
         "nfw_mass_definition": mass_definition.label,
         "nfw_overdensity_mode": mass_definition.mode,
         "nfw_overdensity": (
@@ -1776,17 +1924,28 @@ def write_manifest(path: Path, rows: list[dict[str, object]]) -> None:
         "nfw_concentration_mass_slope",
         "nfw_concentration_redshift_slope",
         "nfw_concentration_mass_pivot_msun_h",
-        "nfw_truncation_width_fraction",
-        "nfw_taper_radius_factor",
+        "nfw_profile_support",
+        "theta_resolution_rad",
+        "theta_resolution_source",
+        "n_resolution",
+        "theta_map_rad",
+        "sample_chunk_size",
         "selected_halo_count",
         "selected_halo_mass_msun_h",
-        "expected_particle_count",
-        "painted_particle_count",
-        "painted_to_expected_ratio",
-        "sparse_pair_count",
-        "halos_with_zero_pairs",
-        "mass_in_halos_with_zero_pairs_msun_h",
-        "subpixel_support_halo_count",
+        "expected_global_particle_count",
+        "assigned_global_particle_count",
+        "assigned_to_expected_ratio",
+        "retained_compact_particle_count",
+        "outside_compact_particle_count",
+        "unresolved_ngp_count",
+        "native_resolved_count",
+        "supersampled_count",
+        "zero_sample_ngp_fallback_count",
+        "invalid_normalization_count",
+        "global_profile_sample_count",
+        "retained_profile_sample_count",
+        "max_requested_supersampling_level",
+        "max_used_supersampling_level",
         "mpi_rank_count",
         "segment_worker_count",
         "git_commit",
@@ -1841,28 +2000,30 @@ def print_nfw_calibration_summary(
         f"{nfw_diagnostics['nfw_selected_halo_mass_msun_h']:.12g} Msun/h"
     )
     print(f"  Compact pixels: {nfw_diagnostics['nfw_compact_pixel_count']}")
-    print(f"  Sparse halo-pixel pairs: {nfw_diagnostics['nfw_sparse_pair_count']}")
-    print(f"  Dense pair count: {nfw_diagnostics['nfw_dense_pair_count']}")
+    print(f"  Global profile samples: {nfw_diagnostics['nfw_global_profile_sample_count']}")
+    print(f"  Retained profile samples: {nfw_diagnostics['nfw_retained_profile_sample_count']}")
     print(
-        "  Sparse compression factor: "
-        f"{nfw_diagnostics['nfw_sparse_compression_factor']:.12g}"
-    )
-    print(f"  NFW sum particle counts: {nfw_diagnostics['nfw_sum_particle_counts']:.12g}")
-    print(
-        "  Painted / expected particle count: "
-        f"{nfw_diagnostics['nfw_painted_to_expected_ratio']:.12g}"
-    )
-    print(f"  Halos with zero pairs: {nfw_diagnostics['nfw_halos_with_zero_pairs']}")
-    print(
-        "  Mass in zero-pair halos: "
-        f"{nfw_diagnostics['nfw_mass_in_halos_with_zero_pairs_msun_h']:.12g} Msun/h"
+        "  Assigned global / expected particle count: "
+        f"{nfw_diagnostics['nfw_assigned_to_expected_ratio']:.12g}"
     )
     print(
-        "  Subpixel-support halos: "
-        f"{nfw_diagnostics['nfw_subpixel_support_halo_count']}"
+        "  Retained / outside compact particle count: "
+        f"{nfw_diagnostics['nfw_retained_compact_particle_count']:.12g} / "
+        f"{nfw_diagnostics['nfw_outside_compact_particle_count']:.12g}"
+    )
+    print(
+        "  Assignment branches (NGP/native/supersampled/fallback): "
+        f"{nfw_diagnostics['nfw_unresolved_ngp_count']} / "
+        f"{nfw_diagnostics['nfw_native_resolved_count']} / "
+        f"{nfw_diagnostics['nfw_supersampled_count']} / "
+        f"{nfw_diagnostics['nfw_zero_sample_ngp_fallback_count']}"
     )
     if nfw_diagnostics.get("nfw_map_derivatives", "none") == "concentration":
         print("  Map derivatives: concentration")
+        print(
+            "  Global derivative sums: "
+            f"{np.asarray(nfw_diagnostics['nfw_global_derivative_sums'])}"
+        )
 
 
 def compute_calibration_for_segment(
@@ -1921,10 +2082,9 @@ def compute_calibration_for_segment(
             concentration_mass_slope=args.concentration_mass_slope,
             concentration_redshift_slope=args.concentration_redshift_slope,
             concentration_mass_pivot=args.concentration_mass_pivot,
-            truncation_width_fraction=args.truncation_width_fraction,
-            chunk_size=args.nfw_chunk_size,
-            taper_radius_factor=args.nfw_taper_radius_factor,
-            dense_demo=args.nfw_dense_demo,
+            theta_resolution_rad=args.theta_resolution_rad,
+            n_resolution=args.n_resolution,
+            sample_chunk_size=args.nfw_sample_chunk_size,
             compute_map_derivatives=compute_map_derivatives,
             profile=stage_profile,
             verbose=verbose,
@@ -1997,24 +2157,53 @@ def calibration_manifest_row(
         "nfw_concentration_mass_slope": float(args.concentration_mass_slope),
         "nfw_concentration_redshift_slope": float(args.concentration_redshift_slope),
         "nfw_concentration_mass_pivot_msun_h": float(args.concentration_mass_pivot),
-        "nfw_truncation_width_fraction": float(args.truncation_width_fraction),
-        "nfw_taper_radius_factor": float(args.nfw_taper_radius_factor),
+        "nfw_profile_support": str(nfw_diagnostics["nfw_profile_support"]),
+        "theta_resolution_rad": float(nfw_diagnostics["nfw_theta_resolution_rad"]),
+        "theta_resolution_source": str(
+            nfw_diagnostics["nfw_theta_resolution_source"]
+        ),
+        "n_resolution": int(nfw_diagnostics["nfw_n_resolution"]),
+        "theta_map_rad": float(nfw_diagnostics["nfw_theta_map_rad"]),
+        "sample_chunk_size": int(nfw_diagnostics["nfw_sample_chunk_size"]),
         "selected_halo_count": int(nfw_diagnostics["nfw_selected_halo_count"]),
         "selected_halo_mass_msun_h": float(
             nfw_diagnostics["nfw_selected_halo_mass_msun_h"]
         ),
-        "expected_particle_count": float(nfw_diagnostics["nfw_expected_particle_count"]),
-        "painted_particle_count": float(nfw_diagnostics["nfw_painted_particle_count"]),
-        "painted_to_expected_ratio": float(
-            nfw_diagnostics["nfw_painted_to_expected_ratio"]
+        "expected_global_particle_count": float(
+            nfw_diagnostics["nfw_expected_global_particle_count"]
         ),
-        "sparse_pair_count": int(nfw_diagnostics["nfw_sparse_pair_count"]),
-        "halos_with_zero_pairs": int(nfw_diagnostics["nfw_halos_with_zero_pairs"]),
-        "mass_in_halos_with_zero_pairs_msun_h": float(
-            nfw_diagnostics["nfw_mass_in_halos_with_zero_pairs_msun_h"]
+        "assigned_global_particle_count": float(
+            nfw_diagnostics["nfw_assigned_global_particle_count"]
         ),
-        "subpixel_support_halo_count": int(
-            nfw_diagnostics["nfw_subpixel_support_halo_count"]
+        "assigned_to_expected_ratio": float(
+            nfw_diagnostics["nfw_assigned_to_expected_ratio"]
+        ),
+        "retained_compact_particle_count": float(
+            nfw_diagnostics["nfw_retained_compact_particle_count"]
+        ),
+        "outside_compact_particle_count": float(
+            nfw_diagnostics["nfw_outside_compact_particle_count"]
+        ),
+        "unresolved_ngp_count": int(nfw_diagnostics["nfw_unresolved_ngp_count"]),
+        "native_resolved_count": int(nfw_diagnostics["nfw_native_resolved_count"]),
+        "supersampled_count": int(nfw_diagnostics["nfw_supersampled_count"]),
+        "zero_sample_ngp_fallback_count": int(
+            nfw_diagnostics["nfw_zero_sample_ngp_fallback_count"]
+        ),
+        "invalid_normalization_count": int(
+            nfw_diagnostics["nfw_invalid_normalizations"]
+        ),
+        "global_profile_sample_count": int(
+            nfw_diagnostics["nfw_global_profile_sample_count"]
+        ),
+        "retained_profile_sample_count": int(
+            nfw_diagnostics["nfw_retained_profile_sample_count"]
+        ),
+        "max_requested_supersampling_level": int(
+            nfw_diagnostics["nfw_max_requested_supersampling_level"]
+        ),
+        "max_used_supersampling_level": int(
+            nfw_diagnostics["nfw_max_used_supersampling_level"]
         ),
         "mpi_rank_count": provenance.mpi_rank_count,
         "segment_worker_count": provenance.segment_worker_count,
@@ -2114,6 +2303,27 @@ def _mpi_reduce_array(
     return receive_buffer
 
 
+def _mpi_reduce_max_array(
+    value: np.ndarray,
+    mpi_context: MpiContext,
+) -> np.ndarray | None:
+    """Reduce one numeric array by maximum onto rank 0."""
+
+    send_buffer = np.ascontiguousarray(value)
+    if not mpi_context.enabled:
+        return send_buffer
+    if mpi_context.comm is None:
+        raise RuntimeError("MPI context is enabled but has no communicator")
+    receive_buffer = np.empty_like(send_buffer) if mpi_context.is_root else None
+    mpi_context.comm.Reduce(
+        send_buffer,
+        receive_buffer,
+        op=mpi_context.max_op,
+        root=0,
+    )
+    return receive_buffer
+
+
 def gather_segment_execution_timings(
     timing: SegmentExecutionTiming,
     mpi_context: MpiContext,
@@ -2144,8 +2354,8 @@ def print_rank_timing_summary(label: str, rank_timings: np.ndarray) -> None:
     """Print root-only min/mean/max rank timings for one segment or run."""
 
     rank_timings = np.asarray(rank_timings, dtype=np.float64)
-    if rank_timings.ndim != 2 or rank_timings.shape[1] != 14:
-        raise ValueError("rank timings must have shape (n_rank, 14)")
+    if rank_timings.ndim != 2 or rank_timings.shape[1] != 19:
+        raise ValueError("rank timings must have shape (n_rank, 19)")
     print(
         f"[profile] {label} rank min/mean/max (s): "
         f"compute {_timing_min_mean_max(rank_timings[:, 0])}; "
@@ -2169,11 +2379,15 @@ def print_rank_timing_summary(label: str, rank_timings: np.ndarray) -> None:
         f"JAX transfer {_timing_min_mean_max(rank_timings[:, 8])}; "
         f"residual {_timing_min_mean_max(residual)}"
     )
-    counts = np.rint(np.sum(rank_timings[:, 9:14], axis=0)).astype(np.int64)
+    counts = np.rint(np.sum(rank_timings[:, 9:17], axis=0)).astype(np.int64)
+    max_levels = np.rint(np.max(rank_timings[:, 17:19], axis=0)).astype(np.int64)
     print(
         f"[profile] {label} stencil counts (rank sum): "
-        f"halos {counts[0]}; queried {counts[1]}; inside {counts[2]}; "
-        f"kept {counts[3]}; sub-pixel radii {counts[4]}"
+        f"halos {counts[0]}; NGP {counts[1]}; native {counts[2]}; "
+        f"supersampled {counts[3]}; fallbacks {counts[4]}; "
+        f"queried {counts[5]}; global samples {counts[6]}; "
+        f"retained samples {counts[7]}; "
+        f"max requested/used level {max_levels[0]}/{max_levels[1]}"
     )
 
 
@@ -2204,13 +2418,32 @@ def reduce_calibration_segment_result(
         for key in derivative_array_keys
         if key in local_result.nfw_diagnostics
     }
+    reduced_global_derivative_sums = (
+        _mpi_reduce_array(
+            np.asarray(local_result.nfw_diagnostics["nfw_global_derivative_sums"]),
+            mpi_context,
+        )
+        if "nfw_global_derivative_sums" in local_result.nfw_diagnostics
+        else None
+    )
+    reduced_compact_derivative_sums = (
+        _mpi_reduce_array(
+            np.asarray(local_result.nfw_diagnostics["nfw_compact_derivative_sums"]),
+            mpi_context,
+        )
+        if "nfw_compact_derivative_sums" in local_result.nfw_diagnostics
+        else None
+    )
 
     nfw_integer_sum_keys = (
         "nfw_selected_halo_count",
-        "nfw_sparse_pair_count",
-        "nfw_dense_pair_count",
-        "nfw_halos_with_zero_pairs",
-        "nfw_subpixel_support_halo_count",
+        "nfw_global_profile_sample_count",
+        "nfw_retained_profile_sample_count",
+        "nfw_unresolved_ngp_count",
+        "nfw_native_resolved_count",
+        "nfw_supersampled_count",
+        "nfw_zero_sample_ngp_fallback_count",
+        "nfw_invalid_normalizations",
     )
     present_nfw_keys = tuple(
         key for key in nfw_integer_sum_keys if key in local_result.nfw_diagnostics
@@ -2223,7 +2456,10 @@ def reduce_calibration_segment_result(
 
     nfw_float_sum_keys = (
         "nfw_selected_halo_mass_msun_h",
-        "nfw_mass_in_halos_with_zero_pairs_msun_h",
+        "nfw_expected_global_particle_count",
+        "nfw_assigned_global_particle_count",
+        "nfw_retained_compact_particle_count",
+        "nfw_outside_compact_particle_count",
     )
     present_nfw_float_keys = tuple(
         key for key in nfw_float_sum_keys if key in local_result.nfw_diagnostics
@@ -2233,6 +2469,15 @@ def reduce_calibration_segment_result(
         dtype=np.float64,
     )
     reduced_float_diagnostics = _mpi_reduce_array(float_diagnostics, mpi_context)
+    max_keys = (
+        "nfw_max_requested_supersampling_level",
+        "nfw_max_used_supersampling_level",
+    )
+    max_diagnostics = np.asarray(
+        [local_result.nfw_diagnostics[key] for key in max_keys],
+        dtype=np.int64,
+    )
+    reduced_max_diagnostics = _mpi_reduce_max_array(max_diagnostics, mpi_context)
 
     if not mpi_context.is_root:
         return None
@@ -2240,12 +2485,21 @@ def reduce_calibration_segment_result(
     assert reduced_nfw_counts is not None
     assert reduced_integer_diagnostics is not None
     assert reduced_float_diagnostics is not None
+    assert reduced_max_diagnostics is not None
 
     nfw_diagnostics = dict(local_result.nfw_diagnostics)
     nfw_diagnostics["nfw_particle_counts"] = np.asarray(reduced_nfw_counts)
     for key, value in reduced_derivative_arrays.items():
         assert value is not None
         nfw_diagnostics[key] = np.asarray(value)
+    if reduced_global_derivative_sums is not None:
+        nfw_diagnostics["nfw_global_derivative_sums"] = np.asarray(
+            reduced_global_derivative_sums
+        )
+    if reduced_compact_derivative_sums is not None:
+        nfw_diagnostics["nfw_compact_derivative_sums"] = np.asarray(
+            reduced_compact_derivative_sums
+        )
     for key, value in zip(
         present_nfw_keys,
         reduced_integer_diagnostics,
@@ -2258,25 +2512,23 @@ def reduce_calibration_segment_result(
         strict=True,
     ):
         nfw_diagnostics[key] = float(value)
-    painted_particle_count = float(
+    for key, value in zip(max_keys, reduced_max_diagnostics, strict=True):
+        nfw_diagnostics[key] = int(value)
+    retained_particle_count = float(
         np.sum(nfw_diagnostics["nfw_particle_counts"], dtype=np.float64)
     )
-    nfw_diagnostics["nfw_sum_particle_counts"] = painted_particle_count
-    nfw_diagnostics["nfw_painted_particle_count"] = painted_particle_count
-    if "nfw_selected_halo_mass_msun_h" in nfw_diagnostics:
-        particle_mass = float(nfw_diagnostics["particle_mass_msun_h"])
-        expected_particle_count = (
-            float(nfw_diagnostics["nfw_selected_halo_mass_msun_h"]) / particle_mass
-        )
-        nfw_diagnostics["nfw_expected_particle_count"] = expected_particle_count
-        nfw_diagnostics["nfw_painted_to_expected_ratio"] = (
-            painted_particle_count / expected_particle_count
-            if expected_particle_count > 0.0
-            else float("nan")
-        )
-    nfw_diagnostics["nfw_sparse_compression_factor"] = _compression_factor(
-        int(nfw_diagnostics["nfw_dense_pair_count"]),
-        int(nfw_diagnostics["nfw_sparse_pair_count"]),
+    nfw_diagnostics["nfw_sum_particle_counts"] = retained_particle_count
+    nfw_diagnostics["nfw_retained_compact_particle_count"] = retained_particle_count
+    expected_particle_count = float(
+        nfw_diagnostics["nfw_expected_global_particle_count"]
+    )
+    assigned_particle_count = float(
+        nfw_diagnostics["nfw_assigned_global_particle_count"]
+    )
+    nfw_diagnostics["nfw_assigned_to_expected_ratio"] = (
+        assigned_particle_count / expected_particle_count
+        if expected_particle_count > 0.0
+        else 1.0
     )
     return CalibrationSegmentResult(
         segment_index=local_result.segment_index,
@@ -2547,8 +2799,10 @@ def main() -> None:
             raise ValueError("--concentration-amplitude must be positive")
         if args.concentration_mass_pivot <= 0.0:
             raise ValueError("--concentration-mass-pivot must be positive")
-        if args.truncation_width_fraction <= 0.0:
-            raise ValueError("--truncation-width-fraction must be positive")
+        if args.n_resolution < 1:
+            raise ValueError("--n-resolution must be at least 1")
+        if args.nfw_sample_chunk_size <= 0:
+            raise ValueError("--nfw-sample-chunk-size must be positive")
 
         with timed_stage("read sheets", profile):
             sheets = read_pinocchio_mass_sheets(args.sheets)

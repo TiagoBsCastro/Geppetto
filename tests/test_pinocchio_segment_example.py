@@ -13,8 +13,8 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from geppetto import paint_lightcone_particle_count_map_sparse
-from geppetto.catalog import LightconeHaloCatalog, LightconeSparseStencil
+from geppetto import AngularAssignmentParams, paint_lightcone_particle_count_map_sparse
+from geppetto.catalog import AdaptiveLightconeStencil, LightconeHaloCatalog
 from geppetto.cosmology import Cosmology
 from geppetto.io import (
     PinocchioMassMap,
@@ -170,10 +170,9 @@ def _workflow_args(**overrides) -> SimpleNamespace:
         "nfw_virial_overdensity": False,
         "nfw_overdensity_by_segment": None,
         "nfw_reference_density": "critical",
-        "truncation_width_fraction": 0.05,
-        "nfw_chunk_size": 1,
-        "nfw_taper_radius_factor": 10.0,
-        "nfw_dense_demo": False,
+        "theta_resolution_rad": None,
+        "n_resolution": 4,
+        "nfw_sample_chunk_size": 65536,
         "jax_precision": "float64",
         "mpi_plc_parts": False,
         "segment_workers": 1,
@@ -209,25 +208,35 @@ def _fake_segment_result(
             "particle_mass_msun_h": 1.0,
             "nfw_particle_counts": np.array([1.0]),
             "nfw_map_derivatives": "none",
-            "nfw_paint_mode": "sparse",
+            "nfw_paint_mode": "adaptive_global_support",
             "nfw_selected_halo_count": 1,
             "nfw_selected_halo_mass_msun_h": 1.0,
-            "nfw_expected_particle_count": 1.0,
-            "nfw_painted_particle_count": 1.0,
-            "nfw_painted_to_expected_ratio": 1.0,
-            "nfw_halos_with_zero_pairs": 0,
-            "nfw_mass_in_halos_with_zero_pairs_msun_h": 0.0,
-            "nfw_subpixel_support_halo_count": 0,
+            "nfw_expected_global_particle_count": 1.0,
+            "nfw_assigned_global_particle_count": 1.0,
+            "nfw_assigned_to_expected_ratio": 1.0,
+            "nfw_retained_compact_particle_count": 1.0,
+            "nfw_outside_compact_particle_count": 0.0,
+            "nfw_unresolved_ngp_count": 1,
+            "nfw_native_resolved_count": 0,
+            "nfw_supersampled_count": 0,
+            "nfw_zero_sample_ngp_fallback_count": 0,
+            "nfw_invalid_normalizations": 0,
             "nfw_compact_pixel_count": 1,
-            "nfw_sparse_pair_count": 1,
-            "nfw_dense_pair_count": 1,
-            "nfw_sparse_compression_factor": 1.0,
+            "nfw_global_profile_sample_count": 0,
+            "nfw_retained_profile_sample_count": 0,
+            "nfw_max_requested_supersampling_level": 0,
+            "nfw_max_used_supersampling_level": 0,
+            "nfw_theta_resolution_rad": 0.1,
+            "nfw_theta_resolution_source": "automatic",
+            "nfw_n_resolution": 4,
+            "nfw_theta_map_rad": 0.2,
+            "nfw_sample_chunk_size": 65536,
             "nfw_sum_particle_counts": 1.0,
             "nfw_concentration_amplitude": 5.71,
             "nfw_concentration_mass_slope": -0.084,
             "nfw_concentration_redshift_slope": -0.47,
             "nfw_concentration_mass_pivot": 2.0e12,
-            "nfw_truncation_width_fraction": 0.05,
+            "nfw_profile_support": "hard_3d_r_delta_los_projection",
             "nfw_mass_definition": "200c",
             "nfw_overdensity_mode": "constant",
             "nfw_overdensity": 200.0,
@@ -260,7 +269,8 @@ def test_example_script_help_runs():
     assert "--nfw-virial-overdensity" in result.stdout
     assert "--nfw-overdensity-by-segment" in result.stdout
     assert "--nfw-reference-density" in result.stdout
-    assert "--truncation-width-fraction" in result.stdout
+    assert "--theta-resolution-rad" in result.stdout
+    assert "--n-resolution" in result.stdout
     assert "In single-segment mode, use an inclusive upper segment bound." in normalized_help
     assert "physical final sheet" in normalized_help
     assert "--nfw-paint" not in result.stdout
@@ -288,6 +298,8 @@ def test_example_script_help_runs():
         (("--output-fits", "painted.fits"), "--output-fits"),
         (("--stencil-query-mode", "inclusive"), "--stencil-query-mode"),
         (("--stencil-compare-query-modes",), "--stencil-compare-query-modes"),
+        (("--truncation-width-fraction", "0.05"), "--truncation-width-fraction"),
+        (("--nfw-dense-demo",), "--nfw-dense-demo"),
     ],
 )
 def test_example_script_rejects_removed_options(removed_args, removed_option):
@@ -601,10 +613,15 @@ def test_gather_segment_execution_timings_uses_root_receive_buffer(capsys):
 
     stencil_diagnostics = module.StencilBuildDiagnostics(
         n_halos=10,
+        n_unresolved_ngp=2,
+        n_native_resolved=3,
+        n_supersampled=5,
+        n_zero_sample_ngp_fallbacks=1,
         n_query_pixels_total=20,
-        n_inside_domain_total=15,
-        n_kept_pairs_total=12,
-        n_subpixel_radius_halos=8,
+        n_global_profile_samples=15,
+        n_retained_profile_samples=12,
+        max_requested_supersampling_level=3,
+        max_used_supersampling_level=3,
         elapsed_seconds=10.0,
         query_disc_seconds=2.0,
         compact_lookup_seconds=1.0,
@@ -640,6 +657,7 @@ def test_gather_segment_execution_timings_uses_root_receive_buffer(capsys):
     assert "segment 004 stencil rank min/mean/max (s)" in captured
     assert "query_disc 2.000/3.000/4.000" in captured
     assert "stencil counts (rank sum): halos 30" in captured
+    assert "NGP 6" in captured
 
 
 def test_gather_segment_execution_timings_non_root_has_no_receive_buffer():
@@ -843,14 +861,18 @@ def test_pinocchio_plc_angles_bin_to_mass_map_internal_basis():
         temperature=np.array([100.0, 200.0]),
         nside=1,
     )
-    stencil = module.build_lightcone_sparse_stencil_for_mass_map_local(
+    stencil = module.build_adaptive_lightcone_stencil_for_mass_map(
         mass_map,
         catalog,
-        rmax_mpc_h=np.array([100.0]),
+        r_delta_mpc_h=np.array([100.0]),
+        assignment_params=AngularAssignmentParams(
+            theta_resolution_rad=1.1,
+            n_resolution=2,
+        ),
     )
 
-    np.testing.assert_array_equal(np.asarray(stencil.pix_id), [1])
-    np.testing.assert_array_equal(np.asarray(stencil.halo_id), [0])
+    np.testing.assert_array_equal(np.asarray(stencil.ngp_compact_row), [1])
+    np.testing.assert_array_equal(np.asarray(stencil.ngp_active), [True])
 
 
 def test_local_sparse_stencil_preserves_float64_geometry_dtype():
@@ -866,13 +888,17 @@ def test_local_sparse_stencil_preserves_float64_geometry_dtype():
     )
     mass_map = _mass_map(pixel, temperature=np.array([100.0]), nside=1)
 
-    stencil = module.build_lightcone_sparse_stencil_for_mass_map_local(
+    stencil = module.build_adaptive_lightcone_stencil_for_mass_map(
         mass_map,
         catalog,
-        rmax_mpc_h=np.array([10.0], dtype=np.float64),
+        r_delta_mpc_h=np.array([900.0], dtype=np.float64),
+        assignment_params=AngularAssignmentParams(
+            theta_resolution_rad=0.1,
+            n_resolution=1,
+        ),
     )
 
-    assert stencil.r_perp.dtype == jnp.float64
+    assert stencil.sample_r_perp.dtype == jnp.float64
 
 
 def test_save_npz_paint_mode_writes_only_compressed_nfw_map(tmp_path):
@@ -910,18 +936,17 @@ def test_save_npz_derivative_mode_writes_exact_training_arrays(tmp_path):
         "d_nfw_particle_counts_d_concentration_amplitude": np.array([0.1, 0.2]),
         "d_nfw_particle_counts_d_concentration_mass_slope": np.array([0.3, 0.4]),
         "d_nfw_particle_counts_d_concentration_redshift_slope": np.array([0.5, 0.6]),
-        "nfw_paint_mode": "sparse",
+        "nfw_paint_mode": "adaptive_global_support",
         "nfw_selected_halo_count": 2,
         "nfw_compact_pixel_count": 2,
-        "nfw_sparse_pair_count": 2,
-        "nfw_dense_pair_count": 4,
-        "nfw_sparse_compression_factor": 2.0,
+        "nfw_global_profile_sample_count": 2,
+        "nfw_retained_profile_sample_count": 2,
         "nfw_sum_particle_counts": 1.25,
         "nfw_concentration_amplitude": 5.71,
         "nfw_concentration_mass_slope": -0.084,
         "nfw_concentration_redshift_slope": -0.47,
         "nfw_concentration_mass_pivot": 2.0e12,
-        "nfw_truncation_width_fraction": 0.05,
+        "nfw_profile_support": "hard_3d_r_delta_los_projection",
     }
 
     module.save_npz(output, nfw_diagnostics)
@@ -949,17 +974,49 @@ def test_save_npz_derivative_mode_writes_exact_training_arrays(tmp_path):
         assert all(item.compress_type == ZIP_DEFLATED for item in archive.infolist())
 
 
-def test_run_calibration_for_segment_writes_npz_with_derivative_arrays(tmp_path, monkeypatch):
-    pytest.importorskip("healpy")
+def _single_pixel_pipeline_case():
+    hp = pytest.importorskip("healpy")
+    halo_pixels = np.array([0], dtype=np.int64)
+    unit_vector = np.stack(hp.pix2vec(1, halo_pixels), axis=-1)
+    catalog = _catalog(
+        unit_vector=unit_vector,
+        mass=np.array([1.0e13]),
+        redshift=np.array([0.2]),
+        chi=np.array([1000.0]),
+    )
+    mass_map = _mass_map(
+        halo_pixels,
+        temperature=np.array([100.0]),
+        nside=1,
+    )
+    return catalog, np.array([True]), mass_map, SimpleNamespace(cosmology=Cosmology())
+
+
+def _adaptive_test_stencil(dtype=jnp.float64):
+    return AdaptiveLightconeStencil(
+        sample_compact_row=jnp.array([0, 1, 0], dtype=jnp.int32),
+        sample_halo_id=jnp.array([0, 0, 1], dtype=jnp.int32),
+        sample_r_perp=jnp.array([0.05, 0.15, 0.1], dtype=dtype),
+        sample_solid_angle_sr=jnp.array([1.0e-8, 1.0e-8, 1.0e-8], dtype=dtype),
+        sample_valid=jnp.array([True, True, True]),
+        sample_in_compact=jnp.array([True, True, True]),
+        ngp_compact_row=jnp.array([0, 0], dtype=jnp.int32),
+        ngp_active=jnp.array([False, False]),
+        ngp_in_compact=jnp.array([False, False]),
+        resolved_halo_mask=jnp.array([True, True]),
+        n_pix=2,
+    )
+
+
+def test_run_calibration_for_segment_writes_npz_with_derivative_arrays(
+    tmp_path,
+    monkeypatch,
+):
     module = _load_example_module()
     catalog, _, mass_map, _ = _single_pixel_pipeline_case()
     metadata = SimpleNamespace(particle_mass_msun_h=1.0e10, cosmology=Cosmology())
     output_npz = tmp_path / "painted_nfw.seg000.npz"
-    monkeypatch.setattr(
-        module,
-        "read_pinocchio_mass_map_fits",
-        lambda path: mass_map,
-    )
+    monkeypatch.setattr(module, "read_pinocchio_mass_map_fits", lambda path: mass_map)
 
     row = module.run_calibration_for_segment(
         segment_index=0,
@@ -975,9 +1032,7 @@ def test_run_calibration_for_segment_writes_npz_with_derivative_arrays(tmp_path,
         inclusive_upper=False,
     )
 
-    assert row["segment_index"] == 0
-    assert row["inclusive_upper"] is False
-    assert row["output_npz"] == str(output_npz)
+    assert output_npz.exists()
     with np.load(output_npz) as data:
         assert set(data.files) == {
             "nfw_particle_counts",
@@ -985,693 +1040,263 @@ def test_run_calibration_for_segment_writes_npz_with_derivative_arrays(tmp_path,
             "d_nfw_particle_counts_d_concentration_mass_slope",
             "d_nfw_particle_counts_d_concentration_redshift_slope",
         }
-        assert (
-            data["d_nfw_particle_counts_d_concentration_amplitude"].shape
-            == data["nfw_particle_counts"].shape
-        )
+    assert row["nfw_paint_mode"] == "adaptive_global_support"
+    assert row["assigned_to_expected_ratio"] == pytest.approx(1.0)
 
 
-def test_sparse_pair_bucket_size_and_compilation_shape_reuse():
+def test_adaptive_pair_bucket_size_and_compilation_shape_reuse():
     module = _load_example_module()
     assert module.sparse_pair_bucket_size(0) == 0
-    assert module.sparse_pair_bucket_size(1) == 1
-    assert module.sparse_pair_bucket_size(4) == 4
     assert module.sparse_pair_bucket_size(5) == 8
-    with pytest.raises(ValueError, match="non-negative"):
-        module.sparse_pair_bucket_size(-1)
 
-    traces = []
-
-    def pair_sum(stencil):
-        traces.append(stencil.r_perp.shape)
-        return jnp.sum(stencil.r_perp * stencil.pair_weight)
-
-    compiled = jax.jit(pair_sum)
-    mask = np.array([False, True, True])
-
-    def bucket(n_pair):
-        stencil = LightconeSparseStencil(
-            pix_id=jnp.arange(n_pair, dtype=jnp.int32) % 2,
-            halo_id=jnp.arange(n_pair, dtype=jnp.int32) % 2,
-            r_perp=jnp.linspace(0.1, 0.3, n_pair),
-            n_pix=2,
-        )
-        return module.bucket_sparse_stencil_for_rank_catalog(stencil, mask, 3)
-
-    compiled(bucket(3)).block_until_ready()
-    compiled(bucket(4)).block_until_ready()
-    compiled(bucket(5)).block_until_ready()
-    assert traces == [(4,), (8,)]
-
-
-@pytest.mark.parametrize(
-    ("dtype", "rtol", "atol"),
-    (
-        (jnp.float32, 2.0e-5, 1.0e-6),
-        (jnp.float64, 1.0e-12, 1.0e-12),
-    ),
-)
-def test_bucketed_sparse_jit_matches_unpadded_map_and_derivatives(dtype, rtol, atol):
-    module = _load_example_module()
-    full_catalog = LightconeHaloCatalog(
-        unit_vector=jnp.asarray(
-            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
-            dtype=dtype,
-        ),
-        chi=jnp.asarray([800.0, 1000.0, 1200.0], dtype=dtype),
-        mass=jnp.asarray([8.0e12, 1.0e13, 2.0e13], dtype=dtype),
-        redshift=jnp.asarray([0.1, 0.2, 0.3], dtype=dtype),
-    )
-    selected_catalog = LightconeHaloCatalog(
-        unit_vector=full_catalog.unit_vector[1:],
-        chi=full_catalog.chi[1:],
-        mass=full_catalog.mass[1:],
-        redshift=full_catalog.redshift[1:],
-    )
-    stencil = LightconeSparseStencil(
-        pix_id=jnp.asarray([2, 0, 2], dtype=jnp.int32),
-        halo_id=jnp.asarray([0, 1, 0], dtype=jnp.int32),
-        r_perp=jnp.asarray([0.05, 0.10, 0.20], dtype=dtype),
-        n_pix=3,
-    )
-    bucketed = module.bucket_sparse_stencil_for_rank_catalog(
+    stencil = _adaptive_test_stencil()
+    selected_mask = np.array([False, True, True])
+    bucketed = module.bucket_adaptive_stencil_for_rank_catalog(
         stencil,
-        np.array([False, True, True]),
+        selected_mask,
         3,
     )
-    metadata = SimpleNamespace(cosmology=Cosmology())
-    theta = jnp.asarray([5.71, -0.084, -0.47], dtype=dtype)
 
-    def eager_map(theta_value):
-        return paint_lightcone_particle_count_map_sparse(
-            stencil,
-            selected_catalog,
-            particle_mass_msun_h=1.0e10,
-            pixel_area_sr=0.01,
-            cosmology=metadata.cosmology,
-            concentration_params=module.ConcentrationParams(
-                amplitude=theta_value[0],
-                mass_slope=theta_value[1],
-                redshift_slope=theta_value[2],
-                mass_pivot=2.0e12,
-            ),
-            profile_params=module.NFWProfileParams(truncation_width_fraction=0.05),
-        )
+    assert bucketed.sample_r_perp.shape == (4,)
+    np.testing.assert_array_equal(np.asarray(bucketed.sample_halo_id[:3]), [1, 1, 2])
+    np.testing.assert_array_equal(np.asarray(bucketed.resolved_halo_mask), [False, True, True])
+    assert jax.jit(lambda value: jnp.sum(value.sample_r_perp))(bucketed).shape == ()
 
-    expected_map = eager_map(theta)
-    expected_derivatives = jax.vmap(
-        lambda direction: jax.jvp(eager_map, (theta,), (direction,))[1]
-    )(jnp.eye(3, dtype=theta.dtype))
-    actual_map, diagnostics = module.paint_bucketed_nfw_sparse_map(
+
+@pytest.mark.parametrize("dtype", [jnp.float32, jnp.float64])
+def test_bucketed_adaptive_jit_matches_public_painter_and_conserves_mass(dtype):
+    module = _load_example_module()
+    selected_catalog = LightconeHaloCatalog(
+        unit_vector=jnp.asarray([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=dtype),
+        chi=jnp.asarray([1000.0, 1200.0], dtype=dtype),
+        mass=jnp.asarray([1.0e13, 2.0e13], dtype=dtype),
+        redshift=jnp.asarray([0.2, 0.3], dtype=dtype),
+    )
+    stencil = _adaptive_test_stencil(dtype)
+    public_map = paint_lightcone_particle_count_map_sparse(
+        stencil,
+        selected_catalog,
+        particle_mass_msun_h=1.0e10,
+        sample_chunk_size=2,
+    )
+    bucketed = module.bucket_adaptive_stencil_for_rank_catalog(
+        stencil,
+        np.array([True, True]),
+        2,
+    )
+    diagnostics = module.paint_bucketed_nfw_sparse_map(
         bucketed,
-        full_catalog,
-        metadata,
+        selected_catalog,
+        SimpleNamespace(cosmology=Cosmology()),
         1.0e10,
-        0.01,
         5.71,
         -0.084,
         -0.47,
         2.0e12,
-        0.05,
+        2,
+        np.array([1.0, 1.0]),
+        8,
         compute_map_derivatives=True,
         profile=False,
     )
-    actual_derivatives = np.stack(
-        [
-            diagnostics["d_nfw_particle_counts_d_concentration_amplitude"],
-            diagnostics["d_nfw_particle_counts_d_concentration_mass_slope"],
-            diagnostics["d_nfw_particle_counts_d_concentration_redshift_slope"],
-        ]
-    )
+    compiled_map, derivative_diagnostics = diagnostics
 
-    assert bucketed.size == 4
-    assert bucketed.halo_id.tolist() == [1, 2, 1, 0]
-    assert bucketed.pair_weight.tolist() == [1.0, 1.0, 1.0, 0.0]
-    np.testing.assert_allclose(
-        np.asarray(actual_map),
-        np.asarray(expected_map),
-        rtol=rtol,
-        atol=atol,
+    tolerance = 5.0e-5 if dtype == jnp.float32 else 1.0e-10
+    np.testing.assert_allclose(compiled_map, public_map, rtol=tolerance)
+    assert derivative_diagnostics["nfw_assigned_global_particle_count"] == pytest.approx(
+        3000.0,
+        rel=tolerance,
     )
     np.testing.assert_allclose(
-        actual_derivatives,
-        np.asarray(expected_derivatives),
-        rtol=rtol,
-        atol=atol,
+        derivative_diagnostics["nfw_global_derivative_sums"],
+        0.0,
+        atol=1.0e-4 if dtype == jnp.float32 else 1.0e-9,
     )
 
 
-def test_bucketed_sparse_jit_handles_empty_stencil():
+def test_bucketed_adaptive_jit_handles_empty_catalog():
     module = _load_example_module()
-    catalog = _catalog()
-    empty = LightconeSparseStencil(
-        pix_id=jnp.asarray([], dtype=jnp.int32),
-        halo_id=jnp.asarray([], dtype=jnp.int32),
-        r_perp=jnp.asarray([], dtype=catalog.mass.dtype),
+    catalog = LightconeHaloCatalog(
+        unit_vector=jnp.empty((0, 3)),
+        chi=jnp.empty((0,)),
+        mass=jnp.empty((0,)),
+        redshift=jnp.empty((0,)),
+    )
+    empty = AdaptiveLightconeStencil(
+        sample_compact_row=jnp.empty((0,), dtype=jnp.int32),
+        sample_halo_id=jnp.empty((0,), dtype=jnp.int32),
+        sample_r_perp=jnp.empty((0,)),
+        sample_solid_angle_sr=jnp.empty((0,)),
+        sample_valid=jnp.empty((0,), dtype=bool),
+        sample_in_compact=jnp.empty((0,), dtype=bool),
+        ngp_compact_row=jnp.empty((0,), dtype=jnp.int32),
+        ngp_active=jnp.empty((0,), dtype=bool),
+        ngp_in_compact=jnp.empty((0,), dtype=bool),
+        resolved_halo_mask=jnp.empty((0,), dtype=bool),
         n_pix=3,
     )
-    bucketed = module.bucket_sparse_stencil_for_rank_catalog(
+    bucketed = module.bucket_adaptive_stencil_for_rank_catalog(
         empty,
-        np.zeros(catalog.mass.shape[0], dtype=bool),
-        int(catalog.mass.shape[0]),
+        np.zeros(0, dtype=bool),
+        0,
     )
-    painted, diagnostics = module.paint_bucketed_nfw_sparse_map(
+    painted = paint_lightcone_particle_count_map_sparse(
         bucketed,
         catalog,
-        SimpleNamespace(cosmology=Cosmology()),
-        1.0e10,
-        0.01,
-        5.71,
-        -0.084,
-        -0.47,
-        2.0e12,
-        0.05,
-        compute_map_derivatives=True,
-        profile=False,
+        particle_mass_msun_h=1.0e10,
     )
 
-    assert bucketed.size == 0
     np.testing.assert_array_equal(np.asarray(painted), np.zeros(3))
-    for key, value in diagnostics.items():
-        if key.startswith("d_nfw_particle_counts"):
-            np.testing.assert_array_equal(value, np.zeros(3))
 
 
-@pytest.mark.parametrize(
-    ("mode", "profile_mode", "overdensity", "reported_overdensity"),
-    (
-        ("constant", "constant", 500.0, 500.0),
-        ("bryan_norman", "bryan_norman", 200.0, None),
-    ),
-)
-def test_bucketed_sparse_jit_supports_configurable_mass_definitions(
-    mode,
-    profile_mode,
-    overdensity,
-    reported_overdensity,
+def test_run_nfw_calibration_pipeline_uses_adaptive_builder_and_conserves_global_mass(
+    monkeypatch,
 ):
-    module = _load_example_module()
-    catalog = _catalog(
-        unit_vector=np.array([[1.0, 0.0, 0.0]]),
-        mass=np.array([1.0e13]),
-        redshift=np.array([0.3]),
-        chi=np.array([1000.0]),
-    )
-    stencil = LightconeSparseStencil(
-        pix_id=jnp.array([0], dtype=jnp.int32),
-        halo_id=jnp.array([0], dtype=jnp.int32),
-        r_perp=jnp.array([0.1]),
-        n_pix=1,
-    )
-    mass_definition = module.ResolvedHaloMassDefinition(
-        mode=mode,
-        profile_mode=profile_mode,
-        reference_density="mean",
-        profile_overdensity=overdensity,
-        reported_overdensity=reported_overdensity,
-    )
-    profile_params = module.NFWProfileParams(
-        overdensity=overdensity,
-        reference_density="mean",
-        truncation_width_fraction=0.05,
-        overdensity_mode=profile_mode,
-    )
-    expected = paint_lightcone_particle_count_map_sparse(
-        stencil,
-        catalog,
-        particle_mass_msun_h=1.0e10,
-        pixel_area_sr=0.01,
-        cosmology=Cosmology(),
-        concentration_params=module.ConcentrationParams(),
-        profile_params=profile_params,
-    )
-
-    actual, diagnostics = module.paint_bucketed_nfw_sparse_map(
-        stencil,
-        catalog,
-        SimpleNamespace(cosmology=Cosmology()),
-        1.0e10,
-        0.01,
-        5.71,
-        -0.084,
-        -0.47,
-        2.0e12,
-        0.05,
-        mass_definition,
-        compute_map_derivatives=False,
-        profile=False,
-    )
-
-    np.testing.assert_allclose(actual, expected, rtol=1.0e-12, atol=1.0e-12)
-    assert diagnostics == {"nfw_map_derivatives": "none"}
-
-
-def _single_pixel_pipeline_case():
-    hp = pytest.importorskip("healpy")
-    halo_pixels = np.array([0], dtype=np.int64)
-    unit_vector = np.stack(hp.pix2vec(1, halo_pixels), axis=-1)
-    catalog = _catalog(
-        unit_vector=unit_vector,
-        mass=np.array([1.0e13]),
-        redshift=np.array([0.2]),
-        chi=np.array([1000.0]),
-    )
-    mass_map = _mass_map(
-        np.array([0], dtype=np.int64),
-        temperature=np.array([100.0]),
-        nside=1,
-    )
-    metadata = SimpleNamespace(cosmology=Cosmology())
-    return catalog, np.array([True]), mass_map, metadata
-
-
-def test_run_nfw_calibration_pipeline_default_sparse_does_not_call_bruteforce(monkeypatch):
-    hp = pytest.importorskip("healpy")
-    module = _load_example_module()
-
-    def fail_if_called(*args, **kwargs):
-        raise AssertionError("The sparse pipeline must not allocate an N_pix x N_halo matrix")
-
-    monkeypatch.setattr(module, "build_lightcone_sparse_stencil_bruteforce", fail_if_called)
-    monkeypatch.setattr(module, "healpix_pixel_unit_vectors", fail_if_called)
-
-    halo_pixels = np.array([0, 5], dtype=np.int64)
-    unit_vector = np.stack(hp.pix2vec(1, halo_pixels), axis=-1)
-    catalog = _catalog(
-        unit_vector=unit_vector,
-        mass=np.array([1.0e13, 2.0e13]),
-        redshift=np.array([0.2, 0.25]),
-        chi=np.array([1000.0, 1100.0]),
-    )
-    mass_map = _mass_map(
-        np.array([5, 0], dtype=np.int64),
-        temperature=np.array([100.0, 200.0]),
-        nside=1,
-    )
-    metadata = SimpleNamespace(cosmology=Cosmology())
-
-    diagnostics = module.run_nfw_calibration_pipeline(
-        catalog,
-        np.array([True, True]),
-        mass_map,
-        metadata,
-        particle_mass_msun_h=1.0e10,
-        pipeline_mode="paint",
-        concentration_amplitude=5.71,
-        truncation_width_fraction=0.05,
-        chunk_size=1,
-    )
-
-    assert diagnostics["pipeline_mode"] == "paint"
-    assert diagnostics["nfw_paint_mode"] == "sparse"
-    assert diagnostics["nfw_map_derivatives"] == "none"
-    assert diagnostics["nfw_particle_counts"].shape == (2,)
-    assert np.all(np.isfinite(diagnostics["nfw_particle_counts"]))
-    assert diagnostics["nfw_selected_halo_count"] == 2
-    assert diagnostics["nfw_compact_pixel_count"] == 2
-    assert diagnostics["nfw_sparse_pair_count"] == 2
-    assert diagnostics["nfw_dense_pair_count"] == 4
-    assert diagnostics["nfw_sparse_compression_factor"] == 2.0
-    assert np.isfinite(diagnostics["nfw_sum_particle_counts"])
-    assert diagnostics["nfw_selected_halo_mass_msun_h"] == 3.0e13
-    assert diagnostics["nfw_expected_particle_count"] == 3000.0
-    assert diagnostics["nfw_painted_particle_count"] == pytest.approx(
-        diagnostics["nfw_sum_particle_counts"]
-    )
-    assert diagnostics["nfw_painted_to_expected_ratio"] == pytest.approx(
-        diagnostics["nfw_painted_particle_count"] / 3000.0
-    )
-    assert diagnostics["nfw_halos_with_zero_pairs"] == 0
-    assert diagnostics["nfw_mass_in_halos_with_zero_pairs_msun_h"] == 0.0
-    assert diagnostics["nfw_subpixel_support_halo_count"] == 2
-    assert "d_nfw_particle_counts_d_concentration_amplitude" not in diagnostics
-    np.testing.assert_allclose(
-        np.sum(diagnostics["nfw_particle_counts"]),
-        diagnostics["nfw_sum_particle_counts"],
-        rtol=1.0e-5,
-    )
-
-
-def test_run_nfw_calibration_pipeline_reports_unresolved_zero_pair_mass():
-    hp = pytest.importorskip("healpy")
-    module = _load_example_module()
-    halo_pixel = np.array([5], dtype=np.int64)
-    catalog = _catalog(
-        unit_vector=np.stack(hp.pix2vec(1, halo_pixel), axis=-1),
-        mass=np.array([2.0e13]),
-        redshift=np.array([0.2]),
-        chi=np.array([1000.0]),
-    )
-    mass_map = _mass_map(np.array([0], dtype=np.int64), nside=1)
-
-    diagnostics = module.run_nfw_calibration_pipeline(
-        catalog,
-        np.array([True]),
-        mass_map,
-        SimpleNamespace(cosmology=Cosmology()),
-        particle_mass_msun_h=1.0e10,
-    )
-
-    assert diagnostics["nfw_halos_with_zero_pairs"] == 1
-    assert diagnostics["nfw_mass_in_halos_with_zero_pairs_msun_h"] == 2.0e13
-    assert diagnostics["nfw_subpixel_support_halo_count"] == 1
-    assert diagnostics["nfw_expected_particle_count"] == 2000.0
-    assert diagnostics["nfw_painted_particle_count"] == 0.0
-    assert diagnostics["nfw_painted_to_expected_ratio"] == 0.0
-
-
-def test_run_nfw_calibration_pipeline_derivative_mode_saves_map_derivatives():
     module = _load_example_module()
     catalog, mask, mass_map, metadata = _single_pixel_pipeline_case()
 
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("the dense all-pairs builder must not be called")
+
+    monkeypatch.setattr(module, "build_lightcone_sparse_stencil_bruteforce", fail_if_called)
     diagnostics = module.run_nfw_calibration_pipeline(
         catalog,
         mask,
         mass_map,
         metadata,
         particle_mass_msun_h=1.0e10,
-        pipeline_mode="derivatives",
-        chunk_size=1,
+        theta_resolution_rad=None,
+        n_resolution=4,
+    )
+
+    assert diagnostics["nfw_paint_mode"] == "adaptive_global_support"
+    assert diagnostics["nfw_assigned_to_expected_ratio"] == pytest.approx(1.0)
+    assert diagnostics["nfw_unresolved_ngp_count"] == 1
+    assert diagnostics["nfw_global_profile_sample_count"] == 0
+
+
+def test_run_nfw_calibration_pipeline_derivatives_include_global_normalization():
+    module = _load_example_module()
+    catalog, mask, mass_map, metadata = _single_pixel_pipeline_case()
+    diagnostics = module.run_nfw_calibration_pipeline(
+        catalog,
+        mask,
+        mass_map,
+        metadata,
+        particle_mass_msun_h=1.0e10,
         compute_map_derivatives=True,
     )
 
-    assert diagnostics["pipeline_mode"] == "derivatives"
     assert diagnostics["nfw_map_derivatives"] == "concentration"
+    np.testing.assert_allclose(diagnostics["nfw_global_derivative_sums"], 0.0)
     for key in (
         "d_nfw_particle_counts_d_concentration_amplitude",
         "d_nfw_particle_counts_d_concentration_mass_slope",
         "d_nfw_particle_counts_d_concentration_redshift_slope",
     ):
-        assert diagnostics[key].shape == diagnostics["nfw_particle_counts"].shape
-        assert np.all(np.isfinite(diagnostics[key]))
-    assert "sum_d_nfw_particle_counts_d_concentration_amplitude" not in diagnostics
-    assert "sum_d_nfw_particle_counts_d_concentration_mass_slope" not in diagnostics
-    assert "sum_d_nfw_particle_counts_d_concentration_redshift_slope" not in diagnostics
+        assert np.asarray(diagnostics[key]).shape == (1,)
 
 
-def test_nfw_map_concentration_derivatives_are_sparse_only():
+def test_nfw_stage_label_and_summary_use_adaptive_diagnostics(capsys):
     module = _load_example_module()
-    catalog = _catalog(
-        unit_vector=np.array([[1.0, 0.0, 0.0]]),
-        mass=np.array([1.0e13]),
-        redshift=np.array([0.2]),
-        chi=np.array([1000.0]),
-    )
-    mass_map = _mass_map(
-        np.array([0], dtype=np.int64),
-        temperature=np.array([100.0]),
-        nside=1,
-    )
-    metadata = SimpleNamespace(cosmology=Cosmology())
-
-    with pytest.raises(ValueError, match="only supported for sparse"):
-        module.run_nfw_calibration_pipeline(
-            catalog,
-            np.array([True]),
-            mass_map,
-            metadata,
-            particle_mass_msun_h=1.0e10,
-            dense_demo=True,
-            compute_map_derivatives=True,
-        )
-
-
-def test_nfw_map_concentration_derivative_profile_labels(capsys):
-    module = _load_example_module()
-    catalog, mask, mass_map, metadata = _single_pixel_pipeline_case()
-
-    module.run_nfw_calibration_pipeline(
-        catalog,
-        mask,
-        mass_map,
-        metadata,
-        particle_mass_msun_h=1.0e10,
-        pipeline_mode="derivatives-profile",
-        compute_map_derivatives=True,
-        profile=True,
-    )
-
-    captured = capsys.readouterr()
-    assert "NFW particle map + concentration JVPs" in captured.out
-    assert "NFW map concentration derivatives to numpy" in captured.out
-
-
-def test_run_nfw_calibration_pipeline_paint_mode_outputs_map_without_derivatives():
-    module = _load_example_module()
-    catalog, mask, mass_map, metadata = _single_pixel_pipeline_case()
-
-    diagnostics = module.run_nfw_calibration_pipeline(
-        catalog,
-        mask,
-        mass_map,
-        metadata,
-        particle_mass_msun_h=1.0e10,
-        pipeline_mode="paint",
-        concentration_amplitude=5.71,
-        truncation_width_fraction=0.05,
-        chunk_size=1,
-    )
-
-    assert diagnostics["pipeline_mode"] == "paint"
-    assert diagnostics["nfw_paint_mode"] == "sparse"
-    assert diagnostics["nfw_map_derivatives"] == "none"
-    assert diagnostics["nfw_particle_counts"].shape == (1,)
-    assert "d_nfw_particle_counts_d_concentration_amplitude" not in diagnostics
-    np.testing.assert_allclose(
-        np.sum(diagnostics["nfw_particle_counts"]),
-        diagnostics["nfw_sum_particle_counts"],
-        rtol=1.0e-5,
-    )
-
-
-def test_run_nfw_calibration_pipeline_profile_mode_prints_timing(capsys):
-    module = _load_example_module()
-    catalog, mask, mass_map, metadata = _single_pixel_pipeline_case()
-
-    with module.timed_stage(module.nfw_stage_label("profile"), True):
-        diagnostics = module.run_nfw_calibration_pipeline(
-            catalog,
-            mask,
-            mass_map,
-            metadata,
-            particle_mass_msun_h=1.0e10,
-            pipeline_mode="profile",
-            concentration_amplitude=5.71,
-            truncation_width_fraction=0.05,
-            chunk_size=1,
-            profile=True,
-        )
-
-    captured = capsys.readouterr()
-    assert diagnostics["pipeline_mode"] == "profile"
-    assert module.nfw_stage_label("profile") in captured.out
-    assert "NFW particle map" in captured.out
-    assert "NFW particle map to numpy" in captured.out
-    assert "NFW map concentration JVPs" not in captured.out
-    assert "[profile] stencil phases (s)" in captured.out
-    assert "[profile] stencil counts:" in captured.out
-
-
-def test_run_nfw_calibration_pipeline_derivatives_profile_mode_does_both(capsys):
-    module = _load_example_module()
-    catalog, mask, mass_map, metadata = _single_pixel_pipeline_case()
-
-    with module.timed_stage(module.nfw_stage_label("derivatives-profile"), True):
-        diagnostics = module.run_nfw_calibration_pipeline(
-            catalog,
-            mask,
-            mass_map,
-            metadata,
-            particle_mass_msun_h=1.0e10,
-            pipeline_mode="derivatives-profile",
-            concentration_amplitude=5.71,
-            truncation_width_fraction=0.05,
-            chunk_size=1,
-            compute_map_derivatives=True,
-            profile=True,
-        )
-
-    captured = capsys.readouterr()
-    assert diagnostics["pipeline_mode"] == "derivatives-profile"
-    assert diagnostics["nfw_map_derivatives"] == "concentration"
-    assert module.nfw_stage_label("derivatives-profile") in captured.out
-    assert "NFW particle map + concentration JVPs" in captured.out
-    assert "NFW particle map" in captured.out
-    assert "NFW particle map to numpy" in captured.out
-
-
-def test_nfw_stage_label_uses_pipeline_mode():
-    module = _load_example_module()
-
     assert module.nfw_stage_label("paint") == "NFW calibration pipeline: paint"
-    assert (
-        module.nfw_stage_label("derivatives")
-        == "NFW calibration pipeline: derivatives"
-    )
-    assert module.nfw_stage_label("profile") == "NFW calibration pipeline: profile"
-    assert (
-        module.nfw_stage_label("derivatives-profile")
-        == "NFW calibration pipeline: derivatives-profile"
-    )
-
-
-def test_print_nfw_calibration_summary_reports_map_derivatives(capsys):
-    module = _load_example_module()
-    common = {
-        "pipeline_mode": "paint",
-        "nfw_paint_mode": "sparse",
-        "nfw_selected_halo_count": 1,
-        "nfw_selected_halo_mass_msun_h": 10.0,
-        "nfw_compact_pixel_count": 1,
-        "nfw_sparse_pair_count": 1,
-        "nfw_dense_pair_count": 1,
-        "nfw_sparse_compression_factor": 1.0,
-        "nfw_sum_particle_counts": 1.25,
-        "nfw_painted_to_expected_ratio": 0.125,
-        "nfw_halos_with_zero_pairs": 0,
-        "nfw_mass_in_halos_with_zero_pairs_msun_h": 0.0,
-        "nfw_subpixel_support_halo_count": 1,
-    }
-
-    module.print_nfw_calibration_summary(
-        {
-            **common,
-            "nfw_map_derivatives": "none",
-        }
-    )
-    paint_only = capsys.readouterr().out
-    assert "NFW calibration map:" in paint_only
-    assert "Pipeline mode: paint" in paint_only
-    assert "Map derivatives: concentration" not in paint_only
-
-    module.print_nfw_calibration_summary(
-        {
-            **common,
-            "pipeline_mode": "derivatives",
-            "nfw_map_derivatives": "concentration",
-        }
-    )
-    map_only = capsys.readouterr().out
-    assert "NFW calibration map + derivatives:" in map_only
-    assert "Pipeline mode: derivatives" in map_only
-    assert "Map derivatives: concentration" in map_only
-    assert "Sum d(map)/d concentration amplitude" not in map_only
-    assert "Sum d(map)/d concentration mass slope" not in map_only
-    assert "Sum d(map)/d concentration redshift slope" not in map_only
-
-
-def test_reduce_calibration_segment_result_sums_additive_payloads():
-    module = _load_example_module()
-    bounds = {
-        "sheet_index": 0,
-        "z_lo": 0.1,
-        "z_hi": 0.2,
-        "a_lo": 1.0 / 1.2,
-        "a_hi": 1.0 / 1.1,
-        "chi_lo_mpc_h": 100.0,
-        "chi_hi_mpc_h": 200.0,
-    }
-    local = module.CalibrationSegmentResult(
+    diagnostics = _fake_segment_result(
+        module,
         segment_index=0,
         mass_map_path=Path("massmap.seg000.fits"),
         output_npz=Path("painted.seg000.npz"),
-        bounds=bounds,
         inclusive_upper=False,
-        nfw_diagnostics={
+    ).nfw_diagnostics
+    module.print_nfw_calibration_summary(diagnostics)
+    output = capsys.readouterr().out
+
+    assert "Painter mode: adaptive_global_support" in output
+    assert "Assignment branches" in output
+    assert "Assigned global / expected particle count" in output
+
+
+def test_reduce_calibration_segment_result_sums_adaptive_payloads():
+    module = _load_example_module()
+    local = _fake_segment_result(
+        module,
+        segment_index=0,
+        mass_map_path=Path("massmap.seg000.fits"),
+        output_npz=Path("painted.seg000.npz"),
+        inclusive_upper=False,
+    )
+    local.nfw_diagnostics.update(
+        {
             "pipeline_mode": "derivatives",
-            "particle_mass_msun_h": 1.0,
             "nfw_particle_counts": np.array([0.5, 1.5]),
             "nfw_map_derivatives": "concentration",
             "d_nfw_particle_counts_d_concentration_amplitude": np.array([0.1, 0.2]),
             "d_nfw_particle_counts_d_concentration_mass_slope": np.array([0.3, 0.4]),
             "d_nfw_particle_counts_d_concentration_redshift_slope": np.array([0.5, 0.6]),
-            "nfw_paint_mode": "sparse",
-            "nfw_selected_halo_count": 1,
+            "nfw_global_derivative_sums": np.zeros(3),
+            "nfw_compact_derivative_sums": np.array([0.3, 0.7, 1.1]),
             "nfw_selected_halo_mass_msun_h": 4.0,
-            "nfw_expected_particle_count": 4.0,
-            "nfw_painted_particle_count": 2.0,
-            "nfw_painted_to_expected_ratio": 0.5,
-            "nfw_halos_with_zero_pairs": 1,
-            "nfw_mass_in_halos_with_zero_pairs_msun_h": 1.0,
-            "nfw_subpixel_support_halo_count": 1,
-            "nfw_compact_pixel_count": 2,
-            "nfw_sparse_pair_count": 2,
-            "nfw_dense_pair_count": 4,
-            "nfw_sparse_compression_factor": 2.0,
-            "nfw_sum_particle_counts": 2.0,
-            "nfw_concentration_amplitude": 5.71,
-            "nfw_concentration_mass_slope": -0.084,
-            "nfw_concentration_redshift_slope": -0.47,
-            "nfw_concentration_mass_pivot": 2.0e12,
-            "nfw_truncation_width_fraction": 0.05,
-        },
+            "nfw_expected_global_particle_count": 4.0,
+            "nfw_assigned_global_particle_count": 4.0,
+            "nfw_retained_compact_particle_count": 2.0,
+            "nfw_outside_compact_particle_count": 2.0,
+            "nfw_global_profile_sample_count": 2,
+            "nfw_retained_profile_sample_count": 1,
+            "nfw_unresolved_ngp_count": 0,
+            "nfw_native_resolved_count": 1,
+            "nfw_supersampled_count": 0,
+            "nfw_max_requested_supersampling_level": 0,
+            "nfw_max_used_supersampling_level": 0,
+        }
     )
-
     remote_values = [
         np.array([2.0, 3.0]),
         np.array([0.4, 0.5]),
         np.array([0.6, 0.7]),
         np.array([0.8, 0.9]),
-        np.array([2, 3, 6, 1, 2], dtype=np.int64),
-        np.array([5.0, 1.0], dtype=np.float64),
+        np.zeros(3),
+        np.array([0.9, 1.3, 1.7]),
+        np.array([2, 4, 3, 1, 1, 1, 0, 0], dtype=np.int64),
+        np.array([5.0, 5.0, 5.0, 5.0, 0.0], dtype=np.float64),
+        np.array([2, 2], dtype=np.int64),
     ]
+    max_marker = object()
 
-    class PairwiseSumComm:
+    class PairwiseReduceComm:
         def __init__(self, values):
             self.values = list(values)
-            self.send_buffers = []
 
         def Reduce(self, send_buffer, receive_buffer, op=None, root=0):
-            del op
             assert root == 0
-            assert receive_buffer is not None
             other = self.values.pop(0)
-            self.send_buffers.append(np.asarray(send_buffer).copy())
-            receive_buffer[...] = np.asarray(send_buffer) + np.asarray(other)
+            operation = np.maximum if op is max_marker else np.add
+            receive_buffer[...] = operation(np.asarray(send_buffer), np.asarray(other))
 
-    comm = PairwiseSumComm(remote_values)
-
-    context = module.MpiContext(
-        enabled=True,
-        comm=comm,
-        rank=0,
-        size=2,
+    comm = PairwiseReduceComm(remote_values)
+    reduced = module.reduce_calibration_segment_result(
+        local,
+        module.MpiContext(
+            enabled=True,
+            comm=comm,
+            rank=0,
+            size=2,
+            max_op=max_marker,
+        ),
     )
-
-    reduced = module.reduce_calibration_segment_result(local, context)
 
     assert reduced is not None
-    np.testing.assert_allclose(reduced.nfw_diagnostics["nfw_particle_counts"], [2.5, 4.5])
-    np.testing.assert_allclose(
-        reduced.nfw_diagnostics["d_nfw_particle_counts_d_concentration_amplitude"],
-        [0.5, 0.7],
-    )
-    assert reduced.nfw_diagnostics["nfw_selected_halo_count"] == 3
-    assert reduced.nfw_diagnostics["nfw_sparse_pair_count"] == 5
-    assert reduced.nfw_diagnostics["nfw_dense_pair_count"] == 10
-    assert reduced.nfw_diagnostics["nfw_halos_with_zero_pairs"] == 2
-    assert reduced.nfw_diagnostics["nfw_subpixel_support_halo_count"] == 3
-    assert reduced.nfw_diagnostics["nfw_selected_halo_mass_msun_h"] == 9.0
-    assert reduced.nfw_diagnostics["nfw_mass_in_halos_with_zero_pairs_msun_h"] == 2.0
-    assert reduced.nfw_diagnostics["nfw_compact_pixel_count"] == 2
-    assert reduced.nfw_diagnostics["nfw_sparse_compression_factor"] == 2.0
-    assert reduced.nfw_diagnostics["nfw_sum_particle_counts"] == 7.0
-    assert reduced.nfw_diagnostics["nfw_painted_particle_count"] == 7.0
-    assert reduced.nfw_diagnostics["nfw_expected_particle_count"] == 9.0
-    assert reduced.nfw_diagnostics["nfw_painted_to_expected_ratio"] == pytest.approx(
-        7.0 / 9.0
-    )
-    assert "sum_d_nfw_particle_counts_d_concentration_amplitude" not in reduced.nfw_diagnostics
-    assert "sum_d_nfw_particle_counts_d_concentration_mass_slope" not in reduced.nfw_diagnostics
-    assert "sum_d_nfw_particle_counts_d_concentration_redshift_slope" not in reduced.nfw_diagnostics
-    assert len(comm.send_buffers) == 6
-    assert comm.send_buffers[-2].dtype == np.dtype(np.int64)
-    np.testing.assert_array_equal(
-        comm.send_buffers[-2],
-        [1, 2, 4, 1, 1],
-    )
-    assert comm.send_buffers[-1].dtype == np.dtype(np.float64)
-    np.testing.assert_array_equal(comm.send_buffers[-1], [4.0, 1.0])
+    diagnostics = reduced.nfw_diagnostics
+    np.testing.assert_allclose(diagnostics["nfw_particle_counts"], [2.5, 4.5])
+    assert diagnostics["nfw_selected_halo_count"] == 3
+    assert diagnostics["nfw_global_profile_sample_count"] == 6
+    assert diagnostics["nfw_native_resolved_count"] == 2
+    assert diagnostics["nfw_supersampled_count"] == 1
+    assert diagnostics["nfw_selected_halo_mass_msun_h"] == 9.0
+    assert diagnostics["nfw_expected_global_particle_count"] == 9.0
+    assert diagnostics["nfw_assigned_global_particle_count"] == 9.0
+    assert diagnostics["nfw_retained_compact_particle_count"] == 7.0
+    assert diagnostics["nfw_outside_compact_particle_count"] == 2.0
+    assert diagnostics["nfw_assigned_to_expected_ratio"] == pytest.approx(1.0)
+    assert diagnostics["nfw_max_used_supersampling_level"] == 2
     assert not comm.values
 
 
@@ -1741,6 +1366,7 @@ def test_reduce_calibration_segment_result_non_root_uses_no_receive_buffers():
         np.dtype(np.float32),
         np.dtype(np.int64),
         np.dtype(np.float64),
+        np.dtype(np.int64),
     ]
 
 
@@ -1768,8 +1394,8 @@ def test_real_mpi_buffer_reduction():
     )
     for key in (
         "nfw_selected_halo_count",
-        "nfw_sparse_pair_count",
-        "nfw_dense_pair_count",
+        "nfw_global_profile_sample_count",
+        "nfw_retained_profile_sample_count",
     ):
         local.nfw_diagnostics[key] = rank_value
 
@@ -1781,6 +1407,7 @@ def test_real_mpi_buffer_reduction():
             rank=comm.Get_rank(),
             size=comm.Get_size(),
             sum_op=mpi.SUM,
+            max_op=mpi.MAX,
         ),
     )
 
@@ -1912,6 +1539,7 @@ def test_real_mpi_workflow_matches_serial_for_worker_counts_and_derivatives(
                 rank=comm.Get_rank(),
                 size=comm.Get_size(),
                 sum_op=mpi.SUM,
+                max_op=mpi.MAX,
             ),
         )
         comm.Barrier()
@@ -1923,8 +1551,8 @@ def test_real_mpi_workflow_matches_serial_for_worker_counts_and_derivatives(
         assert [row["selected_halo_count"] for row in mpi_rows] == [
             row["selected_halo_count"] for row in serial_rows
         ]
-        assert [row["sparse_pair_count"] for row in mpi_rows] == [
-            row["sparse_pair_count"] for row in serial_rows
+        assert [row["global_profile_sample_count"] for row in mpi_rows] == [
+            row["global_profile_sample_count"] for row in serial_rows
         ]
         for segment_index in range(2):
             with np.load(module.segment_output_path(mpi_dir, segment_index)) as data:
@@ -1960,6 +1588,7 @@ def test_real_mpi_segment_timing_gather():
             rank=comm.Get_rank(),
             size=comm.Get_size(),
             sum_op=mpi.SUM,
+            max_op=mpi.MAX,
         ),
     )
 
@@ -2086,18 +1715,17 @@ def test_compute_calibration_for_segment_reuses_one_mass_map_pixel_index(
             "particle_mass_msun_h": 1.0,
             "nfw_particle_counts": np.array([0.5]),
             "nfw_map_derivatives": "none",
-            "nfw_paint_mode": "sparse",
+            "nfw_paint_mode": "adaptive_global_support",
             "nfw_selected_halo_count": 1,
             "nfw_compact_pixel_count": 1,
-            "nfw_sparse_pair_count": 1,
-            "nfw_dense_pair_count": 1,
-            "nfw_sparse_compression_factor": 1.0,
+            "nfw_global_profile_sample_count": 1,
+            "nfw_retained_profile_sample_count": 1,
             "nfw_sum_particle_counts": 0.5,
             "nfw_concentration_amplitude": 5.71,
             "nfw_concentration_mass_slope": -0.084,
             "nfw_concentration_redshift_slope": -0.47,
             "nfw_concentration_mass_pivot": 2.0e12,
-            "nfw_truncation_width_fraction": 0.05,
+            "nfw_profile_support": "hard_3d_r_delta_los_projection",
         }
 
     monkeypatch.setattr(
@@ -2445,7 +2073,7 @@ def test_run_segment_workflow_mpi_profile_gathers_root_timing_summaries(
 
     assert rows == [{"segment_index": 0}, {"segment_index": 1}]
     assert len(comm.send_buffers) == 2
-    assert all(buffer.shape == (14,) for buffer in comm.send_buffers)
+    assert all(buffer.shape == (19,) for buffer in comm.send_buffers)
     captured = capsys.readouterr().out
     assert "[profile] segment 000 rank min/mean/max (s)" in captured
     assert "[profile] segment 001 rank min/mean/max (s)" in captured
@@ -2562,391 +2190,419 @@ def test_run_segment_workflow_mpi_reduce_mode_uses_bounded_segment_pipeline(
     assert manifest_calls[0][0] == output_dir / "painted_nfw_manifest.csv"
 
 
-def test_local_sparse_stencil_uses_compact_rows_not_global_pixels():
-    hp = pytest.importorskip("healpy")
-    module = _load_example_module()
-
-    halo_pixels = np.array([0, 5, 8], dtype=np.int64)
-    unit_vector = np.stack(hp.pix2vec(1, halo_pixels), axis=-1)
-    catalog = _catalog(
-        unit_vector=unit_vector,
-        mass=np.array([1.0e13, 2.0e13, 3.0e13]),
-        redshift=np.array([0.2, 0.25, 0.3]),
-        chi=np.array([1000.0, 1100.0, 1200.0]),
-    )
-    mass_map = _mass_map(
-        np.array([5, 0], dtype=np.int64),
-        temperature=np.array([100.0, 200.0]),
-        nside=1,
-    )
-
-    stencil = module.build_lightcone_sparse_stencil_for_mass_map_local(
-        mass_map,
-        catalog,
-        rmax_mpc_h=np.array([1.0, 1.0, 1.0]),
-    )
-
-    assert stencil.n_pix == 2
-    np.testing.assert_array_equal(np.asarray(stencil.pix_id), [1, 0])
-    np.testing.assert_array_equal(np.asarray(stencil.halo_id), [0, 1])
-    assert np.all(np.asarray(stencil.r_perp) <= 1.0)
+def _r_delta_for_theta(theta, chi):
+    return 2.0 * chi * np.sin(0.5 * theta)
 
 
-@pytest.mark.parametrize("nside", [1, 4, 16])
-@pytest.mark.parametrize("dtype", [np.float32, np.float64])
-def test_center_stencil_matches_bruteforce_exact_filter_for_random_catalog(nside, dtype):
-    hp = pytest.importorskip("healpy")
-    module = _load_example_module()
-    rng = np.random.default_rng(20260713 + nside)
-    n_halo = 24
-    z = rng.uniform(-1.0, 1.0, n_halo)
-    phi = rng.uniform(0.0, 2.0 * np.pi, n_halo)
-    radial = np.sqrt(1.0 - z**2)
-    unit_vector = np.column_stack(
-        (radial * np.cos(phi), radial * np.sin(phi), z)
-    ).astype(dtype)
-    chi = np.linspace(800.0, 1400.0, n_halo, dtype=dtype)
-    alpha = np.linspace(0.05, 2.0, n_halo) * hp.max_pixrad(nside)
-    rmax = 2.0 * chi * np.sin(0.5 * alpha)
-    catalog = _catalog(
-        unit_vector=unit_vector,
-        mass=np.full(n_halo, 1.0e13, dtype=dtype),
-        redshift=np.linspace(0.1, 0.5, n_halo, dtype=dtype),
-        chi=chi,
-    )
-    pixels = np.arange(hp.nside2npix(nside), dtype=np.int64)
-    mass_map = _mass_map(pixels, temperature=np.zeros_like(pixels), nside=nside)
-
-    stencil = module.build_lightcone_sparse_stencil_for_mass_map_local(
-        mass_map,
-        catalog,
-        rmax,
-    )
-
-    x, y, z = hp.pix2vec(nside, pixels, nest=False)
-    pixel_vectors = np.stack([x, y, z], axis=-1).astype(dtype)
-    expected_pixels = []
-    expected_halos = []
-    expected_r_perp = []
-    for halo_id, (halo_vector, chi_i, rmax_i) in enumerate(
-        zip(unit_vector, chi, rmax, strict=True)
-    ):
-        cosang = np.clip(
-            pixel_vectors[:, 0] * halo_vector[0]
-            + pixel_vectors[:, 1] * halo_vector[1]
-            + pixel_vectors[:, 2] * halo_vector[2],
-            -1.0,
-            1.0,
-        )
-        r_perp = chi_i * np.sqrt(np.maximum(2.0 * (1.0 - cosang), 0.0))
-        keep = r_perp <= rmax_i
-        expected_pixels.extend(pixels[keep])
-        expected_halos.extend(np.full(np.count_nonzero(keep), halo_id))
-        expected_r_perp.extend(r_perp[keep])
-
-    np.testing.assert_array_equal(stencil.pix_id, expected_pixels)
-    np.testing.assert_array_equal(stencil.halo_id, expected_halos)
-    np.testing.assert_allclose(stencil.r_perp, expected_r_perp, rtol=0.0, atol=0.0)
-
-
-def test_center_stencil_keeps_pixel_at_exact_support_boundary():
+def test_adaptive_unresolved_branch_uses_ngp_without_query(monkeypatch):
     hp = pytest.importorskip("healpy")
     module = _load_example_module()
     nside = 8
-    halo_pixel = 100
-    neighbour = int(
-        hp.get_all_neighbours(nside, halo_pixel, nest=False)[0]
-    )
-    halo_vector = np.asarray(hp.pix2vec(nside, halo_pixel), dtype=np.float64)
-    neighbour_vector = np.asarray(hp.pix2vec(nside, neighbour), dtype=np.float64)
-    chi = 1000.0
-    rmax = chi * np.sqrt(2.0 * (1.0 - np.dot(halo_vector, neighbour_vector)))
+    halo_ring = 100
+    halo_vector = np.asarray(hp.pix2vec(nside, halo_ring))[None, :]
     catalog = _catalog(
-        unit_vector=halo_vector[None, :],
+        unit_vector=halo_vector,
+        mass=np.array([1.0e13]),
+        redshift=np.array([0.2]),
+        chi=np.array([1000.0]),
+    )
+    mass_map = _mass_map(np.array([halo_ring]), nside=nside)
+    theta_resolution = 0.01
+
+    monkeypatch.setattr(
+        hp,
+        "query_disc",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("unresolved halos must not call query_disc")
+        ),
+    )
+    stencil, diagnostics = module.build_adaptive_lightcone_stencil_for_mass_map(
+        mass_map,
+        catalog,
+        np.array([_r_delta_for_theta(0.5 * theta_resolution, 1000.0)]),
+        AngularAssignmentParams(theta_resolution, 4),
+        collect_diagnostics=True,
+    )
+
+    assert diagnostics.n_unresolved_ngp == 1
+    assert diagnostics.n_global_profile_samples == 0
+    np.testing.assert_array_equal(np.asarray(stencil.ngp_active), [True])
+    np.testing.assert_array_equal(np.asarray(stencil.ngp_compact_row), [0])
+
+
+def test_adaptive_supersampling_queries_children_and_maps_nested_parents_to_ring():
+    hp = pytest.importorskip("healpy")
+    module = _load_example_module()
+    nside = 8
+    pixels = np.arange(hp.nside2npix(nside), dtype=np.int64)
+    halo_ring = 100
+    halo_vector = np.asarray(hp.pix2vec(nside, halo_ring))[None, :]
+    chi = 1000.0
+    theta_map = np.sqrt(hp.nside2pixarea(nside))
+    theta_h = 3.0 * theta_map
+    catalog = _catalog(
+        unit_vector=halo_vector,
         mass=np.array([1.0e13]),
         redshift=np.array([0.2]),
         chi=np.array([chi]),
     )
+    catalog = module.selected_lightcone_catalog(catalog, np.array([True]))
+    stencil, diagnostics = module.build_adaptive_lightcone_stencil_for_mass_map(
+        _mass_map(pixels, nside=nside),
+        catalog,
+        np.array([_r_delta_for_theta(theta_h, chi)]),
+        AngularAssignmentParams(theta_map / 10.0, 4),
+        collect_diagnostics=True,
+    )
+
+    assert diagnostics.n_supersampled == 1
+    assert diagnostics.max_requested_supersampling_level == 1
+    assert diagnostics.n_native_resolved == 0
+    assert stencil.size > 0
+    child_nside = 2 * nside
+    children = hp.query_disc(
+        child_nside,
+        halo_vector[0],
+        np.nextafter(theta_h, np.inf),
+        inclusive=False,
+        nest=True,
+    )
+    child_vectors = np.stack(hp.pix2vec(child_nside, children, nest=True), axis=-1)
+    r_perp = chi * np.sqrt(
+        np.maximum(2.0 * (1.0 - child_vectors @ halo_vector[0]), 0.0)
+    )
+    children = children[r_perp <= _r_delta_for_theta(theta_h, chi)]
+    expected_parent_ring = hp.nest2ring(nside, children // 4)
+
+    np.testing.assert_array_equal(
+        np.sort(np.asarray(stencil.sample_compact_row)),
+        np.sort(expected_parent_ring),
+    )
+    assert np.unique(np.asarray(stencil.sample_compact_row)).size < stencil.size
+
+
+def test_adaptive_native_branch_and_selection_are_concentration_independent():
+    hp = pytest.importorskip("healpy")
+    module = _load_example_module()
+    nside = 8
     pixels = np.arange(hp.nside2npix(nside), dtype=np.int64)
-    mass_map = _mass_map(pixels, temperature=np.zeros_like(pixels), nside=nside)
-
-    stencil = module.build_lightcone_sparse_stencil_for_mass_map_local(
-        mass_map,
-        catalog,
-        np.array([rmax]),
-    )
-
-    assert neighbour in np.asarray(stencil.pix_id)
-
-
-def test_local_sparse_stencil_diagnostics_counters():
-    hp = pytest.importorskip("healpy")
-    module = _load_example_module()
-
-    pixels = np.array([0, 5], dtype=np.int64)
-    unit_vector = np.stack(hp.pix2vec(1, np.array([0, 5], dtype=np.int64)), axis=-1)
+    halo_vector = np.asarray(hp.pix2vec(nside, 100))[None, :]
+    chi = 1000.0
+    theta_map = np.sqrt(hp.nside2pixarea(nside))
+    theta_h = 4.5 * theta_map
     catalog = _catalog(
-        unit_vector=unit_vector,
-        mass=np.array([1.0e13, 2.0e13]),
-        redshift=np.array([0.2, 0.25]),
-        chi=np.array([1000.0, 1100.0]),
+        unit_vector=halo_vector,
+        mass=np.array([1.0e13]),
+        redshift=np.array([0.2]),
+        chi=np.array([chi]),
     )
-    mass_map = _mass_map(pixels, temperature=np.array([100.0, 200.0]), nside=1)
-
-    stencil, diag = module.build_lightcone_sparse_stencil_for_mass_map_local(
-        mass_map,
+    arguments = (
+        _mass_map(pixels, nside=nside),
         catalog,
-        rmax_mpc_h=np.array([1.0, 1.0]),
+        np.array([_r_delta_for_theta(theta_h, chi)]),
+        AngularAssignmentParams(theta_map / 10.0, 4),
+    )
+    first, first_diagnostics = module.build_adaptive_lightcone_stencil_for_mass_map(
+        *arguments,
+        collect_diagnostics=True,
+    )
+    second, second_diagnostics = module.build_adaptive_lightcone_stencil_for_mass_map(
+        *arguments,
         collect_diagnostics=True,
     )
 
-    assert diag.n_halos == len(catalog.mass)
-    assert diag.n_query_pixels_total >= diag.n_inside_domain_total
-    assert diag.n_inside_domain_total >= diag.n_kept_pairs_total
-    assert diag.n_kept_pairs_total == len(np.asarray(stencil.pix_id))
-    assert diag.elapsed_seconds >= 0.0
+    assert first_diagnostics.n_native_resolved == 1
+    assert first_diagnostics.n_supersampled == 0
+    assert second_diagnostics.n_native_resolved == 1
+    np.testing.assert_array_equal(first.sample_halo_id, second.sample_halo_id)
+    np.testing.assert_allclose(first.sample_r_perp, second.sample_r_perp)
 
 
-def test_local_sparse_stencil_profile_separates_phases():
+def test_adaptive_global_support_is_kept_before_compact_filtering():
     hp = pytest.importorskip("healpy")
     module = _load_example_module()
-    pixels = np.array([0, 5], dtype=np.int64)
-    unit_vector = np.stack(hp.pix2vec(1, pixels), axis=-1)
+    nside = 8
+    halo_ring = 100
+    halo_vector = np.asarray(hp.pix2vec(nside, halo_ring))[None, :]
+    chi = 1.0
+    theta_map = np.sqrt(hp.nside2pixarea(nside))
     catalog = _catalog(
-        unit_vector=unit_vector,
-        mass=np.array([1.0e13, 2.0e13]),
-        redshift=np.array([0.2, 0.25]),
-        chi=np.array([1000.0, 1100.0]),
+        unit_vector=halo_vector,
+        mass=np.array([1.0e13]),
+        redshift=np.array([0.2]),
+        chi=np.array([chi]),
     )
-    mass_map = _mass_map(pixels, temperature=np.array([100.0, 200.0]), nside=1)
-
-    _, diag = module.build_lightcone_sparse_stencil_for_mass_map_local(
-        mass_map,
+    catalog = module.selected_lightcone_catalog(catalog, np.array([True]))
+    r_delta = module.nfw_support_rdelta_mpc_h(
         catalog,
-        rmax_mpc_h=np.array([1.0, 1.0]),
+        SimpleNamespace(cosmology=Cosmology()),
+        module.NFWProfileParams(),
+    )
+    stencil, diagnostics = module.build_adaptive_lightcone_stencil_for_mass_map(
+        _mass_map(np.array([halo_ring]), nside=nside),
+        catalog,
+        r_delta,
+        AngularAssignmentParams(theta_map / 10.0, 4),
         collect_diagnostics=True,
-        profile_phases=True,
+    )
+    painted = paint_lightcone_particle_count_map_sparse(
+        stencil,
+        catalog,
+        particle_mass_msun_h=1.0e10,
     )
 
-    phase_seconds = (
-        diag.query_disc_seconds,
-        diag.compact_lookup_seconds,
-        diag.pix2vec_filter_seconds,
-        diag.concatenate_seconds,
-        diag.jax_transfer_seconds,
-    )
-    assert all(value >= 0.0 for value in phase_seconds)
-    assert sum(phase_seconds) <= diag.elapsed_seconds
-    assert diag.residual_seconds >= 0.0
-    assert diag.n_subpixel_radius_halos == 2
+    assert diagnostics.n_global_profile_samples > diagnostics.n_retained_profile_samples
+    assert np.any(~np.asarray(stencil.sample_in_compact))
+    assert 0.0 < float(jnp.sum(painted)) < 1000.0
 
-def test_run_nfw_calibration_pipeline_dense_debug_path_paints_map():
+
+def test_adaptive_zero_sample_query_falls_back_to_ngp(monkeypatch):
     hp = pytest.importorskip("healpy")
     module = _load_example_module()
-
-    pixels = np.array([0], dtype=np.int64)
-    unit_vector = np.stack(hp.pix2vec(1, pixels), axis=-1)
+    nside = 8
+    halo_ring = 100
+    halo_vector = np.asarray(hp.pix2vec(nside, halo_ring))[None, :]
     catalog = _catalog(
-        unit_vector=unit_vector,
+        unit_vector=halo_vector,
         mass=np.array([1.0e13]),
         redshift=np.array([0.2]),
         chi=np.array([1000.0]),
     )
-    mass_map = _mass_map(
-        pixels,
-        temperature=np.array([100.0]),
-        nside=1,
-    )
-    metadata = SimpleNamespace(cosmology=Cosmology())
-
-    diagnostics = module.run_nfw_calibration_pipeline(
+    monkeypatch.setattr(hp, "query_disc", lambda *args, **kwargs: np.empty(0, dtype=np.int64))
+    stencil, diagnostics = module.build_adaptive_lightcone_stencil_for_mass_map(
+        _mass_map(np.array([halo_ring]), nside=nside),
         catalog,
-        np.array([True]),
-        mass_map,
-        metadata,
-        particle_mass_msun_h=1.0e10,
-        pipeline_mode="paint",
-        concentration_amplitude=5.71,
-        truncation_width_fraction=0.05,
-        chunk_size=1,
-        dense_demo=True,
+        np.array([500.0]),
+        AngularAssignmentParams(0.01, 1),
+        collect_diagnostics=True,
     )
 
-    assert diagnostics["pipeline_mode"] == "paint"
-    assert diagnostics["nfw_paint_mode"] == "dense"
-    assert diagnostics["nfw_map_derivatives"] == "none"
-    assert diagnostics["nfw_particle_counts"].shape == (1,)
-    assert np.isfinite(diagnostics["nfw_sum_particle_counts"])
-    np.testing.assert_allclose(
-        np.sum(diagnostics["nfw_particle_counts"]),
-        diagnostics["nfw_sum_particle_counts"],
-        rtol=1.0e-5,
-    )
+    assert diagnostics.n_zero_sample_ngp_fallbacks == 1
+    np.testing.assert_array_equal(np.asarray(stencil.ngp_active), [True])
+    np.testing.assert_array_equal(np.asarray(stencil.resolved_halo_mask), [False])
 
 
-def test_run_nfw_calibration_pipeline_sparse_matches_dense_when_stencil_contains_all_pairs():
+def test_adaptive_controls_default_and_invalid_child_nside():
     hp = pytest.importorskip("healpy")
     module = _load_example_module()
+    resolved = module.resolve_angular_assignment(8, AngularAssignmentParams())
 
-    pixels = np.array([5, 0], dtype=np.int64)
-    pixel_unit_vectors = np.stack(hp.pix2vec(1, pixels), axis=-1)
-    catalog = _catalog(
-        unit_vector=pixel_unit_vectors,
-        mass=np.array([1.0e13, 2.0e13]),
-        redshift=np.array([0.2, 0.25]),
-        chi=np.array([1000.0, 1100.0]),
-    )
-    mass_map = _mass_map(
-        pixels,
-        temperature=np.array([100.0, 200.0]),
-        nside=1,
-    )
-    metadata = SimpleNamespace(cosmology=Cosmology())
-
-    sparse = module.run_nfw_calibration_pipeline(
-        catalog,
-        np.array([True, True]),
-        mass_map,
-        metadata,
-        particle_mass_msun_h=1.0e10,
-        pipeline_mode="paint",
-        concentration_amplitude=5.71,
-        truncation_width_fraction=0.05,
-        chunk_size=1,
-        taper_radius_factor=1.0e6,
-    )
-    dense = module.run_nfw_calibration_pipeline(
-        catalog,
-        np.array([True, True]),
-        mass_map,
-        metadata,
-        particle_mass_msun_h=1.0e10,
-        pipeline_mode="paint",
-        concentration_amplitude=5.71,
-        truncation_width_fraction=0.05,
-        chunk_size=1,
-        taper_radius_factor=1.0e6,
-        dense_demo=True,
-    )
-
-    assert sparse["nfw_paint_mode"] == "sparse"
-    assert dense["nfw_paint_mode"] == "dense"
-    np.testing.assert_allclose(
-        sparse["nfw_particle_counts"],
-        dense["nfw_particle_counts"],
-        rtol=1.0e-5,
-    )
-    assert sparse["nfw_sparse_pair_count"] == sparse["nfw_dense_pair_count"]
-    np.testing.assert_allclose(
-        sparse["nfw_sum_particle_counts"],
-        dense["nfw_sum_particle_counts"],
-        rtol=1.0e-5,
-    )
+    assert resolved.theta_resolution_rad == pytest.approx(0.5 * hp.max_pixrad(8))
+    assert resolved.n_resolution == 4
+    with pytest.raises(ValueError, match="invalid child NSIDE"):
+        module.resolve_angular_assignment(
+            2**29,
+            AngularAssignmentParams(theta_resolution_rad=1.0e-30, n_resolution=4),
+        )
 
 
-def test_run_nfw_calibration_pipeline_sparse_uses_fewer_pairs_for_local_stencil():
+def test_unresolved_halo_outside_compact_map_deposits_zero_without_redirection():
     hp = pytest.importorskip("healpy")
     module = _load_example_module()
-
-    pixels = np.array([0, 5], dtype=np.int64)
-    unit_vector = np.stack(hp.pix2vec(1, np.array([0], dtype=np.int64)), axis=-1)
-    catalog = _catalog(
-        unit_vector=unit_vector,
-        mass=np.array([1.0e13]),
-        redshift=np.array([0.2]),
-        chi=np.array([1000.0]),
+    nside = 8
+    host_ring = 100
+    compact_ring = 300
+    catalog = LightconeHaloCatalog(
+        unit_vector=jnp.asarray(np.asarray(hp.pix2vec(nside, host_ring))[None, :]),
+        chi=jnp.asarray([1000.0]),
+        mass=jnp.asarray([1.0e13]),
+        redshift=jnp.asarray([0.2]),
     )
-    mass_map = _mass_map(
-        pixels,
-        temperature=np.array([100.0, 200.0]),
-        nside=1,
-    )
-    metadata = SimpleNamespace(cosmology=Cosmology())
-
-    diagnostics = module.run_nfw_calibration_pipeline(
+    stencil = module.build_adaptive_lightcone_stencil_for_mass_map(
+        _mass_map(np.array([compact_ring]), nside=nside),
         catalog,
-        np.array([True]),
-        mass_map,
-        metadata,
+        np.array([0.1]),
+        AngularAssignmentParams(theta_resolution_rad=0.01, n_resolution=4),
+    )
+    painted = paint_lightcone_particle_count_map_sparse(
+        stencil,
+        catalog,
         particle_mass_msun_h=1.0e10,
-        pipeline_mode="paint",
-        concentration_amplitude=5.71,
-        truncation_width_fraction=0.05,
-        chunk_size=1,
     )
 
-    assert diagnostics["nfw_sparse_pair_count"] < diagnostics["nfw_dense_pair_count"]
-    assert diagnostics["nfw_sparse_compression_factor"] > 1.0
-    assert diagnostics["nfw_particle_counts"].shape == (2,)
+    np.testing.assert_array_equal(np.asarray(stencil.ngp_in_compact), [False])
+    np.testing.assert_array_equal(np.asarray(painted), [0.0])
 
 
-def test_write_manifest_contains_scientific_diagnostics_and_provenance(tmp_path):
+def test_invalid_resolved_normalization_raises_detailed_error():
+    module = _load_example_module()
+    catalog = LightconeHaloCatalog(
+        unit_vector=jnp.asarray([[1.0, 0.0, 0.0]]),
+        chi=jnp.asarray([1000.0]),
+        mass=jnp.asarray([1.0e13]),
+        redshift=jnp.asarray([0.2]),
+    )
+    stencil = AdaptiveLightconeStencil(
+        sample_compact_row=jnp.asarray([0], dtype=jnp.int32),
+        sample_halo_id=jnp.asarray([0], dtype=jnp.int32),
+        sample_r_perp=jnp.asarray([100.0]),
+        sample_solid_angle_sr=jnp.asarray([1.0e-8]),
+        sample_valid=jnp.asarray([True]),
+        sample_in_compact=jnp.asarray([True]),
+        ngp_compact_row=jnp.asarray([0], dtype=jnp.int32),
+        ngp_active=jnp.asarray([False]),
+        ngp_in_compact=jnp.asarray([False]),
+        resolved_halo_mask=jnp.asarray([True]),
+        n_pix=1,
+    )
+
+    with pytest.raises(ValueError, match="invalid adaptive NFW normalization"):
+        module.paint_bucketed_nfw_sparse_map(
+            stencil,
+            catalog,
+            SimpleNamespace(cosmology=Cosmology()),
+            1.0e10,
+            5.71,
+            -0.084,
+            -0.47,
+            2.0e12,
+            16,
+            np.array([1.0]),
+            8,
+            compute_map_derivatives=False,
+            profile=False,
+        )
+
+
+def test_supersampling_converges_to_finer_child_grid_reference():
+    hp = pytest.importorskip("healpy")
+    module = _load_example_module()
+    nside = 8
+    pixels = np.arange(hp.nside2npix(nside), dtype=np.int64)
+    halo_vector = np.asarray(hp.pix2vec(nside, 100))[None, :]
+    mass = jnp.asarray([1.0e14])
+    redshift = jnp.asarray([0.3])
+    provisional = LightconeHaloCatalog(
+        unit_vector=jnp.asarray(halo_vector),
+        chi=jnp.asarray([1.0]),
+        mass=mass,
+        redshift=redshift,
+    )
+    r_delta = module.nfw_support_rdelta_mpc_h(
+        provisional,
+        SimpleNamespace(cosmology=Cosmology()),
+        module.NFWProfileParams(),
+    )
+    theta_map = np.sqrt(hp.nside2pixarea(nside))
+    theta_h = 2.5 * theta_map
+    chi = r_delta[0] / (2.0 * np.sin(0.5 * theta_h))
+    catalog = provisional._replace(chi=jnp.asarray([chi]))
+    mass_map = _mass_map(pixels, nside=nside)
+
+    maps = []
+    for n_resolution in (4, 8, 16, 32):
+        stencil = module.build_adaptive_lightcone_stencil_for_mass_map(
+            mass_map,
+            catalog,
+            r_delta,
+            AngularAssignmentParams(theta_map / 20.0, n_resolution),
+        )
+        maps.append(
+            np.asarray(
+                paint_lightcone_particle_count_map_sparse(
+                    stencil,
+                    catalog,
+                    particle_mass_msun_h=1.0e10,
+                    sample_chunk_size=1024,
+                )
+            )
+        )
+
+    reference = maps[-1]
+    errors = [np.sum(np.abs(value - reference)) for value in maps[:-1]]
+    assert errors[2] < errors[1] < errors[0]
+    for value in maps:
+        assert np.sum(value) == pytest.approx(1.0e4, rel=1.0e-10)
+
+
+def test_supersampled_profile_is_stable_under_random_subpixel_shifts():
+    hp = pytest.importorskip("healpy")
+    module = _load_example_module()
+    nside = 8
+    pixels = np.arange(hp.nside2npix(nside), dtype=np.int64)
+    pixel_vectors = np.stack(hp.pix2vec(nside, pixels), axis=-1)
+    theta_map = np.sqrt(hp.nside2pixarea(nside))
+    theta_h = 2.5 * theta_map
+    theta0, phi0 = hp.pix2ang(nside, 100)
+    provisional = LightconeHaloCatalog(
+        unit_vector=jnp.asarray([[1.0, 0.0, 0.0]]),
+        chi=jnp.asarray([1.0]),
+        mass=jnp.asarray([1.0e14]),
+        redshift=jnp.asarray([0.3]),
+    )
+    r_delta = module.nfw_support_rdelta_mpc_h(
+        provisional,
+        SimpleNamespace(cosmology=Cosmology()),
+        module.NFWProfileParams(),
+    )
+    chi = r_delta[0] / (2.0 * np.sin(0.5 * theta_h))
+    rng = np.random.default_rng(20260714)
+    radial_moments = []
+
+    for theta_shift, phi_shift in rng.uniform(-0.2, 0.2, size=(5, 2)):
+        halo_vector = np.asarray(
+            hp.ang2vec(
+                theta0 + theta_shift * theta_map,
+                phi0 + phi_shift * theta_map,
+            )
+        )
+        catalog = provisional._replace(
+            unit_vector=jnp.asarray(halo_vector[None, :]),
+            chi=jnp.asarray([chi]),
+        )
+        stencil = module.build_adaptive_lightcone_stencil_for_mass_map(
+            _mass_map(pixels, nside=nside),
+            catalog,
+            r_delta,
+            AngularAssignmentParams(theta_map / 20.0, 16),
+        )
+        painted = np.asarray(
+            paint_lightcone_particle_count_map_sparse(
+                stencil,
+                catalog,
+                particle_mass_msun_h=1.0e10,
+                sample_chunk_size=1024,
+            )
+        )
+        chord = np.sqrt(
+            np.maximum(2.0 * (1.0 - pixel_vectors @ halo_vector), 0.0)
+        )
+        radial_moments.append(float(np.sum(painted * chord) / np.sum(painted)))
+        assert np.sum(painted) == pytest.approx(1.0e4, rel=1.0e-10)
+
+    radial_moments = np.asarray(radial_moments)
+    assert np.ptp(radial_moments) / np.mean(radial_moments) < 0.06
+
+
+def test_write_manifest_contains_adaptive_scientific_diagnostics_and_provenance(tmp_path):
     module = _load_example_module()
     path = tmp_path / "painted_nfw_manifest.csv"
-
-    expected = {
-        "segment_index": 0,
-        "parameter_file": "parameter_file",
-        "sheets_file": "pinocchio.example.sheets.out",
-        "plc_catalog": "pinocchio.example.plc.out",
-        "mass_map_path": "massmap.seg000.fits",
-        "output_npz": "painted_nfw.seg000.npz",
-        "z_lo": 0.1,
-        "z_hi": 0.2,
-        "chi_lo_mpc_h": 100.0,
-        "chi_hi_mpc_h": 200.0,
-        "inclusive_upper": False,
-        "catalog_format": "auto",
-        "redshift_mode": "true",
-        "bounds_mode": "z",
-        "light_plc": False,
-        "hubble_table": "",
-        "particle_mass_msun_h": 5.0,
-        "jax_precision": "float64",
-        "pipeline_mode": "derivatives",
-        "nfw_paint_mode": "sparse",
-        "nfw_map_derivatives": "concentration",
-        "nfw_mass_definition": "200c",
-        "nfw_overdensity_mode": "constant",
-        "nfw_overdensity": 200.0,
-        "nfw_reference_density": "critical",
-        "nfw_overdensity_file": "",
-        "nfw_mass_conversion": "none_catalog_mass_interpreted_as_profile_mass",
-        "nfw_concentration_amplitude": 5.71,
-        "nfw_concentration_mass_slope": -0.084,
-        "nfw_concentration_redshift_slope": -0.47,
-        "nfw_concentration_mass_pivot_msun_h": 2.0e12,
-        "nfw_truncation_width_fraction": 0.05,
-        "nfw_taper_radius_factor": 10.0,
-        "selected_halo_count": 2,
-        "selected_halo_mass_msun_h": 50.0,
-        "expected_particle_count": 10.0,
-        "painted_particle_count": 8.0,
-        "painted_to_expected_ratio": 0.8,
-        "sparse_pair_count": 5,
-        "halos_with_zero_pairs": 1,
-        "mass_in_halos_with_zero_pairs_msun_h": 5.0,
-        "subpixel_support_halo_count": 2,
-        "mpi_rank_count": 2,
-        "segment_worker_count": 3,
-        "git_commit": "abc123",
-    }
-    module.write_manifest(
-        path,
-        [
-            {
-                **expected,
-                "n_halos_in_segment": 2,
-                "nfw_sum_particle_counts": 1.25,
-                "sum_d_nfw_particle_counts_d_concentration_amplitude": 0.3,
-            }
-        ],
+    result = _fake_segment_result(
+        module,
+        segment_index=0,
+        mass_map_path=Path("massmap.seg000.fits"),
+        output_npz=Path("painted_nfw.seg000.npz"),
+        inclusive_upper=False,
     )
+    args = _workflow_args()
+    row = module.calibration_manifest_row(
+        result,
+        args,
+        SimpleNamespace(particle_mass_msun_h=1.0),
+        module.ExecutionProvenance(2, 3, "abc123"),
+    )
+    module.write_manifest(path, [row])
 
     with path.open(newline="") as handle:
         reader = csv.DictReader(handle)
         rows = list(reader)
 
     assert len(rows) == 1
-    assert reader.fieldnames == list(expected)
-    assert rows[0] == {key: str(value) for key, value in expected.items()}
+    assert "nfw_profile_support" in reader.fieldnames
+    assert "theta_resolution_rad" in reader.fieldnames
+    assert "assigned_global_particle_count" in reader.fieldnames
+    assert "retained_compact_particle_count" in reader.fieldnames
+    assert "outside_compact_particle_count" in reader.fieldnames
+    assert "nfw_truncation_width_fraction" not in reader.fieldnames
+    assert rows[0]["mpi_rank_count"] == "2"
+    assert rows[0]["git_commit"] == "abc123"

@@ -29,7 +29,8 @@ The first supported physical model is NFW with a Duffy-like analytical concentra
 - Default halo mass definition: `M_200c`.
 - Default concentration relation: Duffy-like 200c full-sample relation, implemented as a free power law.
 - NFW radii are converted to comoving radii before profile evaluation.
-- Smooth truncation is enabled by default to avoid a hard non-differentiable edge.
+- NFW density has hard support at `R_delta`; projected NFW is the exact finite
+  line-of-sight projection through that sphere.
 
 ## What counts as done for a new feature
 
@@ -49,7 +50,8 @@ A feature is not done until it has:
 
 - Keep improving `nfw_density` and `nfw_projected_surface_density`.
 - Add analytic/semianalytic validation tests for enclosed mass and projected profile behaviour.
-- Add optional exact hard truncation only as a user-selected mode, not as the default.
+- Validate hard-truncated density and projected profiles against numerical
+  enclosed-mass and line-of-sight references.
 - Add chunked pixel painting for PLC maps.
 
 ### Stage 2: PINOCCHIO adapters

@@ -3,17 +3,16 @@ import jax.numpy as jnp
 import pytest
 
 from geppetto import (
+    AdaptiveLightconeStencil,
     ConcentrationParams,
     Cosmology,
     HaloCatalog,
     LightconeHaloCatalog,
     LightconeSparseStencil,
-    NFWProfileParams,
     TabulatedProjectedProfileParams,
     density_at_points,
     density_at_points_chunked,
     paint_box_density_grid,
-    paint_lightcone_particle_count_map,
     paint_lightcone_particle_count_map_sparse,
     paint_lightcone_particle_count_map_tabulated_sparse,
     paint_lightcone_surface_density,
@@ -143,25 +142,10 @@ def test_lightcone_sparse_matches_dense_when_stencil_contains_all_pairs():
         pixel_area_sr=0.01,
         return_mass_per_pixel=True,
     )
-    dense_counts = paint_lightcone_particle_count_map(
-        pixel_unit_vectors,
-        catalog,
-        particle_mass_msun_h=1.0e10,
-        pixel_area_sr=0.01,
-    )
-    sparse_counts = paint_lightcone_particle_count_map_sparse(
-        stencil,
-        catalog,
-        particle_mass_msun_h=1.0e10,
-        pixel_area_sr=0.01,
-    )
-
     assert sparse.shape == (3,)
     assert stencil.size == 6
     assert jnp.allclose(sparse, dense, rtol=1.0e-5, atol=1.0e-5)
     assert jnp.allclose(sparse_mass, dense_mass, rtol=1.0e-5, atol=1.0e-5)
-    assert jnp.allclose(sparse_counts, sparse_mass / 1.0e10, rtol=1.0e-6)
-    assert jnp.allclose(sparse_counts, dense_counts, rtol=1.0e-5, atol=1.0e-5)
 
 
 def test_lightcone_sparse_painter_is_jit_safe():
@@ -208,17 +192,13 @@ def test_sparse_pair_weights_make_duplicate_padding_inert():
         pair_weight=jnp.array([1.0, 1.0, 1.0, 0.0, 0.0]),
     )
 
-    direct = paint_lightcone_particle_count_map_sparse(
+    direct = paint_lightcone_surface_density_sparse(
         stencil,
         catalog,
-        particle_mass_msun_h=1.0e10,
-        pixel_area_sr=0.01,
     )
-    weighted = jax.jit(paint_lightcone_particle_count_map_sparse, static_argnums=(2, 3))(
+    weighted = jax.jit(paint_lightcone_surface_density_sparse)(
         padded,
         catalog,
-        1.0e10,
-        0.01,
     )
     profile_params = TabulatedProjectedProfileParams(
         x=jnp.linspace(0.0, 1.0, 5),
@@ -268,19 +248,7 @@ def test_lightcone_sparse_gradients_are_finite():
             )
         )
 
-    def profile_objective(truncation_width_fraction):
-        return jnp.sum(
-            paint_lightcone_surface_density_sparse(
-                stencil,
-                catalog,
-                profile_params=NFWProfileParams(
-                    truncation_width_fraction=truncation_width_fraction
-                ),
-            )
-        )
-
     assert jnp.isfinite(jax.grad(concentration_objective)(5.71))
-    assert jnp.isfinite(jax.grad(profile_objective)(0.05))
 
 
 def test_lightcone_sparse_builder_filters_pairs_and_handles_empty_stencils():
@@ -499,9 +467,28 @@ def test_lightcone_tabulated_sparse_is_jit_safe_and_differentiable():
     assert jnp.all(jnp.isfinite(grad))
 
 
-def test_lightcone_particle_count_map_shape_grad_and_normalization():
-    pixel_unit_vectors = jnp.array([[1.0, 0.0, 0.0], [0.999, 0.045, 0.0]])
-    pixel_unit_vectors = pixel_unit_vectors / jnp.linalg.norm(pixel_unit_vectors, axis=1)[:, None]
+def _adaptive_stencil(
+    *,
+    compact: tuple[bool, ...] = (True, True),
+    valid: tuple[bool, ...] = (True, True),
+) -> AdaptiveLightconeStencil:
+    n_sample = len(compact)
+    return AdaptiveLightconeStencil(
+        sample_compact_row=jnp.zeros(n_sample, dtype=jnp.int32),
+        sample_halo_id=jnp.zeros(n_sample, dtype=jnp.int32),
+        sample_r_perp=jnp.linspace(0.05, 0.15, n_sample),
+        sample_solid_angle_sr=jnp.full(n_sample, 1.0e-8),
+        sample_valid=jnp.asarray(valid),
+        sample_in_compact=jnp.asarray(compact),
+        ngp_compact_row=jnp.zeros(1, dtype=jnp.int32),
+        ngp_active=jnp.zeros(1, dtype=bool),
+        ngp_in_compact=jnp.zeros(1, dtype=bool),
+        resolved_halo_mask=jnp.ones(1, dtype=bool),
+        n_pix=1,
+    )
+
+
+def test_adaptive_particle_count_map_shape_gradient_and_global_normalization():
     catalog = LightconeHaloCatalog(
         unit_vector=jnp.array([[1.0, 0.0, 0.0]]),
         chi=jnp.array([1000.0]),
@@ -509,61 +496,100 @@ def test_lightcone_particle_count_map_shape_grad_and_normalization():
         redshift=jnp.array([0.3]),
     )
     particle_mass_msun_h = 1.0e10
-    pixel_area_sr = 0.01
+    stencil = _adaptive_stencil()
 
     def objective(amplitude):
         return jnp.sum(
-            paint_lightcone_particle_count_map(
-                pixel_unit_vectors,
+            paint_lightcone_particle_count_map_sparse(
+                stencil,
                 catalog,
                 particle_mass_msun_h=particle_mass_msun_h,
-                pixel_area_sr=pixel_area_sr,
                 concentration_params=ConcentrationParams(amplitude=amplitude),
             )
         )
 
-    mass_per_pixel = paint_lightcone_surface_density(
-        pixel_unit_vectors,
-        catalog,
-        pixel_area_sr=pixel_area_sr,
-        return_mass_per_pixel=True,
-    )
-    counts = paint_lightcone_particle_count_map(
-        pixel_unit_vectors,
+    counts = paint_lightcone_particle_count_map_sparse(
+        stencil,
         catalog,
         particle_mass_msun_h=particle_mass_msun_h,
-        pixel_area_sr=pixel_area_sr,
     )
 
-    assert counts.shape == (2,)
+    assert counts.shape == (1,)
     assert jnp.all(jnp.isfinite(counts))
     assert jnp.all(counts >= 0.0)
-    assert jnp.allclose(counts, mass_per_pixel / particle_mass_msun_h, rtol=1.0e-6)
+    assert jnp.allclose(jnp.sum(counts), catalog.mass[0] / particle_mass_msun_h)
     assert jnp.isfinite(jax.grad(objective)(5.71))
+    assert jnp.allclose(jax.grad(objective)(5.71), 0.0, atol=2.0e-3)
 
 
-def test_lightcone_particle_count_map_chunked_matches_unchunked():
-    pixel_unit_vectors = jnp.array([[1.0, 0.0, 0.0], [0.999, 0.045, 0.0]])
-    pixel_unit_vectors = pixel_unit_vectors / jnp.linalg.norm(pixel_unit_vectors, axis=1)[:, None]
+def test_adaptive_particle_count_map_boundary_filtering_and_chunking():
     catalog = LightconeHaloCatalog(
-        unit_vector=jnp.array([[1.0, 0.0, 0.0], [0.998, 0.06, 0.0]]),
-        chi=jnp.array([1000.0, 1050.0]),
-        mass=jnp.array([1.0e14, 5.0e13]),
-        redshift=jnp.array([0.3, 0.35]),
+        unit_vector=jnp.array([[1.0, 0.0, 0.0]]),
+        chi=jnp.array([1000.0]),
+        mass=jnp.array([1.0e14]),
+        redshift=jnp.array([0.3]),
     )
+    stencil = _adaptive_stencil(compact=(True, False))
 
-    direct = paint_lightcone_particle_count_map(
-        pixel_unit_vectors,
+    direct = paint_lightcone_particle_count_map_sparse(
+        stencil,
         catalog,
         particle_mass_msun_h=1.0e10,
-        pixel_area_sr=0.01,
+        sample_chunk_size=8,
     )
-    chunked = paint_lightcone_particle_count_map(
-        pixel_unit_vectors,
+    chunked = paint_lightcone_particle_count_map_sparse(
+        stencil,
         catalog,
         particle_mass_msun_h=1.0e10,
-        pixel_area_sr=0.01,
-        chunk_size=1,
+        sample_chunk_size=1,
     )
 
-    assert jnp.allclose(direct, chunked, rtol=1.0e-5, atol=1.0e-5)
+    assert jnp.allclose(direct, chunked, rtol=1.0e-6, atol=1.0e-8)
+    assert 0.0 < direct[0] < catalog.mass[0] / 1.0e10
+    derivative = jax.grad(
+        lambda amplitude: jnp.sum(
+            paint_lightcone_particle_count_map_sparse(
+                stencil,
+                catalog,
+                particle_mass_msun_h=1.0e10,
+                concentration_params=ConcentrationParams(amplitude=amplitude),
+            )
+        )
+    )(5.71)
+    assert jnp.isfinite(derivative)
+    assert jnp.abs(derivative) > 0.0
+
+
+def test_adaptive_particle_count_map_ngp_and_padding_are_concentration_independent():
+    catalog = LightconeHaloCatalog(
+        unit_vector=jnp.array([[1.0, 0.0, 0.0]]),
+        chi=jnp.array([1000.0]),
+        mass=jnp.array([1.0e14]),
+        redshift=jnp.array([0.3]),
+    )
+    stencil = AdaptiveLightconeStencil(
+        sample_compact_row=jnp.array([0], dtype=jnp.int32),
+        sample_halo_id=jnp.array([0], dtype=jnp.int32),
+        sample_r_perp=jnp.array([0.1]),
+        sample_solid_angle_sr=jnp.array([0.0]),
+        sample_valid=jnp.array([False]),
+        sample_in_compact=jnp.array([False]),
+        ngp_compact_row=jnp.array([0], dtype=jnp.int32),
+        ngp_active=jnp.array([True]),
+        ngp_in_compact=jnp.array([True]),
+        resolved_halo_mask=jnp.array([False]),
+        n_pix=1,
+    )
+
+    def objective(amplitude):
+        return jnp.sum(
+            paint_lightcone_particle_count_map_sparse(
+                stencil,
+                catalog,
+                particle_mass_msun_h=1.0e10,
+                concentration_params=ConcentrationParams(amplitude=amplitude),
+            )
+        )
+
+    assert jnp.allclose(objective(5.71), 1.0e4)
+    assert jax.grad(objective)(5.71) == 0.0

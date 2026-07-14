@@ -1,5 +1,6 @@
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from geppetto.concentration import ConcentrationParams, concentration_power_law, duffy08_all_200c
 from geppetto.cosmology import (
@@ -122,6 +123,115 @@ def test_projected_nfw_surface_density_is_finite():
     )
     assert sigma.shape == (3,)
     assert jnp.all(jnp.isfinite(sigma))
+
+
+def test_hard_truncated_nfw_density_matches_nfw_inside_and_is_zero_outside():
+    mass = jnp.asarray(1.0e14)
+    redshift = jnp.asarray(0.3)
+    concentration = ConcentrationParams(
+        amplitude=4.0,
+        mass_slope=0.0,
+        redshift_slope=0.0,
+    )
+    params = NFWProfileParams()
+    r_delta, _, r_s, rho_s = nfw_scale_radius_and_density(
+        mass,
+        redshift,
+        Cosmology(),
+        concentration,
+        params,
+    )
+    radius = 0.4 * r_delta
+    x = radius / r_s
+    expected = rho_s / (x * (1.0 + x) ** 2)
+
+    assert jnp.allclose(
+        nfw_density(radius, mass, redshift, Cosmology(), concentration, params),
+        expected,
+        rtol=1.0e-6,
+    )
+    assert nfw_density(
+        1.01 * r_delta,
+        mass,
+        redshift,
+        Cosmology(),
+        concentration,
+        params,
+    ) == 0.0
+
+
+def test_projected_nfw_is_exact_line_of_sight_projection_of_hard_sphere():
+    mass = jnp.asarray(1.0e14)
+    redshift = jnp.asarray(0.3)
+    concentration = ConcentrationParams(
+        amplitude=4.0,
+        mass_slope=0.0,
+        redshift_slope=0.0,
+    )
+    params = NFWProfileParams()
+    r_delta, _, r_s, rho_s = nfw_scale_radius_and_density(
+        mass,
+        redshift,
+        Cosmology(),
+        concentration,
+        params,
+    )
+    r_delta_np = float(r_delta)
+    r_s_np = float(r_s)
+    rho_s_np = float(rho_s)
+    radii = np.asarray([0.2, 0.6]) * r_delta_np
+    projected = np.asarray(
+        nfw_projected_surface_density(
+            jnp.asarray(radii),
+            mass,
+            redshift,
+            Cosmology(),
+            concentration,
+            params,
+        )
+    )
+    numerical = []
+    for radius in radii:
+        z_max = np.sqrt(r_delta_np**2 - radius**2)
+        z = np.linspace(0.0, z_max, 100_001)
+        spherical_radius = np.sqrt(radius**2 + z**2)
+        x = spherical_radius / r_s_np
+        density = rho_s_np / (x * (1.0 + x) ** 2)
+        numerical.append(2.0 * np.trapezoid(density, z))
+
+    assert np.allclose(projected, numerical, rtol=2.0e-5)
+    assert nfw_projected_surface_density(
+        1.01 * r_delta,
+        mass,
+        redshift,
+        Cosmology(),
+        concentration,
+        params,
+    ) == 0.0
+
+
+def test_hard_truncated_projected_nfw_gradient_is_finite():
+    def objective(amplitude):
+        return jnp.sum(
+            nfw_projected_surface_density(
+                jnp.asarray([0.05, 0.1, 0.2]),
+                jnp.asarray(1.0e14),
+                jnp.asarray(0.3),
+                Cosmology(),
+                ConcentrationParams(amplitude=amplitude),
+            )
+        )
+
+    assert jnp.isfinite(jax.grad(objective)(5.71))
+
+
+def test_nfw_profile_configuration_has_no_taper_parameters():
+    assert set(NFWProfileParams._fields) == {
+        "overdensity",
+        "reference_density",
+        "r_softening_fraction",
+        "overdensity_mode",
+    }
 
 
 def test_tabulated_projected_surface_density_shape_support_and_normalization():

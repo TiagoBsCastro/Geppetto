@@ -1,6 +1,8 @@
 """GEPPETTO: differentiable one-halo profile painting for PINOCCHIO catalogues."""
 
 from geppetto.catalog import (
+    AdaptiveLightconeStencil,
+    AngularAssignmentParams,
     HaloCatalog,
     LightconeHaloCatalog,
     LightconeSparseStencil,
@@ -16,7 +18,6 @@ from geppetto.painters import (
     density_at_points,
     density_at_points_chunked,
     paint_box_density_grid,
-    paint_lightcone_particle_count_map,
     paint_lightcone_particle_count_map_sparse,
     paint_lightcone_particle_count_map_tabulated_sparse,
     paint_lightcone_surface_density,
@@ -26,6 +27,8 @@ from geppetto.painters import (
 from geppetto.profiles import NFWProfileParams, TabulatedProjectedProfileParams
 
 __all__ = [
+    "AdaptiveLightconeStencil",
+    "AngularAssignmentParams",
     "ConcentrationParams",
     "Cosmology",
     "HaloCatalog",
@@ -41,7 +44,6 @@ __all__ = [
     "from_spherical_lightcone",
     "omega_m_at_redshift",
     "paint_box_density_grid",
-    "paint_lightcone_particle_count_map",
     "paint_lightcone_particle_count_map_sparse",
     "paint_lightcone_particle_count_map_tabulated_sparse",
     "paint_lightcone_surface_density",

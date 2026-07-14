@@ -72,6 +72,19 @@ class LightconeHaloCatalog(NamedTuple):
         return int(self.mass.shape[0])
 
 
+class AngularAssignmentParams(NamedTuple):
+    """Host-side controls for adaptive angular mass assignment.
+
+    ``theta_resolution_rad=None`` selects half the maximum native HEALPix
+    pixel radius. ``n_resolution`` is the requested minimum number of samples
+    across a resolved halo radius. These parameters control only fixed stencil
+    geometry and are not differentiated.
+    """
+
+    theta_resolution_rad: float | None = None
+    n_resolution: int = 4
+
+
 @jax.tree_util.register_pytree_node_class
 @dataclass(frozen=True)
 class LightconeSparseStencil:
@@ -126,6 +139,66 @@ class LightconeSparseStencil:
     @property
     def size(self) -> int:
         return int(self.r_perp.shape[0])
+
+
+@jax.tree_util.register_pytree_node_class
+@dataclass(frozen=True)
+class AdaptiveLightconeStencil:
+    """Global-support geometry for normalized lightcone mass assignment.
+
+    Resolved samples include the complete angular support of every selected
+    halo, even when their native parent is outside the compact output map.
+    ``sample_compact_row`` always contains a safe non-negative row;
+    ``sample_in_compact`` controls whether a normalized contribution is
+    deposited. ``sample_valid`` excludes JIT padding from both normalization
+    and deposition.
+
+    NGP arrays have one entry per catalogue halo. ``ngp_active`` identifies
+    unresolved halos and zero-query fallbacks, while ``ngp_in_compact`` keeps
+    assignments outside the compact footprint out of the returned map.
+    ``resolved_halo_mask`` limits normalization validation to resolved halos in
+    the current segment.
+    """
+
+    sample_compact_row: Array
+    sample_halo_id: Array
+    sample_r_perp: Array
+    sample_solid_angle_sr: Array
+    sample_valid: Array
+    sample_in_compact: Array
+    ngp_compact_row: Array
+    ngp_active: Array
+    ngp_in_compact: Array
+    resolved_halo_mask: Array
+    n_pix: int
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "n_pix", int(self.n_pix))
+
+    def tree_flatten(self) -> tuple[tuple[Array, ...], int]:
+        """Keep ``n_pix`` static for JIT output allocation."""
+
+        children = (
+            self.sample_compact_row,
+            self.sample_halo_id,
+            self.sample_r_perp,
+            self.sample_solid_angle_sr,
+            self.sample_valid,
+            self.sample_in_compact,
+            self.ngp_compact_row,
+            self.ngp_active,
+            self.ngp_in_compact,
+            self.resolved_halo_mask,
+        )
+        return children, self.n_pix
+
+    @classmethod
+    def tree_unflatten(cls, n_pix: int, children: tuple[Array, ...]) -> AdaptiveLightconeStencil:
+        return cls(*children, n_pix=n_pix)
+
+    @property
+    def size(self) -> int:
+        return int(self.sample_r_perp.shape[0])
 
 
 def unit_vectors_from_angles(theta: Array, phi: Array) -> Array:

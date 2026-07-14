@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from typing import Literal, NamedTuple
 
-import jax.nn as jnn
 import jax.numpy as jnp
 from jax import lax
 
@@ -23,7 +22,7 @@ from geppetto.types import Array
 
 
 class NFWProfileParams(NamedTuple):
-    """Parameters controlling the NFW profile normalization and truncation.
+    """Parameters controlling the hard-truncated NFW profile.
 
     ``overdensity`` is the constant spherical overdensity used when
     ``overdensity_mode='constant'``. ``reference_density`` selects physical
@@ -33,8 +32,6 @@ class NFWProfileParams(NamedTuple):
 
     overdensity: float = 200.0
     reference_density: Literal["critical", "mean"] = "critical"
-    smooth_truncation: bool = True
-    truncation_width_fraction: float = 0.05
     r_softening_fraction: float = 1.0e-4
     overdensity_mode: Literal["constant", "bryan_norman"] = "constant"
 
@@ -102,8 +99,7 @@ def nfw_scale_radius_and_density(
 ) -> tuple[Array, Array, Array, Array]:
     """Return ``(r_delta, concentration, r_s, rho_s)`` in comoving units.
 
-    The profile integrates to ``mass`` inside ``r_delta`` before any optional
-    smooth taper is applied.
+    The unsoftened profile integrates to ``mass`` inside ``r_delta``.
     """
 
     c = concentration_power_law(mass, redshift, concentration_params)
@@ -120,17 +116,6 @@ def nfw_scale_radius_and_density(
     return r_delta, c, r_s, rho_s
 
 
-def smooth_taper(r: Array, r_delta: Array, width: Array) -> Array:
-    """Smoothly suppress the profile outside ``r_delta``.
-
-    This avoids a hard non-differentiable truncation at the halo boundary. The
-    taper is not exactly mass conserving; explicit mass-conserving truncation can
-    be added as a later profile prescription.
-    """
-
-    return jnn.sigmoid(-(r - r_delta) / width)
-
-
 def nfw_density(
     r: Array,
     mass: Array,
@@ -139,7 +124,14 @@ def nfw_density(
     concentration_params: ConcentrationParams,
     profile_params: NFWProfileParams = DEFAULT_NFW_PROFILE_PARAMS,
 ) -> Array:
-    """Evaluate the 3D NFW density in comoving ``(Msun/h)/(Mpc/h)^3`` units."""
+    """Evaluate hard-truncated 3D NFW density in comoving mass-density units.
+
+    Radii are comoving ``Mpc/h`` and the result is in
+    ``(Msun/h)/(Mpc/h)^3``. The support test uses the original radius, so the
+    fixed ``r_delta`` boundary is independent of concentration. The explicit
+    central-radius softening regularizes the NFW cusp below
+    ``r_softening_fraction * r_s``.
+    """
 
     r_delta, _, r_s, rho_s = nfw_scale_radius_and_density(
         mass, redshift, cosmology, concentration_params, profile_params
@@ -147,33 +139,75 @@ def nfw_density(
     r_safe = jnp.sqrt(r**2 + (profile_params.r_softening_fraction * r_s) ** 2)
     x = r_safe / r_s
     rho = rho_s / (x * (1.0 + x) ** 2)
-
-    if profile_params.smooth_truncation:
-        width = jnp.maximum(profile_params.truncation_width_fraction * r_delta, 1.0e-12)
-        return rho * smooth_taper(r_safe, r_delta, width)
-    return jnp.where(r_safe <= r_delta, rho, 0.0)
+    return jnp.where(r <= r_delta, rho, 0.0)
 
 
-def _projected_nfw_kernel(x: Array) -> Array:
-    """Dimensionless projected NFW kernel for Sigma(R) = 2 rho_s r_s F(x).
+def _hard_truncated_projected_nfw_kernel(x: Array, concentration: Array) -> Array:
+    """Return the finite line-of-sight NFW kernel inside ``r_delta``.
 
-    The expression is evaluated with a small exclusion around x=1 to avoid the
-    removable singularity. It is differentiable almost everywhere and stable for
-    normal map-painting usage.
+    The result ``F(x, c)`` obeys ``Sigma = 2 * rho_s * r_s * F`` and projects
+    the three-dimensional NFW density only through the sphere ``r <= r_delta``.
+    The branch expressions are equations (6)--(7) of Hamana et al. (2004),
+    following Takada & Jain (2003). A narrow linear bridge around ``x=1``
+    avoids cancellation in the removable singularity while retaining finite
+    concentration derivatives.
     """
 
-    eps = 1.0e-5
-    x_safe_low = jnp.minimum(x, 1.0 - eps)
-    x_safe_high = jnp.maximum(x, 1.0 + eps)
+    dtype = jnp.result_type(x, concentration)
+    x = jnp.asarray(x, dtype=dtype)
+    concentration = jnp.asarray(concentration, dtype=dtype)
+    tiny = jnp.asarray(jnp.finfo(dtype).tiny, dtype=dtype)
+    near_width = jnp.asarray(1.0e-2 if dtype == jnp.float32 else 1.0e-3, dtype=dtype)
 
-    low_arg = jnp.sqrt((1.0 - x_safe_low) / (1.0 + x_safe_low))
-    low = (1.0 - 2.0 / jnp.sqrt(1.0 - x_safe_low**2) * jnp.arctanh(low_arg)) / (x_safe_low**2 - 1.0)
+    c_safe = jnp.maximum(concentration, tiny)
+    # All branch expressions remain finite even where their result is masked.
+    x_inside = jnp.clip(x, tiny, c_safe * (1.0 - 4.0 * jnp.finfo(dtype).eps))
 
-    high_arg = jnp.sqrt((x_safe_high - 1.0) / (1.0 + x_safe_high))
-    high = (1.0 - 2.0 / jnp.sqrt(x_safe_high**2 - 1.0) * jnp.arctan(high_arg)) / (x_safe_high**2 - 1.0)
+    def low_branch(x_value: Array) -> Array:
+        one_minus_x2 = jnp.maximum(1.0 - x_value**2, tiny)
+        root = jnp.sqrt(jnp.maximum(c_safe**2 - x_value**2, 0.0))
+        argument = (x_value**2 + c_safe) / (x_value * (1.0 + c_safe))
+        argument = jnp.maximum(argument, 1.0)
+        return (
+            -root / (one_minus_x2 * (1.0 + c_safe))
+            + jnp.arccosh(argument) / one_minus_x2**1.5
+        )
 
-    near = jnp.ones_like(x) / 3.0
-    return jnp.where(x < 1.0 - eps, low, jnp.where(x > 1.0 + eps, high, near))
+    def high_branch(x_value: Array) -> Array:
+        x2_minus_one = jnp.maximum(x_value**2 - 1.0, tiny)
+        root = jnp.sqrt(jnp.maximum(c_safe**2 - x_value**2, 0.0))
+        argument = (x_value**2 + c_safe) / (x_value * (1.0 + c_safe))
+        argument = jnp.clip(argument, -1.0, 1.0)
+        return (
+            root / (x2_minus_one * (1.0 + c_safe))
+            - jnp.arccos(argument) / x2_minus_one**1.5
+        )
+
+    c_near = jnp.maximum(c_safe, 1.0 + near_width)
+    center = (
+        jnp.sqrt(jnp.maximum(c_near**2 - 1.0, 0.0))
+        / (3.0 * (1.0 + c_near))
+        * (1.0 + 1.0 / (1.0 + c_near))
+    )
+    x_minus = jnp.ones_like(x_inside) - near_width
+    x_plus = jnp.ones_like(x_inside) + near_width
+    value_minus = low_branch(x_minus)
+    value_plus = high_branch(jnp.minimum(x_plus, c_near * (1.0 - 4.0 * jnp.finfo(dtype).eps)))
+    near_low = value_minus + (x_inside - x_minus) * (center - value_minus) / near_width
+    near_high = center + (x_inside - 1.0) * (value_plus - center) / near_width
+
+    low = low_branch(jnp.minimum(x_inside, 1.0 - near_width))
+    high = high_branch(jnp.maximum(x_inside, 1.0 + near_width))
+    value = jnp.where(
+        x_inside < 1.0 - near_width,
+        low,
+        jnp.where(
+            x_inside < 1.0,
+            near_low,
+            jnp.where(x_inside <= 1.0 + near_width, near_high, high),
+        ),
+    )
+    return jnp.where((x < concentration) & (concentration > 0.0), value, 0.0)
 
 
 def nfw_projected_surface_density(
@@ -184,17 +218,22 @@ def nfw_projected_surface_density(
     concentration_params: ConcentrationParams,
     profile_params: NFWProfileParams = DEFAULT_NFW_PROFILE_PARAMS,
 ) -> Array:
-    """Projected NFW surface density in comoving ``(Msun/h)/(Mpc/h)^2`` units."""
+    """Project a hard-truncated 3D NFW halo through its ``r_delta`` sphere.
 
-    r_delta, _, r_s, rho_s = nfw_scale_radius_and_density(
+    ``r_perp`` is a comoving projected radius in ``Mpc/h`` and the result is in
+    ``(Msun/h)/(Mpc/h)^2``. The finite line-of-sight limit is
+    ``sqrt(r_delta**2 - r_perp**2)``. The support test uses the original
+    projected radius and is therefore independent of concentration. A tiny
+    explicit central-radius softening regularizes the logarithmic projected cusp.
+    """
+
+    r_delta, concentration, r_s, rho_s = nfw_scale_radius_and_density(
         mass, redshift, cosmology, concentration_params, profile_params
     )
     r_safe = jnp.sqrt(r_perp**2 + (profile_params.r_softening_fraction * r_s) ** 2)
-    sigma = 2.0 * rho_s * r_s * _projected_nfw_kernel(r_safe / r_s)
-    if profile_params.smooth_truncation:
-        width = jnp.maximum(profile_params.truncation_width_fraction * r_delta, 1.0e-12)
-        return sigma * smooth_taper(r_safe, r_delta, width)
-    return jnp.where(r_safe <= r_delta, sigma, 0.0)
+    kernel = _hard_truncated_projected_nfw_kernel(r_safe / r_s, concentration)
+    sigma = 2.0 * rho_s * r_s * kernel
+    return jnp.where(r_perp < r_delta, sigma, 0.0)
 
 
 def _linear_interpolate(x_eval: Array, x_grid: Array, y_grid: Array) -> Array:

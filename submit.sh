@@ -54,6 +54,8 @@ export GEPPETTO_MODE="${GEPPETTO_MODE:-derivatives-profile}"
 export SEGMENT_WORKERS="${SEGMENT_WORKERS:-$SLURM_CPUS_PER_TASK}"
 export NFW_OVERDENSITY="${NFW_OVERDENSITY:-200}"
 export NFW_REFERENCE_DENSITY="${NFW_REFERENCE_DENSITY:-critical}"
+export N_RESOLUTION="${N_RESOLUTION:-4}"
+export THETA_RESOLUTION_RAD="${THETA_RESOLUTION_RAD:-}"
 
 if ((SEGMENT_WORKERS < 1 || SEGMENT_WORKERS > SLURM_CPUS_PER_TASK)); then
 	echo "SEGMENT_WORKERS must be between 1 and SLURM_CPUS_PER_TASK" >&2
@@ -63,7 +65,14 @@ mkdir -p "${OUTDIR}"
 echo "GEPPETTO mode: ${GEPPETTO_MODE}"
 echo "Segment workers: ${SEGMENT_WORKERS}"
 echo "NFW mass definition: ${NFW_OVERDENSITY}${NFW_REFERENCE_DENSITY:0:1}"
+echo "Adaptive samples per halo radius: ${N_RESOLUTION}"
+echo "Unresolved angular radius: ${THETA_RESOLUTION_RAD:-automatic}"
 echo "Output directory: ${OUTDIR}"
+
+assignment_args=(--n-resolution "${N_RESOLUTION}")
+if [[ -n "${THETA_RESOLUTION_RAD}" ]]; then
+	assignment_args+=(--theta-resolution-rad "${THETA_RESOLUTION_RAD}")
+fi
 
 srun --cpu-bind=cores python examples/paint_halo_particles_for_pinocchio_segment.py \
 	--params "${PARAMS}" \
@@ -74,5 +83,6 @@ srun --cpu-bind=cores python examples/paint_halo_particles_for_pinocchio_segment
 	--mode "${GEPPETTO_MODE}" \
 	--nfw-overdensity "${NFW_OVERDENSITY}" \
 	--nfw-reference-density "${NFW_REFERENCE_DENSITY}" \
+	"${assignment_args[@]}" \
 	--mpi-plc-parts \
 	--segment-workers "${SEGMENT_WORKERS}"

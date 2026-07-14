@@ -233,10 +233,10 @@ copied: array row `i` corresponds to row `i` in the original PINOCCHIO mass-map
 FITS file named by `mass_map_path` in the manifest. The manifest records input
 paths, segment bounds, numerical precision, physical painter parameters, MPI
 and worker configuration, the Git commit, and compact scientific diagnostics.
-These include selected halo count and mass, expected and painted count
-equivalents, their ratio, sparse-pair count, zero-pair halo count and mass, and
-the number of halos with support below the pixel scale. Timing diagnostics stay
-in profile logs. The script does not produce a merged global light-cone map.
+These include selected halo count and mass, expected and assigned global count,
+retained and outside-compact count, adaptive branch counts, profile-sample
+counts, and supersampling levels. Timing diagnostics stay in profile logs. The
+script does not produce a merged global light-cone map.
 
 The NFW halo-mass interpretation is required rather than implicit. Select
 exactly one of:
@@ -272,27 +272,26 @@ reduces and writes final segment outputs without temporary per-rank map files.
 Rank-local failures report the rank and segment and call `MPI.Comm.Abort`, so
 other ranks do not remain blocked in a collective.
 
-The sparse stencil uses `healpy.query_disc(..., inclusive=False)`. Healpy
-returns pixel centers inside the query disc; GEPPETTO expands the angular query
-radius by one floating-point step and then applies the exact chord-distance
-support cut. This is the sole production query path.
+The production painter projects the three-dimensional NFW density only through
+the sphere `r <= R_delta`. Its exact finite line-of-sight surface density has
+hard projected support at `R_delta`; no taper or support extension is applied.
+The concentration-independent angular support is
+`2 asin(min(1, R_delta / (2 chi)))`.
 
-The finite sparse support is
-`Rmax = R_delta + nfw_taper_radius_factor * width`, where
-`width = truncation_width_fraction * R_delta`. The default factor of 10 cuts
-the stencil where the logistic taper is already about `4.5e-5`, but still
-drops the nonzero tail beyond `Rmax`. This finite-support approximation is
-separate from the known fact that the smooth taper itself is not exactly mass
-conserving.
+Angular assignment is adaptive. Halos below `--theta-resolution-rad` use NGP
+without a disc query; the default threshold is half the maximum native HEALPix
+pixel radius. Halos between that threshold and `--n-resolution` times the
+area-equivalent pixel scale are queried on a directly refined NESTED grid.
+Larger halos use native RING pixel centers. Refined children are mapped to
+native NESTED parents and then converted to RING rows.
 
-The normal PINOCCHIO sparse path automatically remaps stencil halo indices to
-the constant rank-local catalogue and zero-pads pair arrays to the next power
-of two. Module-level JIT kernels are then reused by segments in the same pair
-bucket. Reported sparse-pair diagnostics retain the unpadded count, and padding
-never changes NPZ map shapes or values. Derivative mode obtains the primal
-map and all three concentration JVP maps from one compiled invocation. The
-hidden `--nfw-chunk-size` control remains limited to the dense/debug painter;
-it does not chunk or configure the default sparse painter.
+Resolved profile weights are normalized inside JAX over complete global
+HEALPix support before compact-map filtering. Every halo therefore assigns its
+full catalogue mass globally, while a compact segment may retain less when a
+profile crosses its angular boundary. Concentration JVPs include the derivative
+of this normalization, so their complete global sums vanish. Fixed sample
+geometry is padded for JIT reuse and evaluated in bounded chunks controlled by
+the hidden numerical option `--nfw-sample-chunk-size`.
 
 `--segment-workers N` is a bounded prefetch window over mass-map segments, not
 an `N`-fold speedup for one segment. The main thread reduces segments in
@@ -339,11 +338,12 @@ sbatch --export=ALL,SEGMENT_WORKERS=1,GEPPETTO_MODE=derivatives-profile,OUTDIR=/
 sbatch --export=ALL,SEGMENT_WORKERS=3,GEPPETTO_MODE=derivatives-profile,OUTDIR=/path/to/profile_w3 submit.sh
 ```
 
-Profile jobs use the existing single timing gather per segment to report
+Profile jobs use one timing gather per segment to report
 root-only stencil totals split into `query_disc`, compact lookup,
 `pix2vec`/filter, concatenation, JAX transfer, and residual time. Phase timings
-remain log-only. The subpixel-support count and the other scientific diagnostics
-are recorded in the manifest, never duplicated into the lean NPZ arrays.
+remain log-only. Adaptive branch, global-sample, retained-sample, and mass
+conservation diagnostics are recorded in the manifest, never duplicated into
+the lean NPZ arrays.
 
 ### Pipeline Modes
 
@@ -369,7 +369,8 @@ Calibration parameters exposed by the CLI:
 --concentration-mass-slope
 --concentration-redshift-slope
 --concentration-mass-pivot
---truncation-width-fraction
+--theta-resolution-rad
+--n-resolution
 ```
 
 The mass pivot is fixed when derivative maps are computed.
@@ -382,6 +383,8 @@ Core catalogue containers:
 - `LightconeHaloCatalog`: lightcone directions, comoving distances, masses, and
   redshifts.
 - `LightconeSparseStencil`: fixed sparse halo-pixel pairs for PLC painting.
+- `AdaptiveLightconeStencil`: complete global samples plus compact deposition
+  rows for normalized particle-count assignment.
 
 Core parameter containers:
 
@@ -396,7 +399,6 @@ Main painters:
 - `paint_box_density_grid`
 - `paint_lightcone_surface_density`
 - `paint_lightcone_surface_density_sparse`
-- `paint_lightcone_particle_count_map`
 - `paint_lightcone_particle_count_map_sparse`
 - `paint_lightcone_surface_density_tabulated_sparse`
 - `paint_lightcone_particle_count_map_tabulated_sparse`
@@ -476,8 +478,8 @@ The following are fixed, non-differentiable geometry or I/O:
 - file reading and parsing;
 - halo selection by segment bounds;
 - HEALPix indexing and `query_disc`;
-- sparse stencil `pix_id`, `halo_id`, and `r_perp`;
-- sparse support radii such as `Rmax`;
+- sparse sample rows, halo IDs, projected radii, and solid angles;
+- adaptive branch selection, HEALPix query resolution, and hard support radius;
 - mass-map compact pixel domains.
 
 For map-level concentration derivatives, GEPPETTO uses a fixed sparse stencil
@@ -487,10 +489,6 @@ pair selection.
 ## Current Limitations
 
 - Baryonification is a documented extension point, not implemented physics.
-- Projected NFW currently uses a tapered analytic projected profile rather than
-  a full exact truncated projected NFW expression.
-- Smooth truncation is not exactly mass-conserving in the discrete HEALPix
-  pixelization.
 - Tabulated projected profiles are currently wired to sparse PLC painters, not
   dense PLC or 3D box painters.
 - The tabulated profile parameterization is positive-only through
@@ -520,7 +518,6 @@ Useful runnable examples:
 
 - `examples/nfw_box.py`
 - `examples/nfw_lightcone.py`
-- `examples/nfw_healpix_particle_count.py`
 - `examples/paint_halo_particles_for_pinocchio_segment.py`
 - `examples/pinocchio_geppetto_case/README.md`
 
@@ -544,7 +541,7 @@ GEPPETTO/
 
 ## Near-Term Priorities
 
-1. Harden projected NFW normalization and truncation validation.
+1. Validate adaptive NFW assignment against high-resolution reference maps.
 2. Expand validation coverage for PINOCCHIO reader and mass-map workflows.
 3. Add scalable, reusable HEALPix-local sparse stencil builders outside the JAX
    core.

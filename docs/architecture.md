@@ -53,7 +53,12 @@ r_s = R_delta / c(M,z)
 c(M,z) = A (M / M_pivot)^B (1 + z)^C
 ```
 
-The profile is normalized to integrate to the input halo mass inside `R_delta` before the optional smooth taper. The smooth taper is enabled by default because it is better behaved for gradient-based workflows than a hard step at `R_delta`.
+The three-dimensional profile has hard support at `R_delta` and is normalized
+to the input halo mass inside that sphere. The projected NFW kernel is the
+exact finite line-of-sight integral through the same hard-truncated sphere,
+not an infinite projected profile with a two-dimensional cutoff. A tiny
+explicit central-radius softening regularizes the NFW cusp; the support test uses
+the unsoftened radius and is independent of concentration.
 
 ## PLC mode
 
@@ -87,15 +92,13 @@ queries outside JAX. The sparse painter remains differentiable with respect to
 concentration and profile parameters because it only gathers halo fields,
 evaluates the projected profile, and scatter-adds into the output map.
 
-The PINOCCHIO segment workflow remaps selected-catalogue halo indices to the
-constant rank-local catalogue, pads pair arrays to the next power of two, and
-uses module-level compiled NFW kernels. Consequently, executable reuse depends
-on pair bucket, output size, catalogue shape, dtype, and derivative mode rather
-than every exact segment pair count. In concentration-derivative mode one
-linearization returns the primal map and applies the three JVP directions
-without repeating the primal paint. The hidden `--nfw-chunk-size` option is
-used only by the dense/debug path; it does not chunk the production sparse
-stencil or painter.
+The production PINOCCHIO segment workflow uses
+`AdaptiveLightconeStencil`. It retains every global profile sample needed for
+normalization and records compact deposition separately. Selected-catalogue
+halo indices are remapped to the constant rank-local catalogue, arrays are
+padded to power-of-two buckets, and profile samples are evaluated in static
+chunks. In concentration-derivative mode one linearization returns the primal
+map and applies the three JVP directions without repeating the primal paint.
 
 The first non-NFW profile path is sparse-PLC only:
 
@@ -118,22 +121,18 @@ HEALPix/pixel-center sampling is not enforced. The current `exp(log_shape)`
 parameterization represents positive projected profiles only; compensated signed
 profiles require a later parameterization.
 
-For PINOCCHIO mass-map integration, the HEALPix-facing painter returns a
-count-equivalent one-halo collector:
+For PINOCCHIO mass-map integration, each resolved global sample has raw weight:
 
 ```text
-count_map = Sigma_NFW(R_perp) * chi_h^2 * Omega_pix / m_particle
+q_ha = Sigma_NFW,truncated(R_perp) * chi_h^2 * Omega_sample
 ```
 
-where `m_particle` is computed from the PINOCCHIO parameter file as the mean
-comoving matter density times `BoxSize^3 / GridSize^3`, with `BoxInH100`
-controlling whether the box size is already in `Mpc/h`. HEALPix pixel-to-vector
-conversion remains in `geppetto.io`; the JAX painter only sees fixed unit
-vectors and a pixel area. The sparse equivalent,
-`paint_lightcone_particle_count_map_sparse`, uses the same mass-per-pixel divided
-by particle-mass convention on a precomputed stencil. The tabulated sparse
-equivalent follows the same count convention with the tabulated projected
-profile replacing `Sigma_NFW`.
+JAX sums `q_ha` over complete global support per halo, normalizes by that sum,
+and multiplies by `M_h / m_particle`. Compact filtering happens only after
+normalization. The complete assignment conserves catalogue mass exactly at map
+level; compact output can retain less at an angular footprint boundary.
+`m_particle` is read from PINOCCHIO metadata. HEALPix indexing remains outside
+the differentiable core.
 
 PINOCCHIO mass-map pixels are expressed in the internal PLC angular basis, with
 the PLC axis at the HEALPix north pole. GEPPETTO therefore converts PINOCCHIO
@@ -141,19 +140,13 @@ PLC `theta, phi` columns directly to map-basis unit vectors for PLC painting.
 The full PLC reader still uses Cartesian positions to compute radial distance
 `chi`, but not to define angular map directions.
 
-The PINOCCHIO calibration script uses
-`healpy.query_disc(..., inclusive=False)`, which returns pixel centers inside
-the disc. GEPPETTO expands the query radius by one floating-point step and then
-applies its exact chord-distance cut, preserving support-boundary behavior.
-There is no alternate inclusive-query production path.
-
-For smooth truncation, sparse geometry is made finite at
-`Rmax = R_delta + taper_radius_factor * width`, with
-`width = truncation_width_fraction * R_delta`. At the default radius factor of
-10 the logistic taper is about `4.5e-5`; the smaller nonzero tail outside
-`Rmax` is omitted. This finite stencil cutoff is an additional approximation,
-distinct from the existing lack of exact mass conservation in the tapered NFW
-profile.
+The support angle is the chord-consistent expression
+`2 asin(min(1, R_delta / (2 chi)))`. Unresolved halos use NGP. Intermediate
+halos query child centers directly at the derived NESTED refinement level;
+well-resolved halos query native RING centers. Both query branches use
+`inclusive=False`, expand the angular radius by one floating-point step, and
+apply the exact chord-distance cut `R_perp <= R_delta`. Refined children are
+aggregated through their native NESTED parent and then converted to RING.
 
 The same calibration script has an opt-in mixed parallel mode. In
 `--mpi-plc-parts` mode, rank `r` reads only `--plc-catalog.r`; the number of MPI
@@ -180,9 +173,10 @@ requested, its three concentration-parameter derivative arrays. Compact pixel
 IDs, HEALPix metadata, and source map values remain in the original PINOCCHIO
 FITS segment. The CSV manifest records the source segment path and scientific
 parameters needed to interpret the row-aligned arrays. It also records selected
-halo count and mass, expected and painted count equivalents, their ratio,
-sparse-pair count, zero-pair halo count and mass, subpixel-support count, MPI
-rank count, segment-worker count, and Git commit. Timing diagnostics are omitted.
+halo count and mass, expected and assigned global counts, retained and
+outside-compact counts, adaptive branch and profile-sample counts,
+supersampling levels, MPI rank count, segment-worker count, and Git commit.
+Timing diagnostics are omitted.
 
 The NFW spherical-overdensity mass definition is explicit at the command line.
 Users select a finite positive constant `Delta`, the redshift-dependent
@@ -214,11 +208,10 @@ PINOCCHIO calibration workflow are closed. This records implementation status,
 not the removal of the physical-model limitations listed below.
 
 1. **Documentation and resource requests.** The user-facing documentation and
-   Leonardo submission example state that `--nfw-chunk-size` applies only to
-   the dense/debug painter. They also distinguish bounded segment prefetch from
-   parallel execution of the Python per-halo `healpy.query_disc` loop, document
-   the memory cost of additional workers, and describe the finite smooth-taper
-   cutoff separately from taper mass non-conservation.
+   Leonardo submission example distinguish bounded segment prefetch from
+   parallel execution of the Python per-halo `healpy.query_disc` loop and
+   document the memory cost of additional workers. Static profile-sample
+   chunking is identified as a numerical memory control.
 2. **Precision policy.** The reusable GEPPETTO core follows the caller's JAX
    precision configuration. The production PINOCCHIO segment script configures
    float64 before importing the JAX-heavy modules and offers explicit
@@ -243,12 +236,12 @@ not the removal of the physical-model limitations listed below.
    minimum-memory streaming mode. A process pool was not introduced because it
    would duplicate rank-local catalogues and maps without addressing the
    Python/GIL-bound stencil query directly.
-6. **Sparse JIT bucketing.** Production stencils are remapped to the constant
-   rank-local catalogue and padded to power-of-two pair buckets with zero pair
-   weights. Module-level JIT kernels are reused by compatible segments, and
+6. **Sparse JIT bucketing.** Production adaptive stencils are remapped to the
+   constant rank-local catalogue and padded to power-of-two sample buckets with
+   invalid zero-area samples. Module-level JIT kernels are reused, and
    derivative mode obtains the primal map and three concentration JVPs from one
    linearization. Tests cover both supported floating-point precisions, inert
-   padding, empty stencils, bucket reuse, and sparse/dense agreement.
+   padding, empty stencils, bucket reuse, and global mass conservation.
 
 The review's correctness checks that did not require code changes were also
 closed explicitly. The chord-distance query radius is the algebraic inverse of
@@ -289,14 +282,9 @@ The painter should dispatch on the profile function or receive a callable profil
   explicit distance interpolator from the PINOCCHIO `HubbleTableFile`.
 - HEALPix helpers are I/O adapters only; HEALPix indices are not differentiable
   targets and do not enter JAX kernels.
-- No exact mass-conserving smooth truncation yet.
-- Projected NFW uses a tapered untruncated analytic projected profile rather
-  than the full truncated projected NFW expression. The manifest's
-  painted-to-expected ratio measures this normalization mismatch but does not
-  correct it.
-- Sparse PLC deposition samples profiles at HEALPix pixel centers. Halos with
-  support below the pixel scale can receive zero retained pairs or be
-  overrepresented near a pixel center. Zero-pair mass and subpixel-support
-  counts are reported in the manifest; adaptive quadrature is not implemented.
+- Resolved PLC deposition samples profiles at HEALPix pixel centers. Local
+  supersampling reduces discretization error for intermediate angular sizes,
+  but convergence still depends on `n_resolution` and should be validated for
+  each production NSIDE.
 - Tabulated projected profiles are currently wired only to sparse PLC painters.
 - Baryonification is a documented extension point, not implemented physics.

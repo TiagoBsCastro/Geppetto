@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import math
+from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
 
-from geppetto.catalog import HaloCatalog, LightconeHaloCatalog, LightconeSparseStencil
+from geppetto.catalog import (
+    AdaptiveLightconeStencil,
+    HaloCatalog,
+    LightconeHaloCatalog,
+    LightconeSparseStencil,
+)
 from geppetto.concentration import ConcentrationParams
 from geppetto.cosmology import Cosmology, rho_mean_comoving
 from geppetto.geometry import (
@@ -27,6 +33,17 @@ from geppetto.types import Array
 
 DEFAULT_COSMOLOGY = Cosmology()
 DEFAULT_CONCENTRATION_PARAMS = ConcentrationParams()
+
+
+class AdaptiveParticlePaintResult(NamedTuple):
+    """JAX outputs needed to validate normalized adaptive assignment."""
+
+    particle_counts: Array
+    halo_normalization_msun_h: Array
+    invalid_normalization: Array
+    assigned_global_particle_count: Array
+    retained_compact_particle_count: Array
+    outside_compact_particle_count: Array
 
 
 def _apply_sparse_pair_weight(contribution: Array, stencil: LightconeSparseStencil) -> Array:
@@ -443,107 +460,194 @@ def paint_lightcone_particle_count_map_tabulated_sparse(
 
 
 def paint_lightcone_particle_count_map_sparse(
-    stencil: LightconeSparseStencil,
+    stencil: AdaptiveLightconeStencil,
     catalog: LightconeHaloCatalog,
     particle_mass_msun_h: float,
-    pixel_area_sr: float,
     cosmology: Cosmology = DEFAULT_COSMOLOGY,
     concentration_params: ConcentrationParams = DEFAULT_CONCENTRATION_PARAMS,
     profile_params: NFWProfileParams = DEFAULT_NFW_PROFILE_PARAMS,
+    sample_chunk_size: int = 65536,
 ) -> Array:
-    """Paint a sparse count-equivalent one-halo lightcone map.
+    """Paint a mass-conserving adaptive one-halo particle-count map.
 
     Parameters
     ----------
     stencil:
-        Precomputed sparse halo-pixel geometry. ``stencil.r_perp`` is in
-        comoving ``Mpc/h`` and ``stencil.pix_id`` indexes the output map.
+        Complete global-support sample geometry. Projected radii are comoving
+        ``Mpc/h`` and sample solid angles are steradians. Compact filtering is
+        represented independently from normalization validity.
     catalog:
         Lightcone halo catalogue with distances in comoving ``Mpc/h`` and masses
         in ``Msun/h``.
     particle_mass_msun_h:
-        PINOCCHIO particle mass in ``Msun/h``. The returned map is projected
-        one-halo mass per pixel divided by this value, matching
-        :func:`paint_lightcone_particle_count_map`.
-    pixel_area_sr:
-        Pixel solid angle in steradians.
+        PINOCCHIO particle mass in ``Msun/h``.
+    sample_chunk_size:
+        Static maximum number of global profile samples evaluated per JAX scan
+        step. It bounds profile-intermediate memory and does not alter geometry.
 
     Notes
     -----
-    The result is differentiable with respect to halo/profile quantities and
-    profile/concentration parameters. Pixel identities, HEALPix geometry, and
-    the retained stencil pair set are fixed inputs outside this JAX kernel.
-    ``particle_mass_msun_h`` and ``pixel_area_sr`` are Python-side scalar checks
-    and should remain ordinary Python floats when this wrapper is directly
-    JIT-compiled.
+    Resolved halos are normalized over every global sample before compact-map
+    filtering. NGP assignments are independent of concentration and therefore
+    have exactly zero concentration derivatives. Pixel identities, support,
+    and adaptive branch selection are fixed outside this differentiable kernel.
     """
 
     if particle_mass_msun_h <= 0.0:
         raise ValueError("particle_mass_msun_h must be positive")
-    if pixel_area_sr <= 0.0:
-        raise ValueError("pixel_area_sr must be positive")
+    if sample_chunk_size <= 0:
+        raise ValueError("sample_chunk_size must be positive")
 
-    mass_per_pixel = paint_lightcone_surface_density_sparse(
+    return _paint_lightcone_particle_count_map_adaptive(
         stencil,
         catalog,
+        jnp.asarray(particle_mass_msun_h),
         cosmology=cosmology,
         concentration_params=concentration_params,
         profile_params=profile_params,
-        pixel_area_sr=pixel_area_sr,
-        return_mass_per_pixel=True,
+        sample_chunk_size=sample_chunk_size,
+    ).particle_counts
+
+
+def _pad_adaptive_samples(
+    stencil: AdaptiveLightconeStencil,
+    sample_chunk_size: int,
+) -> tuple[tuple[Array, ...], int]:
+    """Return fixed sample chunks, padding with inert geometry when needed."""
+
+    n_sample = int(stencil.sample_r_perp.shape[0])
+    chunk_size = min(max(n_sample, 1), int(sample_chunk_size))
+    n_chunk = max(1, math.ceil(n_sample / chunk_size))
+    n_pad = n_chunk * chunk_size - n_sample
+
+    def pad(array: Array, value: int | float | bool) -> Array:
+        return jnp.pad(jnp.asarray(array), (0, n_pad), constant_values=value)
+
+    arrays = (
+        pad(stencil.sample_compact_row, 0).reshape(n_chunk, chunk_size),
+        pad(stencil.sample_halo_id, 0).reshape(n_chunk, chunk_size),
+        pad(stencil.sample_r_perp, 1.0).reshape(n_chunk, chunk_size),
+        pad(stencil.sample_solid_angle_sr, 0.0).reshape(n_chunk, chunk_size),
+        pad(stencil.sample_valid, False).reshape(n_chunk, chunk_size),
+        pad(stencil.sample_in_compact, False).reshape(n_chunk, chunk_size),
     )
-    return mass_per_pixel / particle_mass_msun_h
+    return arrays, n_chunk
 
 
-def paint_lightcone_particle_count_map(
-    pixel_unit_vectors: Array,
+def _paint_lightcone_particle_count_map_adaptive(
+    stencil: AdaptiveLightconeStencil,
     catalog: LightconeHaloCatalog,
-    particle_mass_msun_h: float,
-    pixel_area_sr: float,
+    particle_mass_msun_h: Array,
     cosmology: Cosmology = DEFAULT_COSMOLOGY,
     concentration_params: ConcentrationParams = DEFAULT_CONCENTRATION_PARAMS,
     profile_params: NFWProfileParams = DEFAULT_NFW_PROFILE_PARAMS,
-    chunk_size: int | None = None,
-) -> Array:
-    """Paint a count-equivalent one-halo mass collector on lightcone pixels.
+    sample_chunk_size: int = 65536,
+) -> AdaptiveParticlePaintResult:
+    """Return normalized map and validation state from fixed adaptive geometry."""
 
-    Parameters
-    ----------
-    pixel_unit_vectors:
-        Unit vectors of the target angular pixels, shape ``(n_pix, 3)``.
-        HEALPix pixel-index generation belongs outside this JAX kernel.
-    catalog:
-        Lightcone halo catalogue with distances in comoving ``Mpc/h`` and masses
-        in ``Msun/h``.
-    particle_mass_msun_h:
-        PINOCCHIO particle mass in ``Msun/h``. The returned map is projected
-        one-halo mass per pixel divided by this value, so it can be interpreted
-        as a particle-count-equivalent mass collector.
-    pixel_area_sr:
-        Pixel solid angle in steradians.
-    chunk_size:
-        Optional static halo chunk size.
+    n_halo = int(catalog.mass.shape[0])
+    scalar_dtype = catalog.mass.dtype
+    if n_halo == 0:
+        return AdaptiveParticlePaintResult(
+            particle_counts=jnp.zeros((stencil.n_pix,), dtype=scalar_dtype),
+            halo_normalization_msun_h=jnp.zeros((0,), dtype=scalar_dtype),
+            invalid_normalization=jnp.zeros((0,), dtype=bool),
+            assigned_global_particle_count=jnp.asarray(0.0, dtype=scalar_dtype),
+            retained_compact_particle_count=jnp.asarray(0.0, dtype=scalar_dtype),
+            outside_compact_particle_count=jnp.asarray(0.0, dtype=scalar_dtype),
+        )
 
-    Notes
-    -----
-    The returned values are differentiable with respect to halo/profile
-    quantities and profile parameters. Pixel identities and HEALPix geometry are
-    fixed inputs and are intentionally outside the differentiable core.
-    """
+    chunks, _ = _pad_adaptive_samples(stencil, sample_chunk_size)
 
-    if particle_mass_msun_h <= 0.0:
-        raise ValueError("particle_mass_msun_h must be positive")
-    if pixel_area_sr <= 0.0:
-        raise ValueError("pixel_area_sr must be positive")
+    def raw_sample_weight(
+        halo_id: Array,
+        r_perp: Array,
+        solid_angle_sr: Array,
+    ) -> Array:
+        sigma = nfw_projected_surface_density(
+            r_perp,
+            catalog.mass[halo_id],
+            catalog.redshift[halo_id],
+            cosmology,
+            concentration_params,
+            profile_params,
+        )
+        return sigma * catalog.chi[halo_id] ** 2 * solid_angle_sr
 
-    mass_per_pixel = paint_lightcone_surface_density(
-        pixel_unit_vectors,
-        catalog,
-        cosmology=cosmology,
-        concentration_params=concentration_params,
-        profile_params=profile_params,
-        pixel_area_sr=pixel_area_sr,
-        return_mass_per_pixel=True,
-        chunk_size=chunk_size,
+    def normalization_body(
+        carry: tuple[Array, Array],
+        chunk: tuple[Array, ...],
+    ) -> tuple[tuple[Array, Array], None]:
+        _, halo_id, r_perp, solid_angle, valid, _ = chunk
+        raw = raw_sample_weight(halo_id, r_perp, solid_angle)
+        invalid_sample = valid & ((~jnp.isfinite(raw)) | (raw < 0.0))
+        safe_raw = jnp.where(valid & ~invalid_sample, raw, 0.0)
+        normalization, invalid_count = carry
+        normalization = normalization.at[halo_id].add(safe_raw)
+        invalid_count = invalid_count.at[halo_id].add(invalid_sample.astype(jnp.int32))
+        return (normalization, invalid_count), None
+
+    initial_normalization = jnp.zeros((n_halo,), dtype=scalar_dtype)
+    initial_invalid_count = jnp.zeros((n_halo,), dtype=jnp.int32)
+    (normalization, invalid_count), _ = jax.lax.scan(
+        normalization_body,
+        (initial_normalization, initial_invalid_count),
+        chunks,
     )
-    return mass_per_pixel / particle_mass_msun_h
+    resolved = jnp.asarray(stencil.resolved_halo_mask, dtype=bool)
+    invalid_normalization = resolved & (
+        (invalid_count > 0) | (~jnp.isfinite(normalization)) | (normalization <= 0.0)
+    )
+    safe_normalization = jnp.where(invalid_normalization | ~resolved, 1.0, normalization)
+
+    def deposition_body(
+        carry: tuple[Array, Array, Array],
+        chunk: tuple[Array, ...],
+    ) -> tuple[tuple[Array, Array, Array], None]:
+        compact_row, halo_id, r_perp, solid_angle, valid, in_compact = chunk
+        raw = raw_sample_weight(halo_id, r_perp, solid_angle)
+        usable = valid & ~invalid_normalization[halo_id] & jnp.isfinite(raw) & (raw >= 0.0)
+        contribution = jnp.where(
+            usable,
+            catalog.mass[halo_id]
+            / particle_mass_msun_h
+            * raw
+            / safe_normalization[halo_id],
+            0.0,
+        )
+        output, assigned, outside = carry
+        output = output.at[compact_row].add(jnp.where(in_compact, contribution, 0.0))
+        assigned = assigned + jnp.sum(contribution)
+        outside = outside + jnp.sum(jnp.where(in_compact, 0.0, contribution))
+        return (output, assigned, outside), None
+
+    output0 = jnp.zeros((stencil.n_pix,), dtype=scalar_dtype)
+    scalar0 = jnp.asarray(0.0, dtype=scalar_dtype)
+    (particle_counts, assigned, outside), _ = jax.lax.scan(
+        deposition_body,
+        (output0, scalar0, scalar0),
+        chunks,
+    )
+
+    ngp_active = jnp.asarray(stencil.ngp_active, dtype=bool)
+    ngp_in_compact = jnp.asarray(stencil.ngp_in_compact, dtype=bool)
+    ngp_contribution = jnp.where(
+        ngp_active,
+        catalog.mass / particle_mass_msun_h,
+        0.0,
+    )
+    particle_counts = particle_counts.at[stencil.ngp_compact_row].add(
+        jnp.where(ngp_in_compact, ngp_contribution, 0.0)
+    )
+    assigned = assigned + jnp.sum(ngp_contribution)
+    outside = outside + jnp.sum(jnp.where(ngp_in_compact, 0.0, ngp_contribution))
+    retained = jnp.sum(particle_counts)
+
+    return AdaptiveParticlePaintResult(
+        particle_counts=particle_counts,
+        halo_normalization_msun_h=normalization,
+        invalid_normalization=invalid_normalization,
+        assigned_global_particle_count=assigned,
+        retained_compact_particle_count=retained,
+        outside_compact_particle_count=outside,
+    )
