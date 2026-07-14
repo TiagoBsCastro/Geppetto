@@ -172,15 +172,97 @@ linearly with the worker count. In profile modes, one small timing buffer per
 segment is gathered to rank 0 to report rank compute, result-wait, reduction,
 and stencil-phase min/mean/max values. Stencil phases cover `query_disc`,
 compact lookup, `pix2vec`/filter, concatenation, JAX transfer, and residual host
-work. Profile-only phase values and sub-pixel-radius counts remain log-only;
-normal paint and derivative modes add no timing collective.
+work. Profile-only phase values remain log-only; normal paint and derivative
+modes add no timing collective.
 
 The NPZ payload contains only the painted NFW count-equivalent array and, when
 requested, its three concentration-parameter derivative arrays. Compact pixel
 IDs, HEALPix metadata, and source map values remain in the original PINOCCHIO
 FITS segment. The CSV manifest records the source segment path and scientific
-parameters needed to interpret the row-aligned arrays, but omits reproducible
-counts, sums, and timing diagnostics.
+parameters needed to interpret the row-aligned arrays. It also records selected
+halo count and mass, expected and painted count equivalents, their ratio,
+sparse-pair count, zero-pair halo count and mass, subpixel-support count, MPI
+rank count, segment-worker count, and Git commit. Timing diagnostics are omitted.
+
+The NFW spherical-overdensity mass definition is explicit at the command line.
+Users select a finite positive constant `Delta`, the redshift-dependent
+Bryan--Norman virial threshold, or a one-dimensional `.npy` array with one
+`Delta` per sheet row. Each mode also selects critical or mean reference
+density. Bryan--Norman mean overdensities are divided by `Omega_m(z)`, so
+the critical- and mean-reference choices represent the same physical threshold.
+PINOCCHIO catalogue masses are interpreted in the selected definition without
+conversion, and the manifest records that interpretation.
+
+Discovered all-segment inputs must be one contiguous range within the sheet
+table. Segment selection remains half-open unless the segment is the actual
+physical final sheet, `len(sheets) - 1`; the highest member of a partial glob
+is not made inclusive. The explicit inclusive-upper override is confined to
+single-segment execution.
+Radial membership is determined by the halo centre. A selected halo's complete
+projected profile belongs to that segment and is not clipped or divided at
+radial sheet boundaries.
+
+MPI computation errors include rank, segment, and source-map context before
+calling `Comm.Abort`. This prevents ranks that reached a map reduction from
+waiting indefinitely when another rank fails during local I/O, stencil
+construction, JAX transfer, or painting.
+
+## Production calibration review closure
+
+The actionable engineering findings from the 2026 internal review of the
+PINOCCHIO calibration workflow are closed. This records implementation status,
+not the removal of the physical-model limitations listed below.
+
+1. **Documentation and resource requests.** The user-facing documentation and
+   Leonardo submission example state that `--nfw-chunk-size` applies only to
+   the dense/debug painter. They also distinguish bounded segment prefetch from
+   parallel execution of the Python per-halo `healpy.query_disc` loop, document
+   the memory cost of additional workers, and describe the finite smooth-taper
+   cutoff separately from taper mass non-conservation.
+2. **Precision policy.** The reusable GEPPETTO core follows the caller's JAX
+   precision configuration. The production PINOCCHIO segment script configures
+   float64 before importing the JAX-heavy modules and offers explicit
+   `--jax-precision float32` opt-in for memory-constrained runs. The selected
+   precision is preserved by painting and MPI reduction and recorded in the
+   manifest.
+3. **Order-safe compact-pixel indexing.** Each segment builds one
+   `MassMapPixelIndex` and reuses it for local halo binning and sparse-stencil
+   construction. The index uses a bounded dense inverse map when appropriate
+   and a sorted `searchsorted` fallback otherwise. Both backends preserve the
+   arbitrary row order of the compact source map and return `-1` for pixels not
+   present in the segment.
+4. **MPI reduction efficiency.** Full map and derivative arrays use buffer
+   `Comm.Reduce` collectives. Additive integer and floating-point diagnostics
+   are packed into numeric reductions, derived count ratios are recomputed from
+   reduced values, and only rank 0 allocates receive buffers or writes output.
+   No object reduction or temporary per-rank map file remains in the production
+   path.
+5. **Segment workers and load balance.** Profiling supports the retained
+   bounded, ordered thread pipeline. Workers prefetch complete segments while
+   the main thread reduces and writes in segment order; one worker provides the
+   minimum-memory streaming mode. A process pool was not introduced because it
+   would duplicate rank-local catalogues and maps without addressing the
+   Python/GIL-bound stencil query directly.
+6. **Sparse JIT bucketing.** Production stencils are remapped to the constant
+   rank-local catalogue and padded to power-of-two pair buckets with zero pair
+   weights. Module-level JIT kernels are reused by compatible segments, and
+   derivative mode obtains the primal map and three concentration JVPs from one
+   linearization. Tests cover both supported floating-point precisions, inert
+   padding, empty stencils, bucket reuse, and sparse/dense agreement.
+
+The review's correctness checks that did not require code changes were also
+closed explicitly. The chord-distance query radius is the algebraic inverse of
+the exact retained-pair filter; NumPy and JAX scatter-adds correctly accumulate
+duplicate indices; zero-weight padding is inert; and segment and split-PLC
+discovery validate contiguous indices and MPI rank-count matching.
+
+The associated storage cleanup is also complete. The obsolete selectable MPI
+output mode and rank-local output files were removed; MPI sum-to-root is the
+only distributed output path. The workflow writes compressed NPZ arrays only,
+does not duplicate source FITS pixels or metadata, and does not store
+derivative-of-map-sum diagnostics. The compact CSV manifest retains only the
+provenance, parameters, and compact scientific diagnostics needed to interpret
+and audit the row-aligned arrays.
 
 ## Box mode
 
@@ -208,6 +290,13 @@ The painter should dispatch on the profile function or receive a callable profil
 - HEALPix helpers are I/O adapters only; HEALPix indices are not differentiable
   targets and do not enter JAX kernels.
 - No exact mass-conserving smooth truncation yet.
-- Projected NFW uses a tapered untruncated analytic projected profile rather than the full truncated projected NFW expression.
+- Projected NFW uses a tapered untruncated analytic projected profile rather
+  than the full truncated projected NFW expression. The manifest's
+  painted-to-expected ratio measures this normalization mismatch but does not
+  correct it.
+- Sparse PLC deposition samples profiles at HEALPix pixel centers. Halos with
+  support below the pixel scale can receive zero retained pairs or be
+  overrepresented near a pixel center. Zero-pair mass and subpixel-support
+  counts are reported in the manifest; adaptive quadrature is not implemented.
 - Tabulated projected profiles are currently wired only to sparse PLC painters.
 - Baryonification is a documented extension point, not implemented physics.

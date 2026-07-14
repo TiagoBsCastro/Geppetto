@@ -52,6 +52,8 @@ export MASSMAP_GLOB="/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L
 export OUTDIR="${OUTDIR:-/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/geppetto_reduced}"
 export GEPPETTO_MODE="${GEPPETTO_MODE:-derivatives-profile}"
 export SEGMENT_WORKERS="${SEGMENT_WORKERS:-$SLURM_CPUS_PER_TASK}"
+export NFW_OVERDENSITY="${NFW_OVERDENSITY:-200}"
+export NFW_REFERENCE_DENSITY="${NFW_REFERENCE_DENSITY:-critical}"
 
 if ((SEGMENT_WORKERS < 1 || SEGMENT_WORKERS > SLURM_CPUS_PER_TASK)); then
 	echo "SEGMENT_WORKERS must be between 1 and SLURM_CPUS_PER_TASK" >&2
@@ -60,6 +62,7 @@ fi
 mkdir -p "${OUTDIR}"
 echo "GEPPETTO mode: ${GEPPETTO_MODE}"
 echo "Segment workers: ${SEGMENT_WORKERS}"
+echo "NFW mass definition: ${NFW_OVERDENSITY}${NFW_REFERENCE_DENSITY:0:1}"
 echo "Output directory: ${OUTDIR}"
 
 srun --cpu-bind=cores python examples/paint_halo_particles_for_pinocchio_segment.py \
@@ -69,5 +72,7 @@ srun --cpu-bind=cores python examples/paint_halo_particles_for_pinocchio_segment
 	--mass-map-glob "${MASSMAP_GLOB}" \
 	--output-dir "${OUTDIR}" \
 	--mode "${GEPPETTO_MODE}" \
+	--nfw-overdensity "${NFW_OVERDENSITY}" \
+	--nfw-reference-density "${NFW_REFERENCE_DENSITY}" \
 	--mpi-plc-parts \
 	--segment-workers "${SEGMENT_WORKERS}"

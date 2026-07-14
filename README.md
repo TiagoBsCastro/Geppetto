@@ -184,7 +184,9 @@ python examples/paint_halo_particles_for_pinocchio_segment.py \
   --mass-map examples/pinocchio_geppetto_case/pinocchio.example.massmap.seg001.fits \
   --plc-catalog examples/pinocchio_geppetto_case/pinocchio.example.plc.out \
   --sheet-index 1 \
-  --output examples/pinocchio_geppetto_case/halo_particles.seg001.paint.npz
+  --output examples/pinocchio_geppetto_case/halo_particles.seg001.paint.npz \
+  --nfw-overdensity 200 \
+  --nfw-reference-density critical
 ```
 
 Add map-level derivatives:
@@ -197,6 +199,8 @@ python examples/paint_halo_particles_for_pinocchio_segment.py \
   --plc-catalog examples/pinocchio_geppetto_case/pinocchio.example.plc.out \
   --sheet-index 1 \
   --output examples/pinocchio_geppetto_case/halo_particles.seg001.derivs.npz \
+  --nfw-overdensity 200 \
+  --nfw-reference-density critical \
   --mode derivatives
 ```
 
@@ -209,6 +213,8 @@ python examples/paint_halo_particles_for_pinocchio_segment.py \
   --plc-catalog examples/pinocchio_geppetto_case/pinocchio.example.plc.out \
   --mass-map-glob "examples/pinocchio_geppetto_case/pinocchio.example.massmap.seg*.fits" \
   --output-dir examples/pinocchio_geppetto_case/painted_nfw \
+  --nfw-overdensity 200 \
+  --nfw-reference-density critical \
   --mode derivatives
 ```
 
@@ -225,15 +231,46 @@ Every NPZ contains only `nfw_particle_counts`; derivative modes add the three
 derivative arrays listed above. Pixel identifiers and HEALPix metadata are not
 copied: array row `i` corresponds to row `i` in the original PINOCCHIO mass-map
 FITS file named by `mass_map_path` in the manifest. The manifest records input
-paths, segment bounds, numerical precision, and physical painter parameters;
-it omits reproducible counts, sums, and performance diagnostics. The script
-does not produce a merged global light-cone map.
+paths, segment bounds, numerical precision, physical painter parameters, MPI
+and worker configuration, the Git commit, and compact scientific diagnostics.
+These include selected halo count and mass, expected and painted count
+equivalents, their ratio, sparse-pair count, zero-pair halo count and mass, and
+the number of halos with support below the pixel scale. Timing diagnostics stay
+in profile logs. The script does not produce a merged global light-cone map.
+
+The NFW halo-mass interpretation is required rather than implicit. Select
+exactly one of:
+
+```text
+--nfw-overdensity DELTA
+--nfw-virial-overdensity
+--nfw-overdensity-by-segment path/to/delta.npy
+```
+
+All three require `--nfw-reference-density critical` or `mean`. A constant
+`DELTA` may be any finite positive spherical overdensity. The Bryan--Norman
+mode evaluates `Delta_vir,c(z)` per halo; its mean-density convention uses
+`Delta_vir,m(z) = Delta_vir,c(z) / Omega_m(z)` and therefore preserves the same
+physical threshold. The `.npy` mode requires a one-dimensional positive array
+with exactly one value per sheet row. Catalogue masses are interpreted directly
+in the selected definition; no mass conversion is applied, and this fact is
+recorded in the manifest.
+
+All-segments mode requires one contiguous, sheet-valid range. Every segment is
+half-open except the actual final sheet, `len(sheets) - 1`, which is inclusive.
+A partial glob therefore remains half-open at its highest segment and can be
+continued in another batch without double-selecting a boundary halo.
+Radial segment membership is defined by the halo centre. Once selected, the
+halo's complete projected profile is painted into that segment; profiles are
+not clipped or divided at radial sheet boundaries.
 
 Advanced parallel mode is opt-in. `--mpi-plc-parts` uses one MPI rank per split
 PLC catalogue part named like `pinocchio.RUN.plc.out.0`,
 `pinocchio.RUN.plc.out.1`, and so on; the MPI world size must equal the number
 of discovered parts. Each rank paints only its local halo subset, then rank 0
 reduces and writes final segment outputs without temporary per-rank map files.
+Rank-local failures report the rank and segment and call `MPI.Comm.Abort`, so
+other ranks do not remain blocked in a collective.
 
 The sparse stencil uses `healpy.query_disc(..., inclusive=False)`. Healpy
 returns pixel centers inside the query disc; GEPPETTO expands the angular query
@@ -284,13 +321,16 @@ mpiexec -n 4 python examples/paint_halo_particles_for_pinocchio_segment.py \
   --plc-catalog path/to/pinocchio.RUN.plc.out \
   --mass-map-glob "path/to/pinocchio.RUN.massmap.seg*.fits" \
   --output-dir path/to/painted_nfw \
+  --nfw-overdensity 200 \
+  --nfw-reference-density critical \
   --mode derivatives \
   --mpi-plc-parts \
   --segment-workers 3
 ```
 
 `submit.sh` defaults to `derivatives-profile` and accepts `SEGMENT_WORKERS`,
-`GEPPETTO_MODE`, and `OUTDIR` overrides. For a controlled Leonardo comparison,
+`GEPPETTO_MODE`, `OUTDIR`, `NFW_OVERDENSITY`, and
+`NFW_REFERENCE_DENSITY` overrides. For a controlled Leonardo comparison,
 submit separate one- and three-worker profile jobs on the same 30-rank,
 three-CPU-per-rank allocation:
 
@@ -301,9 +341,9 @@ sbatch --export=ALL,SEGMENT_WORKERS=3,GEPPETTO_MODE=derivatives-profile,OUTDIR=/
 
 Profile jobs use the existing single timing gather per segment to report
 root-only stencil totals split into `query_disc`, compact lookup,
-`pix2vec`/filter, concatenation, JAX transfer, and residual time. Profile-only
-phase values and sub-pixel-radius counts are log-only and are not written to
-the NPZ or manifest.
+`pix2vec`/filter, concatenation, JAX transfer, and residual time. Phase timings
+remain log-only. The subpixel-support count and the other scientific diagnostics
+are recorded in the manifest, never duplicated into the lean NPZ arrays.
 
 ### Pipeline Modes
 

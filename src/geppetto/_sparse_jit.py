@@ -22,6 +22,10 @@ def _particle_count_map_from_concentration(
     cosmology: Cosmology,
     concentration_mass_pivot: Array,
     truncation_width_fraction: Array,
+    overdensity: Array,
+    *,
+    overdensity_mode: str,
+    reference_density: str,
 ) -> Array:
     concentration_params = ConcentrationParams(
         amplitude=theta[0],
@@ -30,7 +34,10 @@ def _particle_count_map_from_concentration(
         mass_pivot=concentration_mass_pivot,
     )
     profile_params = NFWProfileParams(
+        overdensity=overdensity,
+        reference_density=reference_density,
         truncation_width_fraction=truncation_width_fraction,
+        overdensity_mode=overdensity_mode,
     )
     mass_per_pixel = paint_lightcone_surface_density_sparse(
         stencil,
@@ -53,6 +60,10 @@ def _particle_count_map_and_concentration_jvps(
     cosmology: Cosmology,
     concentration_mass_pivot: Array,
     truncation_width_fraction: Array,
+    overdensity: Array,
+    *,
+    overdensity_mode: str,
+    reference_density: str,
 ) -> tuple[Array, Array]:
     def paint(theta_value: Array) -> Array:
         return _particle_count_map_from_concentration(
@@ -64,6 +75,9 @@ def _particle_count_map_and_concentration_jvps(
             cosmology,
             concentration_mass_pivot,
             truncation_width_fraction,
+            overdensity,
+            overdensity_mode=overdensity_mode,
+            reference_density=reference_density,
         )
 
     particle_counts, linearized_paint = jax.linearize(paint, theta)
@@ -73,8 +87,10 @@ def _particle_count_map_and_concentration_jvps(
 
 
 paint_nfw_particle_count_map_sparse_jit = jax.jit(
-    _particle_count_map_from_concentration
+    _particle_count_map_from_concentration,
+    static_argnames=("overdensity_mode", "reference_density"),
 )
 paint_nfw_particle_count_map_and_concentration_jvps_jit = jax.jit(
-    _particle_count_map_and_concentration_jvps
+    _particle_count_map_and_concentration_jvps,
+    static_argnames=("overdensity_mode", "reference_density"),
 )

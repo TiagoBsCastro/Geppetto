@@ -14,18 +14,29 @@ import jax.numpy as jnp
 from jax import lax
 
 from geppetto.concentration import ConcentrationParams, concentration_power_law
-from geppetto.cosmology import Cosmology, halo_radius_delta_comoving
+from geppetto.cosmology import (
+    Cosmology,
+    bryan_norman_virial_overdensity,
+    halo_radius_delta_comoving,
+)
 from geppetto.types import Array
 
 
 class NFWProfileParams(NamedTuple):
-    """Parameters controlling the NFW profile normalization and truncation."""
+    """Parameters controlling the NFW profile normalization and truncation.
+
+    ``overdensity`` is the constant spherical overdensity used when
+    ``overdensity_mode='constant'``. ``reference_density`` selects physical
+    critical or mean-matter density. In ``'bryan_norman'`` mode, the overdensity
+    is evaluated from halo redshift and ``overdensity`` is ignored.
+    """
 
     overdensity: float = 200.0
     reference_density: Literal["critical", "mean"] = "critical"
     smooth_truncation: bool = True
     truncation_width_fraction: float = 0.05
     r_softening_fraction: float = 1.0e-4
+    overdensity_mode: Literal["constant", "bryan_norman"] = "constant"
 
 
 DEFAULT_NFW_PROFILE_PARAMS = NFWProfileParams()
@@ -57,6 +68,31 @@ def nfw_shape_function(c: Array) -> Array:
     return jnp.log1p(c) - c / (1.0 + c)
 
 
+def nfw_halo_overdensity(
+    redshift: Array,
+    cosmology: Cosmology,
+    profile_params: NFWProfileParams = DEFAULT_NFW_PROFILE_PARAMS,
+) -> Array:
+    """Return the NFW spherical overdensity at each halo redshift.
+
+    The result is dimensionless and may be scalar for a constant definition or
+    halo-shaped for the Bryan--Norman virial definition. This function is
+    differentiable with respect to redshift and cosmological parameters.
+    """
+
+    if profile_params.overdensity_mode == "constant":
+        return jnp.asarray(profile_params.overdensity)
+    if profile_params.overdensity_mode == "bryan_norman":
+        return bryan_norman_virial_overdensity(
+            redshift,
+            cosmology,
+            reference_density=profile_params.reference_density,
+        )
+    raise ValueError(
+        f"Unknown overdensity_mode={profile_params.overdensity_mode!r}"
+    )
+
+
 def nfw_scale_radius_and_density(
     mass: Array,
     redshift: Array,
@@ -71,11 +107,12 @@ def nfw_scale_radius_and_density(
     """
 
     c = concentration_power_law(mass, redshift, concentration_params)
+    overdensity = nfw_halo_overdensity(redshift, cosmology, profile_params)
     r_delta = halo_radius_delta_comoving(
         mass,
         redshift,
         cosmology,
-        overdensity=profile_params.overdensity,
+        overdensity=overdensity,
         reference_density=profile_params.reference_density,
     )
     r_s = r_delta / c

@@ -2,12 +2,19 @@ import jax
 import jax.numpy as jnp
 
 from geppetto.concentration import ConcentrationParams, concentration_power_law, duffy08_all_200c
-from geppetto.cosmology import Cosmology
+from geppetto.cosmology import (
+    Cosmology,
+    bryan_norman_virial_overdensity,
+    omega_m_at_redshift,
+    rho_crit_physical,
+    rho_mean_comoving,
+)
 from geppetto.profiles import (
     NFWProfileParams,
     TabulatedProjectedProfileParams,
     nfw_density,
     nfw_projected_surface_density,
+    nfw_scale_radius_and_density,
     tabulated_projected_surface_density,
 )
 
@@ -36,6 +43,72 @@ def test_nfw_density_finite_gradient_wrt_amplitude():
 
     grad = jax.grad(total_density)(5.71)
     assert jnp.isfinite(grad)
+
+
+def test_bryan_norman_overdensity_reference_conventions_are_equivalent():
+    cosmology = Cosmology()
+    redshift = jnp.array([0.0, 0.5, 1.0])
+    omega_m_z = omega_m_at_redshift(redshift, cosmology)
+    x = omega_m_z - 1.0
+    expected_critical = 18.0 * jnp.pi**2 + 82.0 * x - 39.0 * x**2
+    delta_critical = bryan_norman_virial_overdensity(
+        redshift,
+        cosmology,
+        reference_density="critical",
+    )
+    delta_mean = bryan_norman_virial_overdensity(
+        redshift,
+        cosmology,
+        reference_density="mean",
+    )
+
+    assert jnp.allclose(delta_critical, expected_critical)
+    assert jnp.allclose(delta_mean, delta_critical / omega_m_z)
+    assert jnp.allclose(
+        delta_critical * rho_crit_physical(redshift, cosmology),
+        delta_mean * rho_mean_comoving(cosmology) * (1.0 + redshift) ** 3,
+    )
+    assert jnp.isfinite(
+        jax.grad(
+            lambda z: bryan_norman_virial_overdensity(
+                z,
+                cosmology,
+                reference_density="critical",
+            )
+        )(0.4)
+    )
+
+
+def test_bryan_norman_nfw_radius_is_reference_density_independent():
+    mass = jnp.array([1.0e13, 1.0e14])
+    redshift = jnp.array([0.2, 0.8])
+    concentration = ConcentrationParams()
+    critical = NFWProfileParams(
+        reference_density="critical",
+        overdensity_mode="bryan_norman",
+    )
+    mean = NFWProfileParams(
+        reference_density="mean",
+        overdensity_mode="bryan_norman",
+    )
+
+    critical_values = nfw_scale_radius_and_density(
+        mass,
+        redshift,
+        Cosmology(),
+        concentration,
+        critical,
+    )
+    mean_values = nfw_scale_radius_and_density(
+        mass,
+        redshift,
+        Cosmology(),
+        concentration,
+        mean,
+    )
+
+    for critical_value, mean_value in zip(critical_values, mean_values, strict=True):
+        assert jnp.allclose(critical_value, mean_value, rtol=1.0e-6)
 
 
 def test_projected_nfw_surface_density_is_finite():

@@ -166,6 +166,10 @@ def _workflow_args(**overrides) -> SimpleNamespace:
         "concentration_mass_slope": -0.084,
         "concentration_redshift_slope": -0.47,
         "concentration_mass_pivot": 2.0e12,
+        "nfw_overdensity": 200.0,
+        "nfw_virial_overdensity": False,
+        "nfw_overdensity_by_segment": None,
+        "nfw_reference_density": "critical",
         "truncation_width_fraction": 0.05,
         "nfw_chunk_size": 1,
         "nfw_taper_radius_factor": 10.0,
@@ -207,6 +211,13 @@ def _fake_segment_result(
             "nfw_map_derivatives": "none",
             "nfw_paint_mode": "sparse",
             "nfw_selected_halo_count": 1,
+            "nfw_selected_halo_mass_msun_h": 1.0,
+            "nfw_expected_particle_count": 1.0,
+            "nfw_painted_particle_count": 1.0,
+            "nfw_painted_to_expected_ratio": 1.0,
+            "nfw_halos_with_zero_pairs": 0,
+            "nfw_mass_in_halos_with_zero_pairs_msun_h": 0.0,
+            "nfw_subpixel_support_halo_count": 0,
             "nfw_compact_pixel_count": 1,
             "nfw_sparse_pair_count": 1,
             "nfw_dense_pair_count": 1,
@@ -217,6 +228,12 @@ def _fake_segment_result(
             "nfw_concentration_redshift_slope": -0.47,
             "nfw_concentration_mass_pivot": 2.0e12,
             "nfw_truncation_width_fraction": 0.05,
+            "nfw_mass_definition": "200c",
+            "nfw_overdensity_mode": "constant",
+            "nfw_overdensity": 200.0,
+            "nfw_reference_density": "critical",
+            "nfw_overdensity_file": "",
+            "nfw_mass_conversion": "none_catalog_mass_interpreted_as_profile_mass",
         },
     )
 
@@ -239,9 +256,13 @@ def test_example_script_help_runs():
     assert "--concentration-mass-slope" in result.stdout
     assert "--concentration-redshift-slope" in result.stdout
     assert "--concentration-mass-pivot" in result.stdout
+    assert "--nfw-overdensity" in result.stdout
+    assert "--nfw-virial-overdensity" in result.stdout
+    assert "--nfw-overdensity-by-segment" in result.stdout
+    assert "--nfw-reference-density" in result.stdout
     assert "--truncation-width-fraction" in result.stdout
     assert "In single-segment mode, use an inclusive upper segment bound." in normalized_help
-    assert "the final discovered segment is inclusive automatically." in normalized_help
+    assert "physical final sheet" in normalized_help
     assert "--nfw-paint" not in result.stdout
     assert "--nfw-gradient-demo" not in result.stdout
     assert "--nfw-map-derivatives" not in result.stdout
@@ -286,6 +307,10 @@ def test_example_script_rejects_removed_options(removed_args, removed_option):
             "0",
             "--output",
             "painted.npz",
+            "--nfw-overdensity",
+            "200",
+            "--nfw-reference-density",
+            "critical",
             *removed_args,
         ],
         check=False,
@@ -365,6 +390,34 @@ def test_discover_mass_map_segments_rejects_duplicates_and_empty(tmp_path):
         module.discover_mass_map_segments(str(tmp_path / "missing*.fits"))
 
 
+def test_validate_mass_map_segment_batch_accepts_partial_contiguous_ranges():
+    module = _load_example_module()
+
+    module.validate_mass_map_segment_batch(
+        [(0, Path("massmap.seg000.fits"))],
+        _sheets(),
+    )
+    module.validate_mass_map_segment_batch(
+        [(0, Path("massmap.seg000.fits")), (1, Path("massmap.seg001.fits"))],
+        _sheets(),
+    )
+
+
+def test_validate_mass_map_segment_batch_rejects_gaps_and_invalid_indices():
+    module = _load_example_module()
+
+    with pytest.raises(ValueError, match="contiguous batch"):
+        module.validate_mass_map_segment_batch(
+            [(0, Path("massmap.seg000.fits")), (2, Path("massmap.seg002.fits"))],
+            _sheets(),
+        )
+    with pytest.raises(ValueError, match="outside the sheet table"):
+        module.validate_mass_map_segment_batch(
+            [(2, Path("massmap.seg002.fits"))],
+            _sheets(),
+        )
+
+
 def test_discover_plc_catalog_parts_sorts_and_validates_mpi_size(tmp_path):
     module = _load_example_module()
     base = tmp_path / "pinocchio.demo.plc.out"
@@ -426,6 +479,83 @@ def test_validate_segment_workflow_args_rejects_mixed_and_incomplete(tmp_path):
         module.validate_segment_workflow_args(
             _workflow_args(sheet_index=None)
         )
+
+    with pytest.raises(ValueError, match="only valid in single-segment mode"):
+        module.validate_segment_workflow_args(
+            _workflow_args(
+                mass_map=None,
+                sheet_index=None,
+                output=None,
+                mass_map_glob=str(tmp_path / "*.fits"),
+                output_dir=tmp_path / "painted",
+                last_segment_inclusive=True,
+            )
+        )
+
+
+def test_load_halo_mass_definition_supports_constant_and_bryan_norman():
+    module = _load_example_module()
+
+    constant = module.load_halo_mass_definition(_workflow_args(), _sheets())
+    resolved_constant = constant.resolve(1)
+    assert resolved_constant.label == "200c"
+    assert resolved_constant.profile_mode == "constant"
+    assert resolved_constant.profile_overdensity == 200.0
+
+    virial = module.load_halo_mass_definition(
+        _workflow_args(
+            nfw_overdensity=None,
+            nfw_virial_overdensity=True,
+            nfw_reference_density="mean",
+        ),
+        _sheets(),
+    )
+    resolved_virial = virial.resolve(0)
+    assert resolved_virial.label == "virial_bn98m"
+    assert resolved_virial.profile_mode == "bryan_norman"
+    assert resolved_virial.reference_density == "mean"
+
+
+def test_load_halo_mass_definition_reads_strict_per_segment_array(tmp_path):
+    module = _load_example_module()
+    source = tmp_path / "overdensity.npy"
+    np.save(source, np.array([200.0, 500.0]))
+
+    definition = module.load_halo_mass_definition(
+        _workflow_args(
+            nfw_overdensity=None,
+            nfw_overdensity_by_segment=source,
+            nfw_reference_density="mean",
+        ),
+        _sheets(),
+    )
+
+    assert definition.resolve(0).label == "200m"
+    assert definition.resolve(1).label == "500m"
+    assert definition.resolve(1).source == source
+    assert definition.per_segment_overdensity.flags.writeable is False
+
+    np.save(source, np.array([200.0]))
+    with pytest.raises(ValueError, match="length must match"):
+        module.load_halo_mass_definition(
+            _workflow_args(
+                nfw_overdensity=None,
+                nfw_overdensity_by_segment=source,
+            ),
+            _sheets(),
+        )
+
+    np.save(source, np.array([200.0, -1.0]))
+    with pytest.raises(ValueError, match="finite and positive"):
+        module.load_halo_mass_definition(
+            _workflow_args(
+                nfw_overdensity=None,
+                nfw_overdensity_by_segment=source,
+            ),
+            _sheets(),
+        )
+
+
 def test_validate_mpi_workflow_args_rejects_missing_flag(tmp_path):
     module = _load_example_module()
     base = tmp_path / "pinocchio.demo.plc.out"
@@ -1027,6 +1157,75 @@ def test_bucketed_sparse_jit_handles_empty_stencil():
             np.testing.assert_array_equal(value, np.zeros(3))
 
 
+@pytest.mark.parametrize(
+    ("mode", "profile_mode", "overdensity", "reported_overdensity"),
+    (
+        ("constant", "constant", 500.0, 500.0),
+        ("bryan_norman", "bryan_norman", 200.0, None),
+    ),
+)
+def test_bucketed_sparse_jit_supports_configurable_mass_definitions(
+    mode,
+    profile_mode,
+    overdensity,
+    reported_overdensity,
+):
+    module = _load_example_module()
+    catalog = _catalog(
+        unit_vector=np.array([[1.0, 0.0, 0.0]]),
+        mass=np.array([1.0e13]),
+        redshift=np.array([0.3]),
+        chi=np.array([1000.0]),
+    )
+    stencil = LightconeSparseStencil(
+        pix_id=jnp.array([0], dtype=jnp.int32),
+        halo_id=jnp.array([0], dtype=jnp.int32),
+        r_perp=jnp.array([0.1]),
+        n_pix=1,
+    )
+    mass_definition = module.ResolvedHaloMassDefinition(
+        mode=mode,
+        profile_mode=profile_mode,
+        reference_density="mean",
+        profile_overdensity=overdensity,
+        reported_overdensity=reported_overdensity,
+    )
+    profile_params = module.NFWProfileParams(
+        overdensity=overdensity,
+        reference_density="mean",
+        truncation_width_fraction=0.05,
+        overdensity_mode=profile_mode,
+    )
+    expected = paint_lightcone_particle_count_map_sparse(
+        stencil,
+        catalog,
+        particle_mass_msun_h=1.0e10,
+        pixel_area_sr=0.01,
+        cosmology=Cosmology(),
+        concentration_params=module.ConcentrationParams(),
+        profile_params=profile_params,
+    )
+
+    actual, diagnostics = module.paint_bucketed_nfw_sparse_map(
+        stencil,
+        catalog,
+        SimpleNamespace(cosmology=Cosmology()),
+        1.0e10,
+        0.01,
+        5.71,
+        -0.084,
+        -0.47,
+        2.0e12,
+        0.05,
+        mass_definition,
+        compute_map_derivatives=False,
+        profile=False,
+    )
+
+    np.testing.assert_allclose(actual, expected, rtol=1.0e-12, atol=1.0e-12)
+    assert diagnostics == {"nfw_map_derivatives": "none"}
+
+
 def _single_pixel_pipeline_case():
     hp = pytest.importorskip("healpy")
     halo_pixels = np.array([0], dtype=np.int64)
@@ -1094,12 +1293,51 @@ def test_run_nfw_calibration_pipeline_default_sparse_does_not_call_bruteforce(mo
     assert diagnostics["nfw_dense_pair_count"] == 4
     assert diagnostics["nfw_sparse_compression_factor"] == 2.0
     assert np.isfinite(diagnostics["nfw_sum_particle_counts"])
+    assert diagnostics["nfw_selected_halo_mass_msun_h"] == 3.0e13
+    assert diagnostics["nfw_expected_particle_count"] == 3000.0
+    assert diagnostics["nfw_painted_particle_count"] == pytest.approx(
+        diagnostics["nfw_sum_particle_counts"]
+    )
+    assert diagnostics["nfw_painted_to_expected_ratio"] == pytest.approx(
+        diagnostics["nfw_painted_particle_count"] / 3000.0
+    )
+    assert diagnostics["nfw_halos_with_zero_pairs"] == 0
+    assert diagnostics["nfw_mass_in_halos_with_zero_pairs_msun_h"] == 0.0
+    assert diagnostics["nfw_subpixel_support_halo_count"] == 2
     assert "d_nfw_particle_counts_d_concentration_amplitude" not in diagnostics
     np.testing.assert_allclose(
         np.sum(diagnostics["nfw_particle_counts"]),
         diagnostics["nfw_sum_particle_counts"],
         rtol=1.0e-5,
     )
+
+
+def test_run_nfw_calibration_pipeline_reports_unresolved_zero_pair_mass():
+    hp = pytest.importorskip("healpy")
+    module = _load_example_module()
+    halo_pixel = np.array([5], dtype=np.int64)
+    catalog = _catalog(
+        unit_vector=np.stack(hp.pix2vec(1, halo_pixel), axis=-1),
+        mass=np.array([2.0e13]),
+        redshift=np.array([0.2]),
+        chi=np.array([1000.0]),
+    )
+    mass_map = _mass_map(np.array([0], dtype=np.int64), nside=1)
+
+    diagnostics = module.run_nfw_calibration_pipeline(
+        catalog,
+        np.array([True]),
+        mass_map,
+        SimpleNamespace(cosmology=Cosmology()),
+        particle_mass_msun_h=1.0e10,
+    )
+
+    assert diagnostics["nfw_halos_with_zero_pairs"] == 1
+    assert diagnostics["nfw_mass_in_halos_with_zero_pairs_msun_h"] == 2.0e13
+    assert diagnostics["nfw_subpixel_support_halo_count"] == 1
+    assert diagnostics["nfw_expected_particle_count"] == 2000.0
+    assert diagnostics["nfw_painted_particle_count"] == 0.0
+    assert diagnostics["nfw_painted_to_expected_ratio"] == 0.0
 
 
 def test_run_nfw_calibration_pipeline_derivative_mode_saves_map_derivatives():
@@ -1283,11 +1521,16 @@ def test_print_nfw_calibration_summary_reports_map_derivatives(capsys):
         "pipeline_mode": "paint",
         "nfw_paint_mode": "sparse",
         "nfw_selected_halo_count": 1,
+        "nfw_selected_halo_mass_msun_h": 10.0,
         "nfw_compact_pixel_count": 1,
         "nfw_sparse_pair_count": 1,
         "nfw_dense_pair_count": 1,
         "nfw_sparse_compression_factor": 1.0,
         "nfw_sum_particle_counts": 1.25,
+        "nfw_painted_to_expected_ratio": 0.125,
+        "nfw_halos_with_zero_pairs": 0,
+        "nfw_mass_in_halos_with_zero_pairs_msun_h": 0.0,
+        "nfw_subpixel_support_halo_count": 1,
     }
 
     module.print_nfw_calibration_summary(
@@ -1344,6 +1587,13 @@ def test_reduce_calibration_segment_result_sums_additive_payloads():
             "d_nfw_particle_counts_d_concentration_redshift_slope": np.array([0.5, 0.6]),
             "nfw_paint_mode": "sparse",
             "nfw_selected_halo_count": 1,
+            "nfw_selected_halo_mass_msun_h": 4.0,
+            "nfw_expected_particle_count": 4.0,
+            "nfw_painted_particle_count": 2.0,
+            "nfw_painted_to_expected_ratio": 0.5,
+            "nfw_halos_with_zero_pairs": 1,
+            "nfw_mass_in_halos_with_zero_pairs_msun_h": 1.0,
+            "nfw_subpixel_support_halo_count": 1,
             "nfw_compact_pixel_count": 2,
             "nfw_sparse_pair_count": 2,
             "nfw_dense_pair_count": 4,
@@ -1362,7 +1612,8 @@ def test_reduce_calibration_segment_result_sums_additive_payloads():
         np.array([0.4, 0.5]),
         np.array([0.6, 0.7]),
         np.array([0.8, 0.9]),
-        np.array([2, 3, 6], dtype=np.int64),
+        np.array([2, 3, 6, 1, 2], dtype=np.int64),
+        np.array([5.0, 1.0], dtype=np.float64),
     ]
 
     class PairwiseSumComm:
@@ -1398,18 +1649,29 @@ def test_reduce_calibration_segment_result_sums_additive_payloads():
     assert reduced.nfw_diagnostics["nfw_selected_halo_count"] == 3
     assert reduced.nfw_diagnostics["nfw_sparse_pair_count"] == 5
     assert reduced.nfw_diagnostics["nfw_dense_pair_count"] == 10
+    assert reduced.nfw_diagnostics["nfw_halos_with_zero_pairs"] == 2
+    assert reduced.nfw_diagnostics["nfw_subpixel_support_halo_count"] == 3
+    assert reduced.nfw_diagnostics["nfw_selected_halo_mass_msun_h"] == 9.0
+    assert reduced.nfw_diagnostics["nfw_mass_in_halos_with_zero_pairs_msun_h"] == 2.0
     assert reduced.nfw_diagnostics["nfw_compact_pixel_count"] == 2
     assert reduced.nfw_diagnostics["nfw_sparse_compression_factor"] == 2.0
     assert reduced.nfw_diagnostics["nfw_sum_particle_counts"] == 7.0
+    assert reduced.nfw_diagnostics["nfw_painted_particle_count"] == 7.0
+    assert reduced.nfw_diagnostics["nfw_expected_particle_count"] == 9.0
+    assert reduced.nfw_diagnostics["nfw_painted_to_expected_ratio"] == pytest.approx(
+        7.0 / 9.0
+    )
     assert "sum_d_nfw_particle_counts_d_concentration_amplitude" not in reduced.nfw_diagnostics
     assert "sum_d_nfw_particle_counts_d_concentration_mass_slope" not in reduced.nfw_diagnostics
     assert "sum_d_nfw_particle_counts_d_concentration_redshift_slope" not in reduced.nfw_diagnostics
-    assert len(comm.send_buffers) == 5
-    assert comm.send_buffers[-1].dtype == np.dtype(np.int64)
+    assert len(comm.send_buffers) == 6
+    assert comm.send_buffers[-2].dtype == np.dtype(np.int64)
     np.testing.assert_array_equal(
-        comm.send_buffers[-1],
-        [1, 2, 4],
+        comm.send_buffers[-2],
+        [1, 2, 4, 1, 1],
     )
+    assert comm.send_buffers[-1].dtype == np.dtype(np.float64)
+    np.testing.assert_array_equal(comm.send_buffers[-1], [4.0, 1.0])
     assert not comm.values
 
 
@@ -1478,6 +1740,7 @@ def test_reduce_calibration_segment_result_non_root_uses_no_receive_buffers():
     assert comm.send_dtypes == [
         np.dtype(np.float32),
         np.dtype(np.int64),
+        np.dtype(np.float64),
     ]
 
 
@@ -1532,6 +1795,146 @@ def test_real_mpi_buffer_reduction():
         [2 * expected],
     )
     assert reduced.nfw_diagnostics["nfw_selected_halo_count"] == expected
+
+
+def test_real_mpi_workflow_matches_serial_for_worker_counts_and_derivatives(
+    tmp_path,
+    monkeypatch,
+):
+    module = _load_example_module()
+    if module._mpi_environment_size_hint() < 2:
+        pytest.skip("requires execution under mpiexec with at least two ranks")
+
+    mpi = pytest.importorskip("mpi4py.MPI")
+    hp = pytest.importorskip("healpy")
+    comm = mpi.COMM_WORLD
+    if comm.Get_size() < 2:
+        pytest.skip("requires execution under mpiexec with at least two ranks")
+
+    rank_path = tmp_path / f"rank_{comm.Get_rank()}"
+    rank_path.mkdir(parents=True, exist_ok=True)
+    for segment_index in range(2):
+        path = rank_path / f"run.massmap.seg{segment_index:03d}.fits"
+        path.touch()
+    sheets = PinocchioMassSheetTable(
+        sheet_ids=np.array([0, 1]),
+        z_hi=np.array([0.3, 0.5]),
+        z_lo=np.array([0.1, 0.3]),
+        delta_z=np.array([0.2, 0.2]),
+        chi_hi_mpc_h=np.array([300.0, 500.0]),
+        chi_lo_mpc_h=np.array([100.0, 300.0]),
+        delta_chi_mpc_h=np.array([200.0, 200.0]),
+        inv_delta_chi_h_mpc=np.array([0.005, 0.005]),
+        da_hi_mpc_h=np.array([230.0, 330.0]),
+        da_lo_mpc_h=np.array([90.0, 230.0]),
+        chi3_diff_mpc_h3=np.array([1.0, 1.0]),
+        source=rank_path / "sheets.out",
+    )
+    halo_pixels = np.array([0, 5, 8, 11], dtype=np.int64)
+    full_catalog = _catalog(
+        unit_vector=np.stack(hp.pix2vec(1, halo_pixels), axis=-1),
+        mass=np.array([1.0e13, 2.0e13, 3.0e13, 4.0e13]),
+        redshift=np.array([0.15, 0.25, 0.35, 0.5]),
+        chi=np.array([150.0, 250.0, 350.0, 500.0]),
+    )
+    rank_indices = np.array_split(
+        np.arange(full_catalog.mass.shape[0]),
+        comm.Get_size(),
+    )[comm.Get_rank()]
+    rank_catalog = LightconeHaloCatalog(
+        unit_vector=full_catalog.unit_vector[rank_indices],
+        chi=full_catalog.chi[rank_indices],
+        mass=full_catalog.mass[rank_indices],
+        redshift=full_catalog.redshift[rank_indices],
+    )
+    mass_maps = {
+        0: _mass_map(np.arange(12, dtype=np.int64), nside=1),
+        1: _mass_map(np.arange(11, -1, -1, dtype=np.int64), nside=1),
+    }
+
+    def fake_read_mass_map(path):
+        return mass_maps[module.parse_segment_index_from_mass_map_path(Path(path))]
+
+    monkeypatch.setattr(module, "read_pinocchio_mass_map_fits", fake_read_mass_map)
+    metadata = SimpleNamespace(particle_mass_msun_h=1.0e10, cosmology=Cosmology())
+
+    def workflow_args(output_dir, workers, *, mpi_enabled):
+        return _workflow_args(
+            mass_map=None,
+            sheet_index=None,
+            output=None,
+            mass_map_glob=str(rank_path / "run.massmap.seg*.fits"),
+            output_dir=output_dir,
+            mode="derivatives",
+            segment_workers=workers,
+            mpi_plc_parts=mpi_enabled,
+        )
+
+    serial_dir = rank_path / "serial"
+    serial_rows = module.run_segment_workflow(
+        workflow_args(serial_dir, 1, mpi_enabled=False),
+        workflow="all",
+        catalog=full_catalog,
+        sheets=sheets,
+        metadata=metadata,
+        particle_mass=metadata.particle_mass_msun_h,
+        profile=False,
+        compute_map_derivatives=True,
+    )
+    map_keys = (
+        "nfw_particle_counts",
+        "d_nfw_particle_counts_d_concentration_amplitude",
+        "d_nfw_particle_counts_d_concentration_mass_slope",
+        "d_nfw_particle_counts_d_concentration_redshift_slope",
+    )
+    serial_arrays = {}
+    for segment_index in range(2):
+        with np.load(module.segment_output_path(serial_dir, segment_index)) as data:
+            serial_arrays[segment_index] = {
+                key: np.asarray(data[key]) for key in map_keys
+            }
+
+    assert [row["segment_index"] for row in serial_rows] == [0, 1]
+    for workers in (1, 2):
+        mpi_dir = rank_path / f"mpi_workers_{workers}"
+        mpi_rows = module.run_segment_workflow(
+            workflow_args(mpi_dir, workers, mpi_enabled=True),
+            workflow="all",
+            catalog=rank_catalog,
+            sheets=sheets,
+            metadata=metadata,
+            particle_mass=metadata.particle_mass_msun_h,
+            profile=False,
+            compute_map_derivatives=True,
+            mpi_context=module.MpiContext(
+                enabled=True,
+                comm=comm,
+                rank=comm.Get_rank(),
+                size=comm.Get_size(),
+                sum_op=mpi.SUM,
+            ),
+        )
+        comm.Barrier()
+        if comm.Get_rank() != 0:
+            assert mpi_rows == []
+            continue
+
+        assert [row["segment_index"] for row in mpi_rows] == [0, 1]
+        assert [row["selected_halo_count"] for row in mpi_rows] == [
+            row["selected_halo_count"] for row in serial_rows
+        ]
+        assert [row["sparse_pair_count"] for row in mpi_rows] == [
+            row["sparse_pair_count"] for row in serial_rows
+        ]
+        for segment_index in range(2):
+            with np.load(module.segment_output_path(mpi_dir, segment_index)) as data:
+                for key in map_keys:
+                    np.testing.assert_allclose(
+                        data[key],
+                        serial_arrays[segment_index][key],
+                        rtol=1.0e-12,
+                        atol=1.0e-12,
+                    )
 
 
 def test_real_mpi_segment_timing_gather():
@@ -1753,8 +2156,9 @@ def test_run_segment_workflow_all_segments_uses_segment_workers(tmp_path, monkey
             inclusive_upper=kwargs["inclusive_upper"],
         )
 
-    def fake_write(result, args, metadata, *, profile, verbose):
+    def fake_write(result, args, metadata, *, profile, verbose, provenance):
         del args, metadata, profile, verbose
+        assert provenance.segment_worker_count == 2
         write_calls.append(result.segment_index)
         return {"segment_index": result.segment_index}
 
@@ -1780,9 +2184,105 @@ def test_run_segment_workflow_all_segments_uses_segment_workers(tmp_path, monkey
 
     assert sorted(call["segment_index"] for call in compute_calls) == [0, 1]
     assert all(call["verbose"] is False for call in compute_calls)
+    assert [call["inclusive_upper"] for call in compute_calls] == [False, True]
     assert write_calls == [0, 1]
     assert rows == [{"segment_index": 0}, {"segment_index": 1}]
     assert manifest_calls[0][1] == rows
+
+
+def test_run_segment_workflow_partial_batch_keeps_highest_segment_half_open(
+    tmp_path,
+    monkeypatch,
+):
+    module = _load_example_module()
+    segment_path = tmp_path / "run.massmap.seg000.fits"
+    segment_path.touch()
+    args = _workflow_args(
+        mass_map=None,
+        sheet_index=None,
+        output=None,
+        mass_map_glob=str(tmp_path / "*.fits"),
+        output_dir=tmp_path / "painted",
+        segment_workers=2,
+    )
+    inclusive_values = []
+
+    def fake_compute(**kwargs):
+        inclusive_values.append(kwargs["inclusive_upper"])
+        return _fake_segment_result(
+            module,
+            segment_index=kwargs["segment_index"],
+            mass_map_path=kwargs["mass_map_path"],
+            output_npz=kwargs["output_npz"],
+            inclusive_upper=kwargs["inclusive_upper"],
+        )
+
+    monkeypatch.setattr(module, "compute_calibration_for_segment", fake_compute)
+    monkeypatch.setattr(
+        module,
+        "write_calibration_segment_outputs",
+        lambda result, args, metadata, **kwargs: {
+            "segment_index": result.segment_index
+        },
+    )
+    monkeypatch.setattr(module, "write_manifest", lambda path, rows: None)
+
+    module.run_segment_workflow(
+        args,
+        workflow="all",
+        catalog=_catalog(),
+        sheets=_sheets(),
+        metadata=SimpleNamespace(particle_mass_msun_h=1.0, cosmology=Cosmology()),
+        particle_mass=1.0,
+        profile=False,
+        compute_map_derivatives=False,
+    )
+
+    assert inclusive_values == [False]
+
+
+def test_run_segment_workflow_aborts_mpi_job_on_rank_local_compute_error(
+    monkeypatch,
+    capsys,
+):
+    module = _load_example_module()
+
+    class AbortComm:
+        def __init__(self):
+            self.error_codes = []
+
+        def Abort(self, error_code):
+            self.error_codes.append(error_code)
+
+    comm = AbortComm()
+
+    def fail_compute(**kwargs):
+        raise OSError(f"cannot read {kwargs['mass_map_path']}")
+
+    monkeypatch.setattr(module, "compute_calibration_for_segment", fail_compute)
+
+    with pytest.raises(RuntimeError, match="returned after Abort"):
+        module.run_segment_workflow(
+            _workflow_args(mpi_plc_parts=True),
+            workflow="single",
+            catalog=_catalog(),
+            sheets=_sheets(),
+            metadata=SimpleNamespace(particle_mass_msun_h=1.0, cosmology=Cosmology()),
+            particle_mass=1.0,
+            profile=False,
+            compute_map_derivatives=False,
+            mpi_context=module.MpiContext(
+                enabled=True,
+                comm=comm,
+                rank=1,
+                size=2,
+            ),
+        )
+
+    assert comm.error_codes == [1]
+    error_output = capsys.readouterr().err
+    assert "rank 1/2" in error_output
+    assert "segment 0" in error_output
 
 
 def test_run_segment_workflow_mpi_reduce_mode_reduces_before_root_write(
@@ -1823,8 +2323,9 @@ def test_run_segment_workflow_mpi_reduce_mode_reduces_before_root_write(
         reduce_calls.append((result.segment_index, mpi_context.rank))
         return result
 
-    def fake_write(result, args, metadata, *, profile, verbose):
+    def fake_write(result, args, metadata, *, profile, verbose, provenance):
         del args, metadata, profile, verbose
+        assert provenance.mpi_rank_count == 2
         events.append(("write", result.segment_index))
         write_calls.append(result.output_npz)
         return {"segment_index": result.segment_index}
@@ -1908,10 +2409,11 @@ def test_run_segment_workflow_mpi_profile_gathers_root_timing_summaries(
             inclusive_upper=kwargs["inclusive_upper"],
         )
 
-    def fake_write(result, args, metadata, *, profile, verbose):
+    def fake_write(result, args, metadata, *, profile, verbose, provenance):
         del args, metadata
         assert profile is True
         assert verbose is True
+        assert provenance.mpi_rank_count == 2
         assert "compute_seconds" not in result.nfw_diagnostics
         return {"segment_index": result.segment_index}
 
@@ -2013,8 +2515,9 @@ def test_run_segment_workflow_mpi_reduce_mode_uses_bounded_segment_pipeline(
         events.append(("reduce", result.segment_index, mpi_context.rank))
         return result
 
-    def fake_write(result, args, metadata, *, profile, verbose):
+    def fake_write(result, args, metadata, *, profile, verbose, provenance):
         del args, metadata, profile, verbose
+        assert provenance.segment_worker_count == 2
         events.append(("write", result.segment_index))
         return {"segment_index": result.segment_index}
 
@@ -2032,7 +2535,7 @@ def test_run_segment_workflow_mpi_reduce_mode_uses_bounded_segment_pipeline(
         args,
         workflow="all",
         catalog=_catalog(),
-        sheets=_sheets(),
+        sheets=[None, None, None],
         metadata=SimpleNamespace(particle_mass_msun_h=1.0, cosmology=Cosmology()),
         particle_mass=1.0,
         profile=False,
@@ -2377,7 +2880,7 @@ def test_run_nfw_calibration_pipeline_sparse_uses_fewer_pairs_for_local_stencil(
     assert diagnostics["nfw_particle_counts"].shape == (2,)
 
 
-def test_write_manifest_contains_only_scientific_provenance(tmp_path):
+def test_write_manifest_contains_scientific_diagnostics_and_provenance(tmp_path):
     module = _load_example_module()
     path = tmp_path / "painted_nfw_manifest.csv"
 
@@ -2403,12 +2906,30 @@ def test_write_manifest_contains_only_scientific_provenance(tmp_path):
         "pipeline_mode": "derivatives",
         "nfw_paint_mode": "sparse",
         "nfw_map_derivatives": "concentration",
+        "nfw_mass_definition": "200c",
+        "nfw_overdensity_mode": "constant",
+        "nfw_overdensity": 200.0,
+        "nfw_reference_density": "critical",
+        "nfw_overdensity_file": "",
+        "nfw_mass_conversion": "none_catalog_mass_interpreted_as_profile_mass",
         "nfw_concentration_amplitude": 5.71,
         "nfw_concentration_mass_slope": -0.084,
         "nfw_concentration_redshift_slope": -0.47,
         "nfw_concentration_mass_pivot_msun_h": 2.0e12,
         "nfw_truncation_width_fraction": 0.05,
         "nfw_taper_radius_factor": 10.0,
+        "selected_halo_count": 2,
+        "selected_halo_mass_msun_h": 50.0,
+        "expected_particle_count": 10.0,
+        "painted_particle_count": 8.0,
+        "painted_to_expected_ratio": 0.8,
+        "sparse_pair_count": 5,
+        "halos_with_zero_pairs": 1,
+        "mass_in_halos_with_zero_pairs_msun_h": 5.0,
+        "subpixel_support_halo_count": 2,
+        "mpi_rank_count": 2,
+        "segment_worker_count": 3,
+        "git_commit": "abc123",
     }
     module.write_manifest(
         path,
@@ -2416,8 +2937,6 @@ def test_write_manifest_contains_only_scientific_provenance(tmp_path):
             {
                 **expected,
                 "n_halos_in_segment": 2,
-                "nfw_selected_halo_count": 2,
-                "nfw_sparse_pair_count": 5,
                 "nfw_sum_particle_counts": 1.25,
                 "sum_d_nfw_particle_counts_d_concentration_amplitude": 0.3,
             }

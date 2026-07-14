@@ -40,7 +40,9 @@ python examples/paint_halo_particles_for_pinocchio_segment.py \\
   --mass-map path/to/pinocchio.RUN.massmap.seg000.fits \\
   --plc-catalog path/to/pinocchio.RUN.plc.out \\
   --sheet-index 0 \\
-  --output path/to/halo_particles.seg000.npz
+  --output path/to/halo_particles.seg000.npz \\
+  --nfw-overdensity 200 \\
+  --nfw-reference-density critical
 
 The default mode paints the NFW map. Use ``--mode derivatives`` to also save
 map-level derivatives, ``--mode profile`` to print timings, or
@@ -62,6 +64,8 @@ Paint all discovered mass-map segments:
     --plc-catalog path/to/pinocchio.RUN.plc.out \\
     --mass-map-glob "path/to/pinocchio.RUN.massmap.seg*.fits" \\
     --output-dir path/to/painted_segments \\
+    --nfw-overdensity 200 \\
+    --nfw-reference-density critical \\
     --mode derivatives
 """
 
@@ -74,13 +78,16 @@ import csv
 import glob
 import os
 import re
+import subprocess
+import sys
+import traceback
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
-from typing import Any
+from typing import Any, Literal
 
 
 def _preparse_jax_precision(argv: list[str] | None = None) -> str:
@@ -151,6 +158,88 @@ class MpiContext:
     @property
     def is_root(self) -> bool:
         return self.rank == 0
+
+
+@dataclass(frozen=True)
+class ResolvedHaloMassDefinition:
+    """Spherical-overdensity definition resolved for one map segment."""
+
+    mode: Literal["constant", "per_segment", "bryan_norman"]
+    profile_mode: Literal["constant", "bryan_norman"]
+    reference_density: Literal["critical", "mean"]
+    profile_overdensity: float
+    reported_overdensity: float | None
+    source: Path | None = None
+
+    @property
+    def label(self) -> str:
+        """Return a compact manifest label for this mass interpretation."""
+
+        suffix = "c" if self.reference_density == "critical" else "m"
+        if self.mode == "bryan_norman":
+            return f"virial_bn98{suffix}"
+        assert self.reported_overdensity is not None
+        return f"{self.reported_overdensity:g}{suffix}"
+
+
+@dataclass(frozen=True)
+class HaloMassDefinition:
+    """Host-side mass-definition configuration for the segment workflow."""
+
+    mode: Literal["constant", "per_segment", "bryan_norman"]
+    reference_density: Literal["critical", "mean"]
+    constant_overdensity: float | None = None
+    per_segment_overdensity: np.ndarray | None = None
+    source: Path | None = None
+
+    def resolve(self, segment_index: int) -> ResolvedHaloMassDefinition:
+        """Resolve this configuration for one sheet-row index."""
+
+        if self.mode == "bryan_norman":
+            return ResolvedHaloMassDefinition(
+                mode=self.mode,
+                profile_mode="bryan_norman",
+                reference_density=self.reference_density,
+                profile_overdensity=200.0,
+                reported_overdensity=None,
+            )
+        if self.mode == "constant":
+            assert self.constant_overdensity is not None
+            value = float(self.constant_overdensity)
+        else:
+            assert self.per_segment_overdensity is not None
+            if segment_index < 0 or segment_index >= self.per_segment_overdensity.size:
+                raise ValueError(
+                    f"segment index {segment_index} has no per-segment overdensity value"
+                )
+            value = float(self.per_segment_overdensity[segment_index])
+        return ResolvedHaloMassDefinition(
+            mode=self.mode,
+            profile_mode="constant",
+            reference_density=self.reference_density,
+            profile_overdensity=value,
+            reported_overdensity=value,
+            source=self.source,
+        )
+
+
+@dataclass(frozen=True)
+class ExecutionProvenance:
+    """Execution metadata recorded once in every manifest row."""
+
+    mpi_rank_count: int
+    segment_worker_count: int
+    git_commit: str
+
+
+def default_halo_mass_definition() -> HaloMassDefinition:
+    """Return the legacy 200c interpretation for direct Python callers."""
+
+    return HaloMassDefinition(
+        mode="constant",
+        reference_density="critical",
+        constant_overdensity=200.0,
+    )
 
 
 @dataclass
@@ -224,6 +313,7 @@ class StencilBuildDiagnostics:
     pix2vec_filter_seconds: float = 0.0
     concatenate_seconds: float = 0.0
     jax_transfer_seconds: float = 0.0
+    halo_has_kept_pair: np.ndarray | None = None
 
     @property
     def residual_seconds(self) -> float:
@@ -341,8 +431,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help=(
             "In single-segment mode, use an inclusive upper segment bound. "
-            "In all-segments mode, intermediate segments are half-open and the final "
-            "discovered segment is inclusive automatically."
+            "All-segments mode determines inclusivity from the physical final sheet."
         ),
     )
     parser.add_argument(
@@ -379,6 +468,28 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=2.0e12,
         help="Mass pivot in Msun/h for the concentration--mass relation.",
+    )
+    mass_definition_group = parser.add_mutually_exclusive_group(required=True)
+    mass_definition_group.add_argument(
+        "--nfw-overdensity",
+        type=float,
+        help="Constant spherical overdensity Delta for the NFW halo mass.",
+    )
+    mass_definition_group.add_argument(
+        "--nfw-virial-overdensity",
+        action="store_true",
+        help="Use the redshift-dependent Bryan--Norman virial overdensity.",
+    )
+    mass_definition_group.add_argument(
+        "--nfw-overdensity-by-segment",
+        type=Path,
+        help="One-dimensional .npy array containing one Delta value per sheet row.",
+    )
+    parser.add_argument(
+        "--nfw-reference-density",
+        choices=("critical", "mean"),
+        required=True,
+        help="Reference density for the NFW spherical-overdensity mass.",
     )
     parser.add_argument(
         "--truncation-width-fraction",
@@ -428,6 +539,68 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def load_halo_mass_definition(
+    args: argparse.Namespace,
+    sheets: Any,
+) -> HaloMassDefinition:
+    """Load and validate the user-selected NFW spherical-overdensity definition."""
+
+    reference_density = str(args.nfw_reference_density)
+    if reference_density not in ("critical", "mean"):
+        raise ValueError("--nfw-reference-density must be 'critical' or 'mean'")
+
+    constant = args.nfw_overdensity
+    use_virial = bool(args.nfw_virial_overdensity)
+    source = args.nfw_overdensity_by_segment
+    selected_modes = int(constant is not None) + int(use_virial) + int(source is not None)
+    if selected_modes != 1:
+        raise ValueError(
+            "Select exactly one of --nfw-overdensity, --nfw-virial-overdensity, "
+            "or --nfw-overdensity-by-segment"
+        )
+
+    if constant is not None:
+        value = float(constant)
+        if not np.isfinite(value) or value <= 0.0:
+            raise ValueError("--nfw-overdensity must be finite and positive")
+        return HaloMassDefinition(
+            mode="constant",
+            reference_density=reference_density,
+            constant_overdensity=value,
+        )
+
+    if use_virial:
+        return HaloMassDefinition(
+            mode="bryan_norman",
+            reference_density=reference_density,
+        )
+
+    source = Path(source)
+    if source.suffix.lower() != ".npy":
+        raise ValueError("--nfw-overdensity-by-segment must point to a .npy file")
+    try:
+        values = np.load(source, allow_pickle=False)
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"Cannot read per-segment overdensity array: {source}") from exc
+    values = np.asarray(values, dtype=np.float64)
+    if values.ndim != 1:
+        raise ValueError("per-segment overdensity array must be one-dimensional")
+    if values.shape[0] != len(sheets):
+        raise ValueError(
+            "per-segment overdensity array length must match the sheet table: "
+            f"got {values.shape[0]}, expected {len(sheets)}"
+        )
+    if not np.all(np.isfinite(values)) or np.any(values <= 0.0):
+        raise ValueError("per-segment overdensity values must be finite and positive")
+    values.setflags(write=False)
+    return HaloMassDefinition(
+        mode="per_segment",
+        reference_density=reference_density,
+        per_segment_overdensity=values,
+        source=source,
+    )
+
+
 def validate_segment_workflow_args(args: argparse.Namespace) -> str:
     """Return ``single`` or ``all`` after validating segment workflow arguments."""
 
@@ -450,6 +623,10 @@ def validate_segment_workflow_args(args: argparse.Namespace) -> str:
     if all(single_segment_args) and not any(all_segment_args):
         return "single"
     if all(all_segment_args) and not any(single_segment_args):
+        if bool(args.last_segment_inclusive):
+            raise ValueError(
+                "--last-segment-inclusive is only valid in single-segment mode"
+            )
         return "all"
     raise ValueError(
         "Provide either --mass-map, --sheet-index, --output "
@@ -576,6 +753,56 @@ def warn_if_float32_precision(args: argparse.Namespace, mpi_context: MpiContext)
         )
 
 
+def resolve_git_commit() -> str:
+    """Return execution commit provenance without failing an installed run."""
+
+    configured = os.environ.get("GEPPETTO_GIT_COMMIT")
+    if configured:
+        return configured
+    repository = Path(__file__).resolve().parents[1]
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repository), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10.0,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    commit = result.stdout.strip()
+    return commit or "unknown"
+
+
+def execution_provenance(
+    args: argparse.Namespace,
+    mpi_context: MpiContext,
+) -> ExecutionProvenance:
+    """Build root-written execution provenance for manifest rows."""
+
+    return ExecutionProvenance(
+        mpi_rank_count=mpi_context.size if mpi_context.enabled else 1,
+        segment_worker_count=int(getattr(args, "segment_workers", 1)),
+        git_commit=resolve_git_commit() if mpi_context.is_root else "",
+    )
+
+
+def abort_mpi_job(mpi_context: MpiContext, exc: BaseException) -> None:
+    """Report a fatal rank-local exception and abort the distributed job."""
+
+    print(
+        f"Fatal MPI workflow error on rank {mpi_context.rank}/{mpi_context.size}: {exc}",
+        file=sys.stderr,
+        flush=True,
+    )
+    traceback.print_exception(type(exc), exc, exc.__traceback__, file=sys.stderr)
+    sys.stderr.flush()
+    if mpi_context.comm is None:
+        raise RuntimeError("MPI context is enabled but has no communicator") from exc
+    mpi_context.comm.Abort(1)
+    raise RuntimeError("MPI communicator returned after Abort") from exc
+
+
 def parse_segment_index_from_mass_map_path(path: Path) -> int:
     """Return segment index parsed from a PINOCCHIO mass-map segment filename."""
 
@@ -604,6 +831,28 @@ def discover_mass_map_segments(pattern: str) -> list[tuple[int, Path]]:
         seen[segment_index] = path
         segments.append((segment_index, path))
     return sorted(segments, key=lambda item: item[0])
+
+
+def validate_mass_map_segment_batch(
+    segments: list[tuple[int, Path]],
+    sheets: Any,
+) -> None:
+    """Validate that a discovered batch is consecutive and indexes the sheets."""
+
+    indices = [segment_index for segment_index, _ in segments]
+    expected = list(range(indices[0], indices[-1] + 1))
+    if indices != expected:
+        raise ValueError(
+            "Mass-map segment indices must form one contiguous batch: "
+            f"found {indices}, expected {expected}"
+        )
+    n_sheet = len(sheets)
+    invalid = [index for index in indices if index < 0 or index >= n_sheet]
+    if invalid:
+        raise ValueError(
+            "Mass-map segment indices are outside the sheet table: "
+            f"invalid {invalid}, valid range [0, {n_sheet})"
+        )
 
 
 def segment_output_path(output_dir: Path, segment_index: int) -> Path:
@@ -1014,14 +1263,15 @@ def build_lightcone_sparse_stencil_for_mass_map_local(
     halo_id_chunks: list[np.ndarray] = []
     r_perp_chunks: list[np.ndarray] = []
     diagnostics = StencilBuildDiagnostics()
-    max_pixel_radius = float(hp.max_pixrad(mass_map.nside)) if profile_phases else None
+    halo_has_kept_pair = np.zeros(n_halo, dtype=bool)
+    max_pixel_radius = float(hp.max_pixrad(mass_map.nside))
 
     for halo_id, (halo_vector, chi_i, rmax_i) in enumerate(
         zip(halo_unit_vectors, halo_chi, rmax, strict=True)
     ):
         diagnostics.n_halos += 1
         alpha_max = 2.0 * np.arcsin(min(1.0, float(rmax_i) / (2.0 * float(chi_i))))
-        if max_pixel_radius is not None and alpha_max <= max_pixel_radius:
+        if alpha_max <= max_pixel_radius:
             diagnostics.n_subpixel_radius_halos += 1
         query_radius = min(float(np.pi), float(np.nextafter(alpha_max, np.inf)))
 
@@ -1076,6 +1326,7 @@ def build_lightcone_sparse_stencil_for_mass_map_local(
         if n_keep == 0:
             continue
         diagnostics.n_halos_with_kept_pairs += 1
+        halo_has_kept_pair[halo_id] = True
 
         pix_id_chunks.append(local_rows[keep])
         halo_id_chunks.append(np.full(n_keep, halo_id, dtype=np.int64))
@@ -1106,6 +1357,7 @@ def build_lightcone_sparse_stencil_for_mass_map_local(
         stencil.r_perp.block_until_ready()
         diagnostics.jax_transfer_seconds = perf_counter() - phase_start
     diagnostics.elapsed_seconds = perf_counter() - build_start
+    diagnostics.halo_has_kept_pair = halo_has_kept_pair
     if collect_diagnostics:
         if diagnostics.n_kept_pairs_total != int(pix_id.shape[0]):
             raise RuntimeError("stencil diagnostics kept-pair count does not match stencil size")
@@ -1145,11 +1397,15 @@ def paint_bucketed_nfw_sparse_map(
     concentration_redshift_slope: float,
     concentration_mass_pivot: float,
     truncation_width_fraction: float,
+    mass_definition: ResolvedHaloMassDefinition | None = None,
     *,
     compute_map_derivatives: bool,
     profile: bool,
 ) -> tuple[jax.Array, dict[str, float | str | np.ndarray]]:
     """Paint one padded sparse bucket and optional concentration JVP maps."""
+
+    if mass_definition is None:
+        mass_definition = default_halo_mass_definition().resolve(0)
 
     theta = jnp.asarray(
         [
@@ -1164,6 +1420,10 @@ def paint_bucketed_nfw_sparse_map(
     pixel_area = jnp.asarray(pixel_area_sr, dtype=scalar_dtype)
     mass_pivot = jnp.asarray(concentration_mass_pivot, dtype=scalar_dtype)
     truncation_width = jnp.asarray(truncation_width_fraction, dtype=scalar_dtype)
+    overdensity = jnp.asarray(
+        mass_definition.profile_overdensity,
+        dtype=scalar_dtype,
+    )
 
     if compute_map_derivatives:
         with timed_stage("NFW particle map + concentration JVPs", profile):
@@ -1184,6 +1444,9 @@ def paint_bucketed_nfw_sparse_map(
                         metadata.cosmology,
                         mass_pivot,
                         truncation_width,
+                        overdensity,
+                        overdensity_mode=mass_definition.profile_mode,
+                        reference_density=mass_definition.reference_density,
                     )
                 )
             jax.block_until_ready((particle_counts, derivative_maps))
@@ -1201,6 +1464,9 @@ def paint_bucketed_nfw_sparse_map(
                     metadata.cosmology,
                     mass_pivot,
                     truncation_width,
+                    overdensity,
+                    overdensity_mode=mass_definition.profile_mode,
+                    reference_density=mass_definition.reference_density,
                 )
             particle_counts.block_until_ready()
 
@@ -1238,6 +1504,7 @@ def run_nfw_calibration_pipeline(
     verbose: bool = True,
     pixel_index: MassMapPixelIndex | None = None,
     stencil_profile_recorder: StencilProfileRecorder | None = None,
+    mass_definition: ResolvedHaloMassDefinition | None = None,
 ) -> dict[str, bool | float | int | str | np.ndarray]:
     """Paint the NFW calibration map and optional concentration derivatives.
 
@@ -1261,9 +1528,13 @@ def run_nfw_calibration_pipeline(
         chunk_size = None
     if profile and stencil_profile_recorder is None:
         stencil_profile_recorder = StencilProfileRecorder()
+    if mass_definition is None:
+        mass_definition = default_halo_mass_definition().resolve(0)
 
     with timed_stage("NFW selected catalogue", profile):
         selected_catalog = selected_lightcone_catalog(catalog, mask)
+    selected_mass = np.asarray(selected_catalog.mass)
+    selected_halo_mass_msun_h = float(np.sum(selected_mass, dtype=np.float64))
     pixel_area_sr = healpix_pixel_area_sr(mass_map.nside)
     n_halo = int(selected_catalog.mass.shape[0])
     n_pix = int(np.asarray(mass_map.pixel).shape[0])
@@ -1277,7 +1548,10 @@ def run_nfw_calibration_pipeline(
         mass_pivot=concentration_mass_pivot,
     )
     profile_params = NFWProfileParams(
-        truncation_width_fraction=truncation_width_fraction
+        overdensity=mass_definition.profile_overdensity,
+        reference_density=mass_definition.reference_density,
+        truncation_width_fraction=truncation_width_fraction,
+        overdensity_mode=mass_definition.profile_mode,
     )
     stencil = None
     bucketed_stencil = None
@@ -1286,6 +1560,9 @@ def run_nfw_calibration_pipeline(
         "nfw_map_derivatives": "none"
     }
     sparse_pair_count = dense_pair_count
+    halos_with_zero_pairs = 0
+    mass_in_halos_with_zero_pairs_msun_h = 0.0
+    subpixel_support_halo_count = 0
     if not dense_demo:
         with timed_stage("NFW rmax", profile):
             rmax = nfw_stencil_rmax_mpc_h(
@@ -1296,22 +1573,25 @@ def run_nfw_calibration_pipeline(
                 taper_radius_factor,
             )
         with timed_stage("NFW local sparse stencil", profile):
-            collect_stencil_diagnostics = stencil_profile_recorder is not None
             stencil_result = build_lightcone_sparse_stencil_for_mass_map_local(
                 mass_map,
                 selected_catalog,
                 rmax,
-                collect_diagnostics=collect_stencil_diagnostics,
+                collect_diagnostics=True,
                 pixel_index=pixel_index,
-                profile_phases=collect_stencil_diagnostics,
+                profile_phases=profile,
             )
-        if collect_stencil_diagnostics:
-            stencil, collected_stencil_diag = stencil_result
-            assert stencil_profile_recorder is not None
+        stencil, collected_stencil_diag = stencil_result
+        if stencil_profile_recorder is not None:
             stencil_profile_recorder.diagnostics = collected_stencil_diag
-        else:
-            stencil = stencil_result
+        subpixel_support_halo_count = collected_stencil_diag.n_subpixel_radius_halos
         sparse_pair_count = int(stencil.size)
+        assert collected_stencil_diag.halo_has_kept_pair is not None
+        zero_pair_mask = ~collected_stencil_diag.halo_has_kept_pair
+        halos_with_zero_pairs = int(np.count_nonzero(zero_pair_mask))
+        mass_in_halos_with_zero_pairs_msun_h = float(
+            np.sum(selected_mass[zero_pair_mask], dtype=np.float64)
+        )
         with timed_stage("NFW sparse JIT bucket", profile):
             bucketed_stencil = bucket_sparse_stencil_for_rank_catalog(
                 stencil,
@@ -1372,6 +1652,7 @@ def run_nfw_calibration_pipeline(
             concentration_redshift_slope,
             concentration_mass_pivot,
             truncation_width_fraction,
+            mass_definition,
             compute_map_derivatives=compute_map_derivatives,
             profile=profile,
         )
@@ -1381,12 +1662,29 @@ def run_nfw_calibration_pipeline(
     with timed_stage("NFW particle map to numpy", profile):
         nfw_particle_counts_np = np.asarray(nfw_particle_counts)
 
+    painted_particle_count = float(total_counts)
+    expected_particle_count = selected_halo_mass_msun_h / particle_mass_msun_h
+    painted_to_expected_ratio = (
+        painted_particle_count / expected_particle_count
+        if expected_particle_count > 0.0
+        else float("nan")
+    )
+
     diagnostics: dict[str, bool | float | int | str | np.ndarray] = {
         "pipeline_mode": pipeline_mode,
         "particle_mass_msun_h": float(particle_mass_msun_h),
         "nfw_particle_counts": nfw_particle_counts_np,
         "nfw_paint_mode": "dense" if dense_demo else "sparse",
         "nfw_selected_halo_count": int(selected_catalog.mass.shape[0]),
+        "nfw_selected_halo_mass_msun_h": selected_halo_mass_msun_h,
+        "nfw_expected_particle_count": expected_particle_count,
+        "nfw_painted_particle_count": painted_particle_count,
+        "nfw_painted_to_expected_ratio": painted_to_expected_ratio,
+        "nfw_halos_with_zero_pairs": halos_with_zero_pairs,
+        "nfw_mass_in_halos_with_zero_pairs_msun_h": (
+            mass_in_halos_with_zero_pairs_msun_h
+        ),
+        "nfw_subpixel_support_halo_count": subpixel_support_halo_count,
         "nfw_compact_pixel_count": n_pix,
         "nfw_sparse_pair_count": sparse_pair_count,
         "nfw_dense_pair_count": dense_pair_count,
@@ -1399,6 +1697,18 @@ def run_nfw_calibration_pipeline(
         "nfw_concentration_redshift_slope": float(concentration_redshift_slope),
         "nfw_concentration_mass_pivot": float(concentration_mass_pivot),
         "nfw_truncation_width_fraction": float(truncation_width_fraction),
+        "nfw_mass_definition": mass_definition.label,
+        "nfw_overdensity_mode": mass_definition.mode,
+        "nfw_overdensity": (
+            ""
+            if mass_definition.reported_overdensity is None
+            else float(mass_definition.reported_overdensity)
+        ),
+        "nfw_reference_density": mass_definition.reference_density,
+        "nfw_overdensity_file": (
+            "" if mass_definition.source is None else str(mass_definition.source)
+        ),
+        "nfw_mass_conversion": "none_catalog_mass_interpreted_as_profile_mass",
     }
     diagnostics.update(map_derivative_diagnostics)
     return diagnostics
@@ -1456,12 +1766,30 @@ def write_manifest(path: Path, rows: list[dict[str, object]]) -> None:
         "pipeline_mode",
         "nfw_paint_mode",
         "nfw_map_derivatives",
+        "nfw_mass_definition",
+        "nfw_overdensity_mode",
+        "nfw_overdensity",
+        "nfw_reference_density",
+        "nfw_overdensity_file",
+        "nfw_mass_conversion",
         "nfw_concentration_amplitude",
         "nfw_concentration_mass_slope",
         "nfw_concentration_redshift_slope",
         "nfw_concentration_mass_pivot_msun_h",
         "nfw_truncation_width_fraction",
         "nfw_taper_radius_factor",
+        "selected_halo_count",
+        "selected_halo_mass_msun_h",
+        "expected_particle_count",
+        "painted_particle_count",
+        "painted_to_expected_ratio",
+        "sparse_pair_count",
+        "halos_with_zero_pairs",
+        "mass_in_halos_with_zero_pairs_msun_h",
+        "subpixel_support_halo_count",
+        "mpi_rank_count",
+        "segment_worker_count",
+        "git_commit",
     ]
 
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1508,6 +1836,10 @@ def print_nfw_calibration_summary(
     print(f"  Pipeline mode: {nfw_diagnostics['pipeline_mode']}")
     print(f"  Painter mode: {nfw_diagnostics['nfw_paint_mode']}")
     print(f"  Selected halos painted: {nfw_diagnostics['nfw_selected_halo_count']}")
+    print(
+        "  Selected halo mass: "
+        f"{nfw_diagnostics['nfw_selected_halo_mass_msun_h']:.12g} Msun/h"
+    )
     print(f"  Compact pixels: {nfw_diagnostics['nfw_compact_pixel_count']}")
     print(f"  Sparse halo-pixel pairs: {nfw_diagnostics['nfw_sparse_pair_count']}")
     print(f"  Dense pair count: {nfw_diagnostics['nfw_dense_pair_count']}")
@@ -1516,6 +1848,19 @@ def print_nfw_calibration_summary(
         f"{nfw_diagnostics['nfw_sparse_compression_factor']:.12g}"
     )
     print(f"  NFW sum particle counts: {nfw_diagnostics['nfw_sum_particle_counts']:.12g}")
+    print(
+        "  Painted / expected particle count: "
+        f"{nfw_diagnostics['nfw_painted_to_expected_ratio']:.12g}"
+    )
+    print(f"  Halos with zero pairs: {nfw_diagnostics['nfw_halos_with_zero_pairs']}")
+    print(
+        "  Mass in zero-pair halos: "
+        f"{nfw_diagnostics['nfw_mass_in_halos_with_zero_pairs_msun_h']:.12g} Msun/h"
+    )
+    print(
+        "  Subpixel-support halos: "
+        f"{nfw_diagnostics['nfw_subpixel_support_halo_count']}"
+    )
     if nfw_diagnostics.get("nfw_map_derivatives", "none") == "concentration":
         print("  Map derivatives: concentration")
 
@@ -1534,6 +1879,7 @@ def compute_calibration_for_segment(
     compute_map_derivatives: bool,
     inclusive_upper: bool,
     verbose: bool = True,
+    mass_definition: HaloMassDefinition | None = None,
 ) -> CalibrationSegmentResult:
     """Compute the NFW calibration payload for one segment without writing files."""
 
@@ -1559,6 +1905,9 @@ def compute_calibration_for_segment(
 
     if verbose:
         print_segment_summary(bounds, inclusive_upper)
+    if mass_definition is None:
+        mass_definition = default_halo_mass_definition()
+    resolved_mass_definition = mass_definition.resolve(segment_index)
     stencil_profile_recorder = StencilProfileRecorder() if profile else None
     with timed_stage(nfw_stage_label(args.mode), stage_profile):
         nfw_diagnostics = run_nfw_calibration_pipeline(
@@ -1581,6 +1930,7 @@ def compute_calibration_for_segment(
             verbose=verbose,
             pixel_index=pixel_index,
             stencil_profile_recorder=stencil_profile_recorder,
+            mass_definition=resolved_mass_definition,
         )
 
     nfw_map = np.asarray(nfw_diagnostics["nfw_particle_counts"])
@@ -1604,10 +1954,17 @@ def calibration_manifest_row(
     result: CalibrationSegmentResult,
     args: argparse.Namespace,
     metadata: PinocchioRunMetadata,
+    provenance: ExecutionProvenance | None = None,
 ) -> dict[str, object]:
     """Return the manifest row for a computed or MPI-reduced segment."""
 
     nfw_diagnostics = result.nfw_diagnostics
+    if provenance is None:
+        provenance = ExecutionProvenance(
+            mpi_rank_count=1,
+            segment_worker_count=int(getattr(args, "segment_workers", 1)),
+            git_commit=resolve_git_commit(),
+        )
     row: dict[str, object] = {
         "segment_index": int(result.segment_index),
         "parameter_file": str(args.params),
@@ -1630,12 +1987,38 @@ def calibration_manifest_row(
         "pipeline_mode": str(args.mode),
         "nfw_paint_mode": str(nfw_diagnostics["nfw_paint_mode"]),
         "nfw_map_derivatives": str(nfw_diagnostics["nfw_map_derivatives"]),
+        "nfw_mass_definition": str(nfw_diagnostics["nfw_mass_definition"]),
+        "nfw_overdensity_mode": str(nfw_diagnostics["nfw_overdensity_mode"]),
+        "nfw_overdensity": nfw_diagnostics["nfw_overdensity"],
+        "nfw_reference_density": str(nfw_diagnostics["nfw_reference_density"]),
+        "nfw_overdensity_file": str(nfw_diagnostics["nfw_overdensity_file"]),
+        "nfw_mass_conversion": str(nfw_diagnostics["nfw_mass_conversion"]),
         "nfw_concentration_amplitude": float(args.concentration_amplitude),
         "nfw_concentration_mass_slope": float(args.concentration_mass_slope),
         "nfw_concentration_redshift_slope": float(args.concentration_redshift_slope),
         "nfw_concentration_mass_pivot_msun_h": float(args.concentration_mass_pivot),
         "nfw_truncation_width_fraction": float(args.truncation_width_fraction),
         "nfw_taper_radius_factor": float(args.nfw_taper_radius_factor),
+        "selected_halo_count": int(nfw_diagnostics["nfw_selected_halo_count"]),
+        "selected_halo_mass_msun_h": float(
+            nfw_diagnostics["nfw_selected_halo_mass_msun_h"]
+        ),
+        "expected_particle_count": float(nfw_diagnostics["nfw_expected_particle_count"]),
+        "painted_particle_count": float(nfw_diagnostics["nfw_painted_particle_count"]),
+        "painted_to_expected_ratio": float(
+            nfw_diagnostics["nfw_painted_to_expected_ratio"]
+        ),
+        "sparse_pair_count": int(nfw_diagnostics["nfw_sparse_pair_count"]),
+        "halos_with_zero_pairs": int(nfw_diagnostics["nfw_halos_with_zero_pairs"]),
+        "mass_in_halos_with_zero_pairs_msun_h": float(
+            nfw_diagnostics["nfw_mass_in_halos_with_zero_pairs_msun_h"]
+        ),
+        "subpixel_support_halo_count": int(
+            nfw_diagnostics["nfw_subpixel_support_halo_count"]
+        ),
+        "mpi_rank_count": provenance.mpi_rank_count,
+        "segment_worker_count": provenance.segment_worker_count,
+        "git_commit": provenance.git_commit,
     }
     return row
 
@@ -1647,6 +2030,7 @@ def write_calibration_segment_outputs(
     *,
     profile: bool,
     verbose: bool = True,
+    provenance: ExecutionProvenance | None = None,
 ) -> dict[str, object]:
     """Write one computed segment payload and return its manifest row."""
 
@@ -1657,7 +2041,7 @@ def write_calibration_segment_outputs(
         print_nfw_calibration_summary(result.nfw_diagnostics)
         print(f"Wrote NPZ: {result.output_npz}")
 
-    return calibration_manifest_row(result, args, metadata)
+    return calibration_manifest_row(result, args, metadata, provenance)
 
 
 def run_calibration_for_segment(
@@ -1673,6 +2057,8 @@ def run_calibration_for_segment(
     profile: bool,
     compute_map_derivatives: bool,
     inclusive_upper: bool,
+    mass_definition: HaloMassDefinition | None = None,
+    provenance: ExecutionProvenance | None = None,
 ) -> dict[str, object]:
     """Run the complete NFW calibration pipeline for one mass-map segment."""
 
@@ -1689,6 +2075,7 @@ def run_calibration_for_segment(
         compute_map_derivatives=compute_map_derivatives,
         inclusive_upper=inclusive_upper,
         verbose=True,
+        mass_definition=mass_definition,
     )
     return write_calibration_segment_outputs(
         result,
@@ -1696,6 +2083,7 @@ def run_calibration_for_segment(
         metadata,
         profile=profile,
         verbose=True,
+        provenance=provenance,
     )
 
 
@@ -1821,6 +2209,8 @@ def reduce_calibration_segment_result(
         "nfw_selected_halo_count",
         "nfw_sparse_pair_count",
         "nfw_dense_pair_count",
+        "nfw_halos_with_zero_pairs",
+        "nfw_subpixel_support_halo_count",
     )
     present_nfw_keys = tuple(
         key for key in nfw_integer_sum_keys if key in local_result.nfw_diagnostics
@@ -1831,11 +2221,25 @@ def reduce_calibration_segment_result(
     )
     reduced_integer_diagnostics = _mpi_reduce_array(integer_diagnostics, mpi_context)
 
+    nfw_float_sum_keys = (
+        "nfw_selected_halo_mass_msun_h",
+        "nfw_mass_in_halos_with_zero_pairs_msun_h",
+    )
+    present_nfw_float_keys = tuple(
+        key for key in nfw_float_sum_keys if key in local_result.nfw_diagnostics
+    )
+    float_diagnostics = np.asarray(
+        [local_result.nfw_diagnostics[key] for key in present_nfw_float_keys],
+        dtype=np.float64,
+    )
+    reduced_float_diagnostics = _mpi_reduce_array(float_diagnostics, mpi_context)
+
     if not mpi_context.is_root:
         return None
 
     assert reduced_nfw_counts is not None
     assert reduced_integer_diagnostics is not None
+    assert reduced_float_diagnostics is not None
 
     nfw_diagnostics = dict(local_result.nfw_diagnostics)
     nfw_diagnostics["nfw_particle_counts"] = np.asarray(reduced_nfw_counts)
@@ -1848,9 +2252,28 @@ def reduce_calibration_segment_result(
         strict=True,
     ):
         nfw_diagnostics[key] = int(value)
-    nfw_diagnostics["nfw_sum_particle_counts"] = float(
-        np.sum(nfw_diagnostics["nfw_particle_counts"])
+    for key, value in zip(
+        present_nfw_float_keys,
+        reduced_float_diagnostics,
+        strict=True,
+    ):
+        nfw_diagnostics[key] = float(value)
+    painted_particle_count = float(
+        np.sum(nfw_diagnostics["nfw_particle_counts"], dtype=np.float64)
     )
+    nfw_diagnostics["nfw_sum_particle_counts"] = painted_particle_count
+    nfw_diagnostics["nfw_painted_particle_count"] = painted_particle_count
+    if "nfw_selected_halo_mass_msun_h" in nfw_diagnostics:
+        particle_mass = float(nfw_diagnostics["particle_mass_msun_h"])
+        expected_particle_count = (
+            float(nfw_diagnostics["nfw_selected_halo_mass_msun_h"]) / particle_mass
+        )
+        nfw_diagnostics["nfw_expected_particle_count"] = expected_particle_count
+        nfw_diagnostics["nfw_painted_to_expected_ratio"] = (
+            painted_particle_count / expected_particle_count
+            if expected_particle_count > 0.0
+            else float("nan")
+        )
     nfw_diagnostics["nfw_sparse_compression_factor"] = _compression_factor(
         int(nfw_diagnostics["nfw_dense_pair_count"]),
         int(nfw_diagnostics["nfw_sparse_pair_count"]),
@@ -1876,11 +2299,15 @@ def run_segment_workflow(
     profile: bool,
     compute_map_derivatives: bool,
     mpi_context: MpiContext | None = None,
+    mass_definition: HaloMassDefinition | None = None,
 ) -> list[dict[str, object]]:
     """Run either the single-segment or all-segments workflow."""
 
     if mpi_context is None:
         mpi_context = MpiContext()
+    if mass_definition is None:
+        mass_definition = default_halo_mass_definition()
+    provenance = execution_provenance(args, mpi_context)
     segment_workers = int(getattr(args, "segment_workers", 1))
     if segment_workers < 1:
         raise ValueError("--segment-workers must be at least 1")
@@ -1890,16 +2317,21 @@ def run_segment_workflow(
         output_paths = [Path(args.output)]
         inclusive_values = [bool(args.last_segment_inclusive)]
     elif workflow == "all":
+        if bool(args.last_segment_inclusive):
+            raise ValueError(
+                "--last-segment-inclusive is only valid in single-segment mode"
+            )
         segments = discover_mass_map_segments(str(args.mass_map_glob))
+        validate_mass_map_segment_batch(segments, sheets)
         output_dir = Path(args.output_dir)
         if mpi_context.is_root:
             output_dir.mkdir(parents=True, exist_ok=True)
-        last_segment_index = max(segment_index for segment_index, _ in segments)
+        final_sheet_index = len(sheets) - 1
         output_paths = []
         inclusive_values = []
         for segment_index, _ in segments:
             output_paths.append(segment_output_path(output_dir, segment_index))
-            inclusive_values.append(segment_index == last_segment_index)
+            inclusive_values.append(segment_index == final_sheet_index)
     else:
         raise ValueError("workflow must be 'single' or 'all'")
 
@@ -1931,27 +2363,40 @@ def run_segment_workflow(
                     profile=profile,
                     compute_map_derivatives=compute_map_derivatives,
                     inclusive_upper=inclusive_upper,
+                    mass_definition=mass_definition,
+                    provenance=provenance,
                 )
             )
     else:
 
         def compute_one(spec) -> ComputedCalibrationSegment:
             (segment_index, mass_map_path), output_npz, inclusive_upper = spec
-            compute_start = perf_counter() if profile else None
-            result = compute_calibration_for_segment(
-                segment_index=segment_index,
-                mass_map_path=mass_map_path,
-                output_npz=output_npz,
-                catalog=catalog,
-                sheets=sheets,
-                metadata=metadata,
-                particle_mass=particle_mass,
-                args=args,
-                profile=profile,
-                compute_map_derivatives=compute_map_derivatives,
-                inclusive_upper=inclusive_upper,
-                verbose=False,
-            )
+            try:
+                compute_start = perf_counter() if profile else None
+                result = compute_calibration_for_segment(
+                    segment_index=segment_index,
+                    mass_map_path=mass_map_path,
+                    output_npz=output_npz,
+                    catalog=catalog,
+                    sheets=sheets,
+                    metadata=metadata,
+                    particle_mass=particle_mass,
+                    args=args,
+                    profile=profile,
+                    compute_map_derivatives=compute_map_derivatives,
+                    inclusive_upper=inclusive_upper,
+                    verbose=False,
+                    mass_definition=mass_definition,
+                )
+            except BaseException as exc:
+                contextual_error = RuntimeError(
+                    f"rank {mpi_context.rank} failed while computing segment "
+                    f"{segment_index} from {mass_map_path}"
+                )
+                contextual_error.__cause__ = exc
+                if mpi_context.enabled:
+                    abort_mpi_job(mpi_context, contextual_error)
+                raise contextual_error from exc
             compute_seconds = (
                 0.0 if compute_start is None else perf_counter() - compute_start
             )
@@ -1999,6 +2444,7 @@ def run_segment_workflow(
                 metadata,
                 profile=profile,
                 verbose=mpi_context.is_root,
+                provenance=provenance,
             )
 
         if mpi_context.enabled:
@@ -2064,6 +2510,7 @@ def run_segment_workflow(
                         metadata,
                         profile=profile,
                         verbose=mpi_context.is_root,
+                        provenance=provenance,
                     )
                 )
 
@@ -2085,40 +2532,47 @@ def main() -> None:
     args = parse_args()
     workflow = validate_segment_workflow_args(args)
     mpi_context = initialize_mpi_context(bool(args.mpi_plc_parts))
-    warn_if_float32_precision(args, mpi_context)
-    validate_mpi_workflow_args(args, workflow=workflow, mpi_context=mpi_context)
-    profile = args.mode in ("profile", "derivatives-profile")
-    compute_map_derivatives = args.mode in ("derivatives", "derivatives-profile")
+    try:
+        warn_if_float32_precision(args, mpi_context)
+        validate_mpi_workflow_args(args, workflow=workflow, mpi_context=mpi_context)
+        profile = args.mode in ("profile", "derivatives-profile")
+        compute_map_derivatives = args.mode in ("derivatives", "derivatives-profile")
 
-    with timed_stage("read parameter file", profile):
-        metadata = read_pinocchio_parameter_file(args.params)
-    particle_mass = float(metadata.particle_mass_msun_h)
-    if particle_mass <= 0.0:
-        raise ValueError("particle_mass_msun_h must be positive")
-    if args.concentration_amplitude <= 0.0:
-        raise ValueError("--concentration-amplitude must be positive")
-    if args.concentration_mass_pivot <= 0.0:
-        raise ValueError("--concentration-mass-pivot must be positive")
-    if args.truncation_width_fraction <= 0.0:
-        raise ValueError("--truncation-width-fraction must be positive")
+        with timed_stage("read parameter file", profile):
+            metadata = read_pinocchio_parameter_file(args.params)
+        particle_mass = float(metadata.particle_mass_msun_h)
+        if particle_mass <= 0.0:
+            raise ValueError("particle_mass_msun_h must be positive")
+        if args.concentration_amplitude <= 0.0:
+            raise ValueError("--concentration-amplitude must be positive")
+        if args.concentration_mass_pivot <= 0.0:
+            raise ValueError("--concentration-mass-pivot must be positive")
+        if args.truncation_width_fraction <= 0.0:
+            raise ValueError("--truncation-width-fraction must be positive")
 
-    with timed_stage("read sheets", profile):
-        sheets = read_pinocchio_mass_sheets(args.sheets)
-    with timed_stage("load PLC catalogue", profile):
-        catalog = load_rank_local_lightcone_catalog(args, mpi_context)
-        validate_catalog_for_binning(catalog)
+        with timed_stage("read sheets", profile):
+            sheets = read_pinocchio_mass_sheets(args.sheets)
+        mass_definition = load_halo_mass_definition(args, sheets)
+        with timed_stage("load PLC catalogue", profile):
+            catalog = load_rank_local_lightcone_catalog(args, mpi_context)
+            validate_catalog_for_binning(catalog)
 
-    run_segment_workflow(
-        args,
-        workflow=workflow,
-        catalog=catalog,
-        sheets=sheets,
-        metadata=metadata,
-        particle_mass=particle_mass,
-        profile=profile,
-        compute_map_derivatives=compute_map_derivatives,
-        mpi_context=mpi_context,
-    )
+        run_segment_workflow(
+            args,
+            workflow=workflow,
+            catalog=catalog,
+            sheets=sheets,
+            metadata=metadata,
+            particle_mass=particle_mass,
+            profile=profile,
+            compute_map_derivatives=compute_map_derivatives,
+            mpi_context=mpi_context,
+            mass_definition=mass_definition,
+        )
+    except BaseException as exc:
+        if mpi_context.comm is not None and mpi_context.size > 1:
+            abort_mpi_job(mpi_context, exc)
+        raise
 
 
 if __name__ == "__main__":

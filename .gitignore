@@ -33,3 +33,6 @@ venv/
 # Editors
 .vscode/
 .idea/
+
+# Private paper drafts, figures, and generated LaTeX artifacts
+/manuscript/

@@ -35,6 +35,36 @@ def e2_lcdm(z: Array, cosmology: Cosmology) -> Array:
     return cosmology.omega_m * (1.0 + z) ** 3 + cosmology.omega_l
 
 
+def omega_m_at_redshift(z: Array, cosmology: Cosmology) -> Array:
+    """Return the matter-density fraction ``Omega_m(z)`` for flat LCDM."""
+
+    return cosmology.omega_m * (1.0 + z) ** 3 / e2_lcdm(z, cosmology)
+
+
+def bryan_norman_virial_overdensity(
+    z: Array,
+    cosmology: Cosmology,
+    reference_density: Literal["critical", "mean"] = "critical",
+) -> Array:
+    """Return the Bryan--Norman virial overdensity at redshift ``z``.
+
+    The flat-LCDM fit is ``Delta_vir,c = 18*pi^2 + 82*x - 39*x^2`` with
+    ``x = Omega_m(z) - 1``. For a mean-matter reference, the returned value is
+    ``Delta_vir,m = Delta_vir,c / Omega_m(z)`` so both conventions describe the
+    same physical density threshold. The function is differentiable with
+    respect to redshift and cosmological parameters.
+    """
+
+    omega_m_z = omega_m_at_redshift(z, cosmology)
+    x = omega_m_z - 1.0
+    delta_critical = 18.0 * jnp.pi**2 + 82.0 * x - 39.0 * x**2
+    if reference_density == "critical":
+        return delta_critical
+    if reference_density == "mean":
+        return delta_critical / omega_m_z
+    raise ValueError(f"Unknown reference_density={reference_density!r}")
+
+
 def rho_crit_physical(z: Array, cosmology: Cosmology) -> Array:
     """Critical density at redshift ``z`` in ``(Msun/h)/(Mpc/h)^3`` physical units."""
 
