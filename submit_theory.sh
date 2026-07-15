@@ -19,12 +19,16 @@ source ~/miniforge3/bin/activate
 conda activate geppetto-dev
 cd ~/scratch/Geppetto
 
-export OMP_NUM_THREADS=1
+export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-4}"
 export MKL_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
 
 python examples/validate_pinocchio_angular_power.py \
 	--manifest /leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/geppetto_reduced/painted_nfw_manifest.csv \
+	--params /leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/params.txt \
 	--cosmology-table /leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/pinocchio.000.cosmology.out \
 	--hmf-glob '/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/pinocchio.*.000.mf.out' \
+	--ell-exact-cap 512 \
+	--limber-match-rtol 0.01 \
+	--limber-match-width 20 \
 	--output-dir /leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/geppetto_reduced/angular_power_validation

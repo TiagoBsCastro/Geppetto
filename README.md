@@ -42,14 +42,17 @@ P_mm(k,z) = P_linear(k,z) + P_1h(k,z)
 The linear spectrum, growth, distances, and background density are read from
 PINOCCHIO's `*.cosmology.out`. The one-halo term uses measured `*.mf.out` mass
 functions and the same concentration relation and mass definition recorded in
-`painted_nfw_manifest.csv`. Exact spherical-Bessel projection is used through
-`ell=100`; Limber projection is used above that and for the one-halo term.
+`painted_nfw_manifest.csv`. Exact spherical-Bessel projection is retained until
+all shells agree with Limber within one percent over 20 consecutive multipoles;
+the default exact search cap is `ell=512`. The one-halo term uses Limber at all
+multipoles.
 
 Run the map comparison after painting all segments:
 
 ```bash
 python examples/validate_pinocchio_angular_power.py \
   --manifest /path/to/painted_nfw_manifest.csv \
+  --params /path/to/params.txt \
   --cosmology-table /path/to/pinocchio.RUN.cosmology.out \
   --hmf-glob '/path/to/pinocchio.*.RUN.mf.out' \
   --output-dir /path/to/angular-power-validation
@@ -58,6 +61,14 @@ python examples/validate_pinocchio_angular_power.py \
 The command writes lean NPZ and CSV products containing measured and predicted
 spectra, particle shot noise, shell weights, resolved HMF mass fractions, and
 the low-k one-halo/linear ratio. It does not write another copy of any map.
+Generate the paper figures from those products with:
+
+```bash
+python examples/plot_angular_power_validation.py \
+  --input-dir /path/to/angular-power-validation \
+  --output-dir /path/to/figures
+```
+
 See [docs/angular_power_validation.md](docs/angular_power_validation.md) for
 the equations, units, estimator limitations, and output definitions.
 
@@ -73,8 +84,9 @@ cd Geppetto
 
 mamba create -n geppetto-dev python=3.12
 mamba activate geppetto-dev
+mamba install -c conda-forge namaster
 
-python -m pip install -e '.[io,theory,dev]'
+python -m pip install -e '.[io,theory,validation,plot,dev]'
 ```
 
 Installation extras:
@@ -85,8 +97,13 @@ Installation extras:
 - `python -m pip install -e '.[dev]'` adds `pytest`, `ruff`, and `mypy`.
 - `python -m pip install -e '.[theory]'` adds SciPy for exact low-multipole
   spherical-Bessel projection.
-- `python -m pip install -e '.[io,theory,dev]'` is recommended for running all
-  examples and tests.
+- `python -m pip install -e '.[plot]'` adds Matplotlib for validation figures.
+- `python -m pip install -e '.[validation]'` adds the FITS, HEALPix, SciPy, and
+  NaMaster dependencies for mask-coupled angular validation. On HPC systems,
+  installing `namaster` from conda-forge before the editable install avoids a
+  local C-library build.
+- `python -m pip install -e '.[io,theory,validation,plot,dev]'` is recommended
+  for running all examples and tests.
 
 Verify the installation:
 

@@ -405,6 +405,7 @@ class PinocchioRunMetadata:
     box_size_mpc_h: float
     grid_size: int
     cosmology: Cosmology
+    sigma8_input: float
     particle_mass_msun_h: float
     box_in_h100: bool
     parameters: Mapping[str, tuple[str, ...]]
@@ -735,11 +736,13 @@ def read_pinocchio_hubble_table(
 def read_pinocchio_parameter_file(path: PathLike) -> PinocchioRunMetadata:
     """Read PINOCCHIO run metadata needed for particle-count map painting.
 
-    The parser extracts ``BoxSize``, ``BoxInH100``, ``GridSize``, ``Omega0`` and
-    ``Hubble100`` from a PINOCCHIO parameter file. ``BoxSize`` is interpreted as
-    ``Mpc/h`` when ``BoxInH100`` is present, otherwise as physical ``Mpc`` and
-    converted to ``Mpc/h`` by multiplying by ``Hubble100``. The returned particle
-    mass is in ``Msun/h``.
+    The parser extracts ``BoxSize``, ``BoxInH100``, ``GridSize``, ``Omega0``,
+    ``Hubble100``, and the input ``Sigma8`` value from a PINOCCHIO parameter
+    file. ``BoxSize`` is interpreted as ``Mpc/h`` when ``BoxInH100`` is present,
+    otherwise as physical ``Mpc`` and converted to ``Mpc/h`` by multiplying by
+    ``Hubble100``. The returned particle mass is in ``Msun/h``. A zero
+    ``sigma8_input`` means PINOCCHIO inferred the normalization from its input
+    power spectrum.
     """
 
     source = Path(path)
@@ -748,6 +751,7 @@ def read_pinocchio_parameter_file(path: PathLike) -> PinocchioRunMetadata:
     grid_size = _required_parameter_int(parameters, "GridSize", source)
     omega_m = _required_parameter_float(parameters, "Omega0", source)
     h = _required_parameter_float(parameters, "Hubble100", source)
+    sigma8_input = _required_parameter_float(parameters, "Sigma8", source)
 
     if box_size <= 0.0:
         raise PinocchioCatalogError(f"PINOCCHIO BoxSize must be positive: {source}")
@@ -757,6 +761,8 @@ def read_pinocchio_parameter_file(path: PathLike) -> PinocchioRunMetadata:
         raise PinocchioCatalogError(f"PINOCCHIO Omega0 must be positive: {source}")
     if h <= 0.0:
         raise PinocchioCatalogError(f"PINOCCHIO Hubble100 must be positive: {source}")
+    if sigma8_input < 0.0:
+        raise PinocchioCatalogError(f"PINOCCHIO Sigma8 must be non-negative: {source}")
 
     box_in_h100 = "BoxInH100" in parameters
     box_size_mpc_h = box_size if box_in_h100 else box_size * h
@@ -773,6 +779,7 @@ def read_pinocchio_parameter_file(path: PathLike) -> PinocchioRunMetadata:
         box_size_mpc_h=box_size_mpc_h,
         grid_size=grid_size,
         cosmology=cosmology,
+        sigma8_input=sigma8_input,
         particle_mass_msun_h=particle_mass_msun_h,
         box_in_h100=box_in_h100,
         parameters=parameters,

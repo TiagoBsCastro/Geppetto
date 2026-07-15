@@ -5,6 +5,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+import geppetto.theory as theory_module
 from geppetto.concentration import ConcentrationParams
 from geppetto.cosmology import Cosmology
 from geppetto.io import (
@@ -20,10 +21,14 @@ from geppetto.theory import (
     hybrid_angular_power_spectra,
     limber_shell_cls,
     linear_matter_power,
+    linear_sigma_r,
     nfw_fourier_profile,
     one_halo_matter_power,
     particle_count_shot_noise,
     resolved_halo_mass_fraction,
+    select_limber_transition,
+    sigma8_from_linear_power,
+    spherical_top_hat_window,
 )
 
 
@@ -57,6 +62,23 @@ def test_linear_power_uses_pinocchio_growth_squared():
 
     assert present == pytest.approx(1000.0)
     assert redshift_one == pytest.approx(250.0)
+
+
+def test_top_hat_sigma8_is_finite_differentiable_and_scales_with_power():
+    theory = _linear_theory()
+    sigma8 = sigma8_from_linear_power(theory)
+    scaled = theory._replace(power_mpc_h3=4.0 * theory.power_mpc_h3)
+
+    np.testing.assert_allclose(spherical_top_hat_window(jnp.asarray(0.0)), 1.0)
+    np.testing.assert_allclose(sigma8_from_linear_power(scaled), 2.0 * sigma8, rtol=2.0e-6)
+    assert jnp.isfinite(linear_sigma_r(jnp.asarray([4.0, 8.0]), theory)).all()
+    gradient = jax.grad(
+        lambda amplitude: sigma8_from_linear_power(
+            theory._replace(power_mpc_h3=amplitude * theory.power_mpc_h3)
+        )
+    )(1.0)
+    assert jnp.isfinite(gradient)
+    assert gradient > 0.0
 
 
 def test_nfw_fourier_profile_is_normalized_and_differentiable():
@@ -187,7 +209,7 @@ def test_hybrid_spectra_shapes_weighted_one_halo_and_shot_noise():
         mean_uncollapsed_counts_per_pixel=jnp.asarray([5.0, 10.0]),
         mean_total_counts_per_pixel=jnp.asarray([10.0, 20.0]),
         pixel_area_sr=0.1,
-        ell_exact_max=0,
+        ell_exact_cap=0,
         radial_order=8,
         profile_order=12,
     )
@@ -200,6 +222,79 @@ def test_hybrid_spectra_shapes_weighted_one_halo_and_shot_noise():
     )
     np.testing.assert_allclose(result.shell_particle_shot_noise[:, 0], [0.005, 0.0025])
     np.testing.assert_allclose(result.summed_particle_shot_noise, 0.1 * 15.0 / 30.0**2)
+    assert result.ell_limber_start == 20
+
+
+def test_select_limber_transition_requires_all_consecutive_matches():
+    ell = np.arange(20, 30)
+    limber_shell = np.ones((2, ell.size))
+    limber_sum = np.ones(ell.size)
+    exact_shell = limber_shell.copy()
+    exact_sum = limber_sum.copy()
+    exact_shell[:, :3] *= 1.2
+    exact_shell[1, 6] *= 1.02
+
+    transition, shell_error, summed_error = select_limber_transition(
+        ell,
+        exact_shell,
+        exact_sum,
+        limber_shell,
+        limber_sum,
+        relative_tolerance=0.01,
+        consecutive_multipoles=3,
+    )
+
+    assert transition == 23
+    np.testing.assert_allclose(shell_error, 0.0)
+    assert summed_error == pytest.approx(0.0)
+
+
+def test_select_limber_transition_reports_no_match():
+    ell = np.arange(2, 7)
+    limber_shell = np.ones((1, ell.size))
+    exact_shell = 1.1 * limber_shell
+
+    transition, shell_error, summed_error = select_limber_transition(
+        ell,
+        exact_shell,
+        np.full(ell.size, 1.1),
+        limber_shell,
+        np.ones(ell.size),
+        relative_tolerance=0.01,
+        consecutive_multipoles=2,
+    )
+
+    assert transition is None
+    np.testing.assert_allclose(shell_error, [1.0 - 1.0 / 1.1])
+    assert summed_error == pytest.approx(1.0 - 1.0 / 1.1)
+
+
+def test_hybrid_projection_fails_when_limber_does_not_match_before_cap(monkeypatch):
+    def fake_limber(ell, *args, **kwargs):
+        values = jnp.ones_like(jnp.asarray(ell), dtype=jnp.float32)
+        return values, jnp.zeros_like(values)
+
+    def fake_exact(ell, z_lo, *args, **kwargs):
+        values = np.full((len(z_lo), len(ell)), 1.2)
+        return values, np.full(len(ell), 1.2)
+
+    monkeypatch.setattr(theory_module, "limber_shell_cls", fake_limber)
+    monkeypatch.setattr(theory_module, "exact_linear_shell_cls", fake_exact)
+
+    with pytest.raises(ValueError, match="did not converge"):
+        hybrid_angular_power_spectra(
+            jnp.arange(2, 11),
+            [0.1],
+            [0.2],
+            _linear_theory(),
+            _mass_function(),
+            ConcentrationParams(),
+            [NFWProfileParams()],
+            shell_weights=jnp.ones(1),
+            ell_exact_cap=6,
+            limber_match_width=2,
+            exact_batch_size=2,
+        )
 
 
 def test_particle_count_shot_noise_formula():

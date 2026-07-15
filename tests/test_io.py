@@ -612,6 +612,7 @@ def test_read_pinocchio_parameter_file_particle_mass_with_h100_box(tmp_path):
                 "GridSize               128",
                 "Omega0                 0.3110",
                 "Hubble100              0.6766",
+                "Sigma8                 0.81",
             ]
         ),
         encoding="utf-8",
@@ -626,6 +627,7 @@ def test_read_pinocchio_parameter_file_particle_mass_with_h100_box(tmp_path):
     np.testing.assert_allclose(metadata.box_size_mpc_h, 256.0)
     np.testing.assert_allclose(metadata.cosmology.omega_m, 0.3110)
     np.testing.assert_allclose(metadata.cosmology.h, 0.6766)
+    np.testing.assert_allclose(metadata.sigma8_input, 0.81)
     np.testing.assert_allclose(metadata.particle_mass_msun_h, expected_particle_mass)
 
 
@@ -638,6 +640,7 @@ def test_read_pinocchio_parameter_file_converts_physical_box_to_mpc_h(tmp_path):
                 "GridSize               10",
                 "Omega0                 0.3",
                 "Hubble100              0.7",
+                "Sigma8                 0",
             ]
         ),
         encoding="utf-8",
@@ -650,6 +653,7 @@ def test_read_pinocchio_parameter_file_converts_physical_box_to_mpc_h(tmp_path):
         rho_mean_comoving(metadata.cosmology) * expected_box_size**3 / 10.0**3
     )
     assert not metadata.box_in_h100
+    assert metadata.sigma8_input == 0.0
     np.testing.assert_allclose(metadata.box_size_mpc_h, expected_box_size)
     np.testing.assert_allclose(metadata.particle_mass_msun_h, expected_particle_mass)
 
@@ -662,7 +666,7 @@ def test_read_pinocchio_parameter_file_validation(tmp_path):
 
     invalid = tmp_path / "invalid_parameter_file"
     invalid.write_text(
-        "BoxSize 100\nGridSize 10.5\nOmega0 0.3\nHubble100 0.7\n",
+        "BoxSize 100\nGridSize 10.5\nOmega0 0.3\nHubble100 0.7\nSigma8 0.8\n",
         encoding="utf-8",
     )
     with pytest.raises(PinocchioCatalogError, match="GridSize"):
@@ -670,7 +674,7 @@ def test_read_pinocchio_parameter_file_validation(tmp_path):
 
     nonpositive = tmp_path / "nonpositive_parameter_file"
     nonpositive.write_text(
-        "BoxSize -100\nGridSize 10\nOmega0 0.3\nHubble100 0.7\n",
+        "BoxSize -100\nGridSize 10\nOmega0 0.3\nHubble100 0.7\nSigma8 0.8\n",
         encoding="utf-8",
     )
     with pytest.raises(PinocchioCatalogError, match="BoxSize"):

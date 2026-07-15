@@ -89,6 +89,9 @@ class AngularPowerSpectra(NamedTuple):
     summed_clustering: Array
     summed_total: Array
     shell_weights: Array
+    ell_limber_start: Array
+    limber_match_shell_relative_error: Array
+    limber_match_summed_relative_error: Array
 
 
 def gauss_legendre_rule(order: int) -> QuadratureRule:
@@ -175,6 +178,43 @@ def linear_matter_power(
         jnp.log(linear_theory.power_mpc_h3),
     )
     return jnp.exp(log_power) * growth_factor(redshift, linear_theory) ** 2
+
+
+def spherical_top_hat_window(x: Array) -> Array:
+    """Return the Fourier-space spherical top-hat window.
+
+    ``x`` is dimensionless. The small-argument series avoids cancellation and
+    keeps the function finite and differentiable at the origin.
+    """
+
+    value = jnp.asarray(x)
+    value_squared = value**2
+    series = 1.0 - value_squared / 10.0 + value_squared**2 / 280.0
+    safe_value = jnp.where(value == 0.0, 1.0, value)
+    direct = 3.0 * (jnp.sin(value) - value * jnp.cos(value)) / safe_value**3
+    return jnp.where(jnp.abs(value) < 1.0e-3, series, direct)
+
+
+def linear_sigma_r(radius_mpc_h: Array, linear_theory: LinearTheoryTable) -> Array:
+    """Return present-day linear ``sigma(R)`` for ``R`` in comoving ``Mpc/h``.
+
+    The input PINOCCHIO spectrum is in ``(Mpc/h)^3`` at ``z=0`` and its
+    wavenumbers are in ``h/Mpc``. Integration is over the complete tabulated
+    logarithmic wavenumber range, without extrapolation.
+    """
+
+    radius = jnp.asarray(radius_mpc_h)
+    k = linear_theory.k_h_mpc
+    window = spherical_top_hat_window(k * radius[..., None])
+    integrand = k**3 * linear_theory.power_mpc_h3 * window**2 / (2.0 * jnp.pi**2)
+    variance = _trapezoid_last_axis(integrand, jnp.log(k))
+    return jnp.sqrt(jnp.maximum(variance, 0.0))
+
+
+def sigma8_from_linear_power(linear_theory: LinearTheoryTable) -> Array:
+    """Return present-day linear ``sigma8`` reconstructed from PINOCCHIO ``P(k)``."""
+
+    return linear_sigma_r(jnp.asarray(8.0), linear_theory)
 
 
 def measured_hmf_dndlnm(
@@ -543,6 +583,65 @@ def particle_count_shot_noise(
     return pixel_area_sr * uncollapsed / total**2
 
 
+def select_limber_transition(
+    ell: np.ndarray,
+    exact_shell: np.ndarray,
+    exact_sum: np.ndarray,
+    limber_shell: np.ndarray,
+    limber_sum: np.ndarray,
+    *,
+    relative_tolerance: float,
+    consecutive_multipoles: int,
+) -> tuple[int | None, np.ndarray, float]:
+    """Select the first numerically matched exact-to-Limber transition.
+
+    Arrays contain the same contiguous multipoles. A candidate is accepted
+    only when every shell and the count-weighted sum agree for the requested
+    number of consecutive multipoles. Returned errors are maxima over that
+    confirmation interval.
+    """
+
+    ell_values = np.asarray(ell, dtype=np.int64)
+    exact_shell_values = np.asarray(exact_shell, dtype=np.float64)
+    exact_sum_values = np.asarray(exact_sum, dtype=np.float64)
+    limber_shell_values = np.asarray(limber_shell, dtype=np.float64)
+    limber_sum_values = np.asarray(limber_sum, dtype=np.float64)
+    if ell_values.ndim != 1 or ell_values.size == 0:
+        raise ValueError("transition ell values must be a non-empty vector")
+    if np.any(np.diff(ell_values) != 1):
+        raise ValueError("transition ell values must be contiguous")
+    if exact_shell_values.shape != limber_shell_values.shape or exact_shell_values.shape[1:] != (
+        ell_values.size,
+    ):
+        raise ValueError("exact and Limber shell spectra must have shape (n_shell, n_ell)")
+    if exact_sum_values.shape != (ell_values.size,) or limber_sum_values.shape != (
+        ell_values.size,
+    ):
+        raise ValueError("exact and Limber summed spectra must have shape (n_ell,)")
+    if relative_tolerance <= 0.0:
+        raise ValueError("Limber relative tolerance must be positive")
+    if consecutive_multipoles < 1:
+        raise ValueError("Limber match width must be positive")
+
+    shell_scale = np.maximum(np.abs(exact_shell_values), np.abs(limber_shell_values))
+    sum_scale = np.maximum(np.abs(exact_sum_values), np.abs(limber_sum_values))
+    tiny = np.finfo(np.float64).tiny
+    shell_error = np.abs(exact_shell_values - limber_shell_values) / np.maximum(
+        shell_scale, tiny
+    )
+    sum_error = np.abs(exact_sum_values - limber_sum_values) / np.maximum(sum_scale, tiny)
+    worst_error = np.maximum(np.max(shell_error, axis=0), sum_error)
+    for start in range(0, ell_values.size - consecutive_multipoles + 1):
+        stop = start + consecutive_multipoles
+        if np.all(worst_error[start:stop] <= relative_tolerance):
+            return (
+                int(ell_values[start]),
+                np.max(shell_error[:, start:stop], axis=1),
+                float(np.max(sum_error[start:stop])),
+            )
+    return None, np.max(shell_error, axis=1), float(np.max(sum_error))
+
+
 def hybrid_angular_power_spectra(
     ell: Array,
     z_lo: Sequence[float],
@@ -558,15 +657,21 @@ def hybrid_angular_power_spectra(
     mean_total_counts_per_pixel: Array | None = None,
     pixel_area_sr: float = 1.0,
     theta_resolution_rad: float | None = None,
-    ell_exact_max: int = 100,
+    ell_exact_cap: int = 512,
+    limber_match_rtol: float = 0.01,
+    limber_match_width: int = 20,
+    exact_batch_size: int = 64,
     radial_order: int = 64,
     profile_order: int = 64,
     exact_relative_tolerance: float = 1.0e-4,
 ) -> AngularPowerSpectra:
     """Compute hybrid exact/Limber spectra for disjoint PINOCCHIO shells.
 
-    Exact spherical-Bessel projection replaces the linear Limber result through
-    ``ell_exact_max``. One-halo power always uses Limber. This wrapper performs
+    Exact spherical-Bessel projection is used until shell and weighted-sum
+    spectra agree with Limber within ``limber_match_rtol`` for
+    ``limber_match_width`` consecutive multipoles. The search is bounded by
+    ``ell_exact_cap``. A zero cap explicitly selects Limber at all multipoles.
+    One-halo power always uses Limber. This wrapper performs
     concentration-independent SciPy orchestration; use :func:`limber_shell_cls`
     directly inside concentration-gradient transformations.
     """
@@ -579,6 +684,15 @@ def hybrid_angular_power_spectra(
         raise ValueError("z_lo and z_hi must be matching one-dimensional arrays")
     if len(profiles) != z_lo_values.size:
         raise ValueError("profile_params must contain one entry per shell")
+    ell_numpy = np.asarray(ell_values, dtype=np.int64)
+    if ell_numpy.ndim != 1 or ell_numpy.size == 0 or np.any(np.diff(ell_numpy) <= 0):
+        raise ValueError("ell must be a non-empty vector of increasing multipoles")
+    if ell_exact_cap < 0:
+        raise ValueError("ell_exact_cap must be non-negative")
+    if limber_match_rtol <= 0.0 or limber_match_width < 1 or exact_batch_size < 1:
+        raise ValueError("Limber tolerance, match width, and exact batch size must be positive")
+    if ell_exact_cap > 0 and np.any(np.diff(ell_numpy) != 1):
+        raise ValueError("adaptive exact-to-Limber selection requires contiguous multipoles")
 
     weights = jnp.asarray(shell_weights)
     if weights.shape != (z_lo_values.size,):
@@ -606,20 +720,101 @@ def hybrid_angular_power_spectra(
     summed_linear = jnp.sum(weights[:, None] ** 2 * shell_linear, axis=0)
     summed_one_halo = jnp.sum(weights[:, None] ** 2 * shell_one_halo, axis=0)
 
-    exact_mask = np.asarray(ell_values) <= ell_exact_max
-    if np.any(exact_mask):
-        exact_shell, exact_sum = exact_linear_shell_cls(
-            np.asarray(ell_values)[exact_mask],
-            z_lo_values,
-            z_hi_values,
-            linear_theory,
-            shell_weights=np.asarray(weights),
-            radial_order=radial_order,
-            relative_tolerance=exact_relative_tolerance,
-        )
-        exact_indices = jnp.asarray(np.flatnonzero(exact_mask))
-        shell_linear = shell_linear.at[:, exact_indices].set(jnp.asarray(exact_shell))
-        summed_linear = summed_linear.at[exact_indices].set(jnp.asarray(exact_sum))
+    ell_limber_start = int(ell_numpy[0])
+    shell_match_error = np.full(z_lo_values.size, np.nan, dtype=np.float64)
+    summed_match_error = np.nan
+    if ell_exact_cap > 0 and np.any(ell_numpy <= ell_exact_cap):
+        exact_indices_all = np.flatnonzero(ell_numpy <= ell_exact_cap)
+        exact_shell_blocks: list[np.ndarray] = []
+        exact_sum_blocks: list[np.ndarray] = []
+        transition: int | None = None
+        for batch_start in range(0, exact_indices_all.size, exact_batch_size):
+            batch_indices = exact_indices_all[batch_start : batch_start + exact_batch_size]
+            exact_shell_batch, exact_sum_batch = exact_linear_shell_cls(
+                ell_numpy[batch_indices],
+                z_lo_values,
+                z_hi_values,
+                linear_theory,
+                shell_weights=np.asarray(weights),
+                radial_order=radial_order,
+                relative_tolerance=exact_relative_tolerance,
+            )
+            exact_shell_blocks.append(exact_shell_batch)
+            exact_sum_blocks.append(exact_sum_batch)
+            exact_count = sum(block.shape[1] for block in exact_shell_blocks)
+            if exact_count < limber_match_width or ell_numpy[-1] <= ell_exact_cap:
+                continue
+            compared_indices = exact_indices_all[:exact_count]
+            transition, shell_match_error, summed_match_error = select_limber_transition(
+                ell_numpy[compared_indices],
+                np.concatenate(exact_shell_blocks, axis=1),
+                np.concatenate(exact_sum_blocks),
+                np.asarray(shell_linear)[:, compared_indices],
+                np.asarray(summed_linear)[compared_indices],
+                relative_tolerance=limber_match_rtol,
+                consecutive_multipoles=limber_match_width,
+            )
+            if transition is not None:
+                break
+
+        exact_shell = np.concatenate(exact_shell_blocks, axis=1)
+        exact_sum = np.concatenate(exact_sum_blocks)
+        exact_indices = exact_indices_all[: exact_sum.size]
+        if ell_numpy[-1] <= ell_exact_cap:
+            ell_limber_start = int(ell_numpy[-1]) + 1
+            use_exact = exact_indices
+        else:
+            if transition is None:
+                _, shell_match_error, summed_match_error = select_limber_transition(
+                    ell_numpy[exact_indices],
+                    exact_shell,
+                    exact_sum,
+                    np.asarray(shell_linear)[:, exact_indices],
+                    np.asarray(summed_linear)[exact_indices],
+                    relative_tolerance=limber_match_rtol,
+                    consecutive_multipoles=limber_match_width,
+                )
+                exact_shell_values = np.asarray(exact_shell)
+                limber_shell_values = np.asarray(shell_linear)[:, exact_indices]
+                shell_scale = np.maximum(
+                    np.abs(exact_shell_values), np.abs(limber_shell_values)
+                )
+                shell_errors = np.abs(exact_shell_values - limber_shell_values) / np.maximum(
+                    shell_scale, np.finfo(np.float64).tiny
+                )
+                exact_sum_values = np.asarray(exact_sum)
+                limber_sum_values = np.asarray(summed_linear)[exact_indices]
+                sum_scale = np.maximum(np.abs(exact_sum_values), np.abs(limber_sum_values))
+                sum_errors = np.abs(exact_sum_values - limber_sum_values) / np.maximum(
+                    sum_scale, np.finfo(np.float64).tiny
+                )
+                shell_location = np.unravel_index(np.argmax(shell_errors), shell_errors.shape)
+                sum_index = int(np.argmax(sum_errors))
+                if shell_errors[shell_location] >= sum_errors[sum_index]:
+                    worst_label = f"shell={shell_location[0]}"
+                    worst_index = shell_location[1]
+                    worst_error = float(shell_errors[shell_location])
+                else:
+                    worst_label = "summed_spectrum"
+                    worst_index = sum_index
+                    worst_error = float(sum_errors[sum_index])
+                raise ValueError(
+                    "exact and Limber linear projections did not converge before "
+                    f"ell_exact_cap={ell_exact_cap}: {worst_label}, "
+                    f"ell={ell_numpy[exact_indices[worst_index]]}, "
+                    f"maximum_relative_error={worst_error:.6g}"
+                )
+            ell_limber_start = transition
+            use_exact = exact_indices[ell_numpy[exact_indices] < ell_limber_start]
+        if use_exact.size:
+            exact_lookup = np.searchsorted(exact_indices, use_exact)
+            jax_indices = jnp.asarray(use_exact)
+            shell_linear = shell_linear.at[:, jax_indices].set(
+                jnp.asarray(exact_shell[:, exact_lookup])
+            )
+            summed_linear = summed_linear.at[jax_indices].set(
+                jnp.asarray(exact_sum[exact_lookup])
+            )
 
     if pixel_window is None:
         pixel_window_values = jnp.ones_like(ell_values, dtype=shell_linear.dtype)
@@ -671,4 +866,7 @@ def hybrid_angular_power_spectra(
         summed_clustering=summed_clustering,
         summed_total=summed_clustering + summed_shot,
         shell_weights=weights,
+        ell_limber_start=jnp.asarray(ell_limber_start),
+        limber_match_shell_relative_error=jnp.asarray(shell_match_error),
+        limber_match_summed_relative_error=jnp.asarray(summed_match_error),
     )

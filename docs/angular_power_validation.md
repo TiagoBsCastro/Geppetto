@@ -48,18 +48,18 @@ For a shell bounded by `chi_lo` and `chi_hi`, the count-overdensity window is
 W_i(\chi)=\frac{3\chi^2}{\chi_{i,\rm hi}^3-\chi_{i,\rm lo}^3}.
 \]
 
-The linear term uses the exact spherical-Bessel expression through the
-configured switch, defaulting to `ell=100`:
+The linear term uses the exact spherical-Bessel expression at low multipoles:
 
 \[
 C_\ell^{\rm lin}=\frac{2}{\pi}\int dk\,k^2P_0(k)
 \left|\int d\chi\,W_i(\chi)D(\chi)j_\ell(k\chi)\right|^2.
 \]
 
-The integral is restricted to the tabulated PINOCCHIO k range. Its fixed
-radial quadrature retains 40 oscillations beyond the transverse shell scale;
-this avoids aliasing radial cancellations and is covered by quadrature-order
-and exact-to-Limber convergence tests.
+The integral is restricted to the tabulated PINOCCHIO k range. Exact spectra
+are evaluated in batches until every shell and the count-weighted sum agree
+with Limber within one percent for 20 consecutive multipoles. Limber begins at
+the first multipole in that confirmation interval. The default exact search
+cap is `ell=512`; failure to converge before the cap aborts the validation.
 
 Above the switch, and for the one-halo term at every multipole, the code uses
 
@@ -72,6 +72,22 @@ The spectrum of the summed map uses measured mean-count shell weights. Exact
 linear projection retains cross-shell correlations. Disjoint one-halo shells
 have no Limber cross term. A HEALPix pixel window is applied to clustering
 terms.
+
+## Power-Spectrum Normalization
+
+The validation reconstructs the present-day normalization directly from the
+tabulated spectrum,
+
+\[
+\sigma_8^2 = \int d\ln k\,\frac{k^3P_0(k)}{2\pi^2}
+\left[\frac{3(\sin kR_8-kR_8\cos kR_8)}{(kR_8)^3}\right]^2,
+\qquad R_8=8\,\mathrm{Mpc}/h.
+\]
+
+When `Sigma8` in the PINOCCHIO parameter file is positive, it is the reference
+value. When it is zero, the effective `COS_S8` written to every mass-map FITS
+header is used instead. The run fails by default if the reconstructed and
+reference values differ by more than one percent.
 
 ## Units And Shot Noise
 
@@ -95,21 +111,43 @@ depart from that baseline.
 
 ## Cut-Sky Estimator And Outputs
 
-The validation command builds a binary mask from the compact RING pixel list,
-subtracts the mean within that footprint, and reports
-`healpy.anafast(mask * delta) / f_sky`. This is only an approximate cut-sky
-estimator. The default comparison excludes `ell < 20` and bins with
-`Delta ell = 20` to reduce visible mode coupling. Precision work should replace
-this estimator with an explicit mode-coupling calculation.
+The validation command builds the actual binary RING mask from the compact
+pixel list. NaMaster removes a constant template, matching normalization by the
+mean within the footprint, and measures the resulting pseudo-spectrum divided
+by `f_sky`. Each full-sky theory component is transformed with the same exact
+MASTER coupling matrix and constant-template deprojection bias before it is
+compared with the map. The default comparison excludes `ell < 20` and uses
+`Delta ell = 20` bins. No noisy matrix inversion or pseudo-spectrum
+deconvolution is performed.
 
 Outputs are:
 
-- `angular_power_theory.npz`: unbinned measured spectra and all theory
-  components for each shell and the summed map;
+- `angular_power_theory.npz`: schema-v2 unbinned measured spectra, full-sky
+  base components, mask-coupled comparison components, normalization closure,
+  and exact-to-Limber diagnostics;
 - `angular_power_binned.csv`: binned measured, linear, one-halo, shot-noise,
   clustering, and total spectra;
 - `angular_power_diagnostics.csv`: shell weights, map means, resolved HMF mass
-  fractions, and the one-halo/linear ratio at the lowest tabulated k.
+  fractions, the one-halo/linear ratio at the lowest tabulated k, the
+  reconstructed `sigma8` closure, the exact-to-Limber transition, and the mask
+  convention.
+
+Install the validation and plotting extras and generate the publication figures with:
+
+```bash
+conda install -c conda-forge namaster
+python -m pip install -e '.[validation,plot]'
+python examples/plot_angular_power_validation.py \
+  --input-dir /path/to/angular-power-validation \
+  --output-dir /path/to/figures
+```
+
+The plotting command validates the archive and table schemas, shell ordering,
+multipole bins, `f_sky`, and NSIDE before writing vector PDF and 300-dpi PNG
+versions of the summed-spectrum decomposition and shell-residual heatmap. The
+command also writes a four-panel spectrum decomposition for representative
+shells nearest its configurable target redshifts. The gray residual bands are
+Gaussian mode-counting guides, not covariance estimates.
 
 The uncompensated one-halo term approaches a constant at low k. Its diagnostic
 ratio must be inspected before interpreting large-scale agreement. The model

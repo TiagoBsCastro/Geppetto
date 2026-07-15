@@ -33,8 +33,11 @@ from geppetto.theory import (
     hybrid_angular_power_spectra,
     limber_shell_cls,
     linear_matter_power,
+    linear_sigma_r,
     nfw_fourier_profile,
     one_halo_matter_power,
+    sigma8_from_linear_power,
+    spherical_top_hat_window,
 )
 
 __all__ = [
@@ -58,6 +61,7 @@ __all__ = [
     "exact_linear_shell_cls",
     "from_spherical_lightcone",
     "hybrid_angular_power_spectra",
+    "linear_sigma_r",
     "limber_shell_cls",
     "linear_matter_power",
     "nfw_fourier_profile",
@@ -69,6 +73,8 @@ __all__ = [
     "paint_lightcone_surface_density_sparse",
     "paint_lightcone_surface_density_tabulated_sparse",
     "one_halo_matter_power",
+    "sigma8_from_linear_power",
+    "spherical_top_hat_window",
 ]
 
 __version__ = "0.1.0"

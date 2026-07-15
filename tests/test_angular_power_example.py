@@ -49,8 +49,60 @@ def _write_hmf(path, redshift):
     )
 
 
+def test_sigma8_reference_uses_parameter_or_consistent_headers():
+    module = _load_example_module()
+    maps = [SimpleNamespace(header={"COS_S8": 0.81}) for _ in range(2)]
+
+    assert module.sigma8_reference(0.81, maps) == (0.81, "parameter_file")
+    assert module.sigma8_reference(0.0, maps) == (0.81, "mass_map_COS_S8")
+
+
+def test_sigma8_reference_rejects_missing_or_inconsistent_effective_value():
+    module = _load_example_module()
+    with pytest.raises(ValueError, match="requires COS_S8"):
+        module.sigma8_reference(0.0, [SimpleNamespace(header={})])
+    with pytest.raises(ValueError, match="disagree across shells"):
+        module.sigma8_reference(
+            0.0,
+            [SimpleNamespace(header={"COS_S8": 0.8}), SimpleNamespace(header={"COS_S8": 0.81})],
+        )
+
+
+def test_theory_component_coupling_includes_deprojection_and_fsky():
+    module = _load_example_module()
+
+    class Workspace:
+        @staticmethod
+        def couple_cell(component):
+            return 0.5 * component
+
+    fake_module = SimpleNamespace(
+        deprojection_bias=lambda *args, **kwargs: 0.1 * args[2],
+    )
+    coupling = module.MaskCoupling(
+        module=fake_module,
+        mask=np.ones(12),
+        template=np.ones((1, 1, 12)),
+        reference_field=object(),
+        workspace=Workspace(),
+        ell_full=np.arange(6),
+        f_sky=0.5,
+        nside=1,
+        n_iter=0,
+    )
+
+    result = module.couple_theory_component(
+        np.asarray([[2.0, 4.0], [1.0, 3.0]]),
+        np.asarray([2, 3]),
+        coupling,
+    )
+
+    np.testing.assert_allclose(result, [[2.4, 4.8], [1.2, 3.6]])
+
+
 def test_angular_power_validation_end_to_end(tmp_path, monkeypatch):
     hp = pytest.importorskip("healpy")
+    pytest.importorskip("pymaster")
     fits = pytest.importorskip("astropy.io.fits")
     monkeypatch.setattr(
         hp,
@@ -115,6 +167,23 @@ def test_angular_power_validation_end_to_end(tmp_path, monkeypatch):
         ),
         encoding="utf-8",
     )
+    reconstructed_sigma8 = float(
+        module.sigma8_from_linear_power(module.read_pinocchio_cosmology_table(cosmology))
+    )
+    params = tmp_path / "params.txt"
+    params.write_text(
+        "\n".join(
+            [
+                "BoxSize 100",
+                "BoxInH100",
+                "GridSize 10",
+                "Omega0 0.3",
+                "Hubble100 0.7",
+                f"Sigma8 {reconstructed_sigma8:.16g}",
+            ]
+        ),
+        encoding="utf-8",
+    )
     for redshift in (0.0, 0.1, 0.2):
         _write_hmf(tmp_path / f"pinocchio.{redshift:.4f}.test.mf.out", redshift)
 
@@ -122,16 +191,22 @@ def test_angular_power_validation_end_to_end(tmp_path, monkeypatch):
     outputs = module.run_validation(
         SimpleNamespace(
             manifest=manifest,
+            params=params,
             cosmology_table=cosmology,
             hmf_glob=str(tmp_path / "*.mf.out"),
             output_dir=output_dir,
             ell_max=7,
             ell_min_compare=2,
             ell_bin_width=3,
-            ell_exact_max=0,
+            ell_exact_cap=0,
+            limber_match_rtol=0.01,
+            limber_match_width=2,
+            exact_batch_size=4,
             radial_order=4,
             profile_order=6,
             exact_relative_tolerance=1.0e-3,
+            sigma8_rtol=0.01,
+            mask_sht_iterations=0,
             jax_precision="float64",
         )
     )
@@ -140,7 +215,8 @@ def test_angular_power_validation_end_to_end(tmp_path, monkeypatch):
     with np.load(outputs[0], allow_pickle=False) as result:
         assert result["ell"].shape == (6,)
         assert result["observed_shell"].shape == (2, 6)
-        assert result["shell_total"].shape == (2, 6)
-        assert result["summed_total"].shape == (6,)
+        assert result["shell_linear_pseudo_over_fsky"].shape == (2, 6)
+        assert result["summed_linear_pseudo_over_fsky"].shape == (6,)
+        assert int(result["validation_schema_version"]) == 2
     assert len(outputs[1].read_text(encoding="utf-8").splitlines()) > 2
     assert len(outputs[2].read_text(encoding="utf-8").splitlines()) == 3

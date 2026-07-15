@@ -47,6 +47,15 @@ mpi = [
 theory = [
   "scipy>=1.10"
 ]
+plot = [
+  "matplotlib>=3.8"
+]
+validation = [
+  "astropy>=6.0",
+  "healpy>=1.16",
+  "pymaster>=2.0",
+  "scipy>=1.10"
+]
 
 [project.urls]
 Repository = "https://github.com/TiagoBsCastro/GEPPETTO"
