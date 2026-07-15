@@ -53,18 +53,37 @@ def test_sigma8_reference_uses_parameter_or_consistent_headers():
     module = _load_example_module()
     maps = [SimpleNamespace(header={"COS_S8": 0.81}) for _ in range(2)]
 
-    assert module.sigma8_reference(0.81, maps) == (0.81, "parameter_file")
-    assert module.sigma8_reference(0.0, maps) == (0.81, "mass_map_COS_S8")
+    assert module.sigma8_reference(
+        0.81, maps, reconstructed_sigma8=0.81
+    ) == (0.81, "parameter_file")
+    assert module.sigma8_reference(
+        0.0, maps, reconstructed_sigma8=0.81
+    ) == (0.81, "mass_map_COS_S8")
 
 
-def test_sigma8_reference_rejects_missing_or_inconsistent_effective_value():
+def test_sigma8_reference_falls_back_to_cosmology_power_spectrum():
     module = _load_example_module()
-    with pytest.raises(ValueError, match="requires COS_S8"):
-        module.sigma8_reference(0.0, [SimpleNamespace(header={})])
+
+    assert module.sigma8_reference(
+        0.0,
+        [SimpleNamespace(header={}), SimpleNamespace(header={})],
+        reconstructed_sigma8=0.805,
+    ) == (0.805, "cosmology_power_spectrum")
+
+
+def test_sigma8_reference_rejects_partial_or_inconsistent_headers():
+    module = _load_example_module()
+    with pytest.raises(ValueError, match="either every mass-map header or none"):
+        module.sigma8_reference(
+            0.0,
+            [SimpleNamespace(header={"COS_S8": 0.8}), SimpleNamespace(header={})],
+            reconstructed_sigma8=0.8,
+        )
     with pytest.raises(ValueError, match="disagree across shells"):
         module.sigma8_reference(
             0.0,
             [SimpleNamespace(header={"COS_S8": 0.8}), SimpleNamespace(header={"COS_S8": 0.81})],
+            reconstructed_sigma8=0.8,
         )
 
 
@@ -167,9 +186,6 @@ def test_angular_power_validation_end_to_end(tmp_path, monkeypatch):
         ),
         encoding="utf-8",
     )
-    reconstructed_sigma8 = float(
-        module.sigma8_from_linear_power(module.read_pinocchio_cosmology_table(cosmology))
-    )
     params = tmp_path / "params.txt"
     params.write_text(
         "\n".join(
@@ -179,7 +195,7 @@ def test_angular_power_validation_end_to_end(tmp_path, monkeypatch):
                 "GridSize 10",
                 "Omega0 0.3",
                 "Hubble100 0.7",
-                f"Sigma8 {reconstructed_sigma8:.16g}",
+                "Sigma8 0",
             ]
         ),
         encoding="utf-8",
@@ -218,5 +234,7 @@ def test_angular_power_validation_end_to_end(tmp_path, monkeypatch):
         assert result["shell_linear_pseudo_over_fsky"].shape == (2, 6)
         assert result["summed_linear_pseudo_over_fsky"].shape == (6,)
         assert int(result["validation_schema_version"]) == 2
+        assert result["sigma8_reference_source"].item() == "cosmology_power_spectrum"
+        assert float(result["sigma8_relative_error"]) == pytest.approx(0.0)
     assert len(outputs[1].read_text(encoding="utf-8").splitlines()) > 2
     assert len(outputs[2].read_text(encoding="utf-8").splitlines()) == 3

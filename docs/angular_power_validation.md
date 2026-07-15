@@ -86,8 +86,12 @@ tabulated spectrum,
 
 When `Sigma8` in the PINOCCHIO parameter file is positive, it is the reference
 value. When it is zero, the effective `COS_S8` written to every mass-map FITS
-header is used instead. The run fails by default if the reconstructed and
-reference values differ by more than one percent.
+header is used instead. Older mass maps may omit `COS_S8`; if every shell omits
+it, the value reconstructed from the cosmology-table power spectrum is used as
+a fallback and recorded with source `cosmology_power_spectrum`. That fallback
+is not an independent normalization closure. Partial or inconsistent header
+coverage remains an error. When an independent reference exists, the run fails
+by default if it differs from the reconstruction by more than one percent.
 
 ## Units And Shot Noise
 

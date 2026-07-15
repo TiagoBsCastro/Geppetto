@@ -314,8 +314,15 @@ def couple_theory_component(
 def sigma8_reference(
     sigma8_input: float,
     mass_maps: list[Any],
+    *,
+    reconstructed_sigma8: float,
 ) -> tuple[float, str]:
-    """Resolve the effective PINOCCHIO sigma8 and validate FITS headers."""
+    """Resolve effective PINOCCHIO sigma8 and validate available metadata.
+
+    Older mass-map files may omit ``COS_S8`` when the parameter-file value is
+    zero. In that case the value reconstructed from the PINOCCHIO cosmology
+    table is used as a non-independent fallback.
+    """
 
     header_values: list[float] = []
     for mass_map in mass_maps:
@@ -344,7 +351,11 @@ def sigma8_reference(
             )
         return sigma8_input, "parameter_file"
     if not np.isfinite(header_sigma8):
-        raise ValueError("Sigma8=0 requires COS_S8 in every mass-map FITS header")
+        if not np.isfinite(reconstructed_sigma8) or reconstructed_sigma8 <= 0.0:
+            raise ValueError(
+                "cosmology-table sigma8 fallback must be positive and finite"
+            )
+        return reconstructed_sigma8, "cosmology_power_spectrum"
     return header_sigma8, "mass_map_COS_S8"
 
 
@@ -502,6 +513,7 @@ def run_validation(args: argparse.Namespace) -> tuple[Path, Path, Path]:
     reference_sigma8, sigma8_source = sigma8_reference(
         run_metadata.sigma8_input,
         mass_maps,
+        reconstructed_sigma8=reconstructed_sigma8,
     )
     sigma8_relative_error = abs(reconstructed_sigma8 - reference_sigma8) / reference_sigma8
     print(
