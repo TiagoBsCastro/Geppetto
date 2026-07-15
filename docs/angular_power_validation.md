@@ -153,6 +153,11 @@ command also writes a four-panel spectrum decomposition for representative
 shells nearest its configurable target redshifts. The gray residual bands are
 Gaussian mode-counting guides, not covariance estimates.
 
+At high NSIDE, map measurement streams one shell at a time and reuses one
+full-sky NaMaster input buffer. The submission example requests 64 GB explicitly
+because the mask, harmonic coefficients, and MASTER workspace are still
+full-sky objects even though the input maps use compact pixel rows.
+
 The uncompensated one-halo term approaches a constant at low k. Its diagnostic
 ratio must be inspected before interpreting large-scale agreement. The model
 is deliberately labelled `linear + one_halo`; it is not a formally normalized

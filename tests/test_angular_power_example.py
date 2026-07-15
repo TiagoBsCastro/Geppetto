@@ -51,13 +51,13 @@ def _write_hmf(path, redshift):
 
 def test_sigma8_reference_uses_parameter_or_consistent_headers():
     module = _load_example_module()
-    maps = [SimpleNamespace(header={"COS_S8": 0.81}) for _ in range(2)]
+    headers = [{"COS_S8": 0.81} for _ in range(2)]
 
     assert module.sigma8_reference(
-        0.81, maps, reconstructed_sigma8=0.81
+        0.81, headers, reconstructed_sigma8=0.81
     ) == (0.81, "parameter_file")
     assert module.sigma8_reference(
-        0.0, maps, reconstructed_sigma8=0.81
+        0.0, headers, reconstructed_sigma8=0.81
     ) == (0.81, "mass_map_COS_S8")
 
 
@@ -66,7 +66,7 @@ def test_sigma8_reference_falls_back_to_cosmology_power_spectrum():
 
     assert module.sigma8_reference(
         0.0,
-        [SimpleNamespace(header={}), SimpleNamespace(header={})],
+        [{}, {}],
         reconstructed_sigma8=0.805,
     ) == (0.805, "cosmology_power_spectrum")
 
@@ -76,13 +76,13 @@ def test_sigma8_reference_rejects_partial_or_inconsistent_headers():
     with pytest.raises(ValueError, match="either every mass-map header or none"):
         module.sigma8_reference(
             0.0,
-            [SimpleNamespace(header={"COS_S8": 0.8}), SimpleNamespace(header={})],
+            [{"COS_S8": 0.8}, {}],
             reconstructed_sigma8=0.8,
         )
     with pytest.raises(ValueError, match="disagree across shells"):
         module.sigma8_reference(
             0.0,
-            [SimpleNamespace(header={"COS_S8": 0.8}), SimpleNamespace(header={"COS_S8": 0.81})],
+            [{"COS_S8": 0.8}, {"COS_S8": 0.81}],
             reconstructed_sigma8=0.8,
         )
 
@@ -117,6 +117,45 @@ def test_theory_component_coupling_includes_deprojection_and_fsky():
     )
 
     np.testing.assert_allclose(result, [[2.4, 4.8], [1.2, 3.6]])
+
+
+def test_memory_reduced_namaster_estimator_matches_standard_field():
+    nmt = pytest.importorskip("pymaster")
+    module = _load_example_module()
+    nside = 4
+    npix = 12 * nside**2
+    lmax = 7
+    pixels = np.arange(npix // 2, dtype=np.int64)
+    counts = 2.0 + np.sin(0.1 * pixels)
+    coupling = module.build_mask_coupling(
+        pixels,
+        nside,
+        lmax,
+        bin_width=2,
+        n_iter=0,
+    )
+
+    reduced = module.estimate_pseudo_cls(
+        counts,
+        pixels,
+        coupling,
+        full_sky_buffer=np.zeros(npix, dtype=np.float64),
+    )
+    standard_map = np.zeros(npix, dtype=np.float64)
+    standard_map[pixels] = counts / np.mean(counts)
+    standard_field = nmt.NmtField(
+        coupling.mask,
+        standard_map[None, :],
+        spin=0,
+        templates=np.ones((1, 1, npix), dtype=np.float64),
+        n_iter=0,
+        n_iter_mask=0,
+        lmax=lmax,
+        lmax_mask=2 * lmax,
+    )
+    standard = nmt.compute_coupled_cell(standard_field, standard_field)[0] / coupling.f_sky
+
+    np.testing.assert_allclose(reduced, standard, rtol=1.0e-12, atol=1.0e-14)
 
 
 def test_angular_power_validation_end_to_end(tmp_path, monkeypatch):

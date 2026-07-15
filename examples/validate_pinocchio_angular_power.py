@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import gc
 import glob
 import hashlib
 from dataclasses import dataclass
@@ -225,18 +226,18 @@ def build_mask_coupling(
     npix = 12 * nside**2
     mask = np.zeros(npix, dtype=np.float64)
     mask[pixels] = 1.0
-    template = np.ones((1, 1, npix), dtype=np.float64)
-    zero_map = np.zeros((1, npix), dtype=np.float64)
+    template = mask[None, None, :]
     lmax_mask = min(2 * lmax, 3 * nside - 1)
     reference_field = nmt.NmtField(
         mask,
-        zero_map,
+        None,
         spin=0,
         templates=template,
         n_iter=n_iter,
         n_iter_mask=n_iter,
         lmax=lmax,
         lmax_mask=lmax_mask,
+        masked_on_input=True,
     )
     bins = nmt.NmtBin.from_lmax_linear(lmax, nlb=max(1, bin_width))
     workspace = nmt.NmtWorkspace.from_fields(reference_field, reference_field, bins)
@@ -257,13 +258,23 @@ def estimate_pseudo_cls(
     compact_counts: np.ndarray,
     pixels: np.ndarray,
     coupling: MaskCoupling,
+    *,
+    full_sky_buffer: np.ndarray | None = None,
 ) -> np.ndarray:
     """Estimate constant-deprojected pseudo-``C_ell / f_sky`` with NaMaster."""
 
     mean_count = float(np.mean(compact_counts))
     if not np.isfinite(mean_count) or mean_count <= 0.0:
         raise ValueError("compact count map must have a positive finite mean")
-    normalized_counts = np.zeros_like(coupling.mask)
+    if full_sky_buffer is None:
+        normalized_counts = np.zeros_like(coupling.mask)
+    else:
+        normalized_counts = full_sky_buffer
+        if normalized_counts.shape != coupling.mask.shape:
+            raise ValueError("full-sky scratch buffer has the wrong shape")
+        if normalized_counts.dtype != np.float64:
+            raise ValueError("full-sky scratch buffer must use float64")
+        normalized_counts.fill(0.0)
     normalized_counts[pixels] = compact_counts / mean_count
     field = coupling.module.NmtField(
         coupling.mask,
@@ -274,9 +285,14 @@ def estimate_pseudo_cls(
         n_iter_mask=coupling.n_iter,
         lmax=int(coupling.ell_full[-1]),
         lmax_mask=min(2 * int(coupling.ell_full[-1]), 3 * coupling.nside - 1),
+        masked_on_input=True,
+        lite=True,
     )
     coupled = coupling.module.compute_coupled_cell(field, field)[0]
-    return np.asarray(coupled, dtype=np.float64) / coupling.f_sky
+    result = np.asarray(coupled, dtype=np.float64) / coupling.f_sky
+    del field
+    gc.collect()
+    return result
 
 
 def couple_theory_component(
@@ -313,7 +329,7 @@ def couple_theory_component(
 
 def sigma8_reference(
     sigma8_input: float,
-    mass_maps: list[Any],
+    mass_map_headers: list[dict[str, Any]],
     *,
     reconstructed_sigma8: float,
 ) -> tuple[float, str]:
@@ -325,11 +341,11 @@ def sigma8_reference(
     """
 
     header_values: list[float] = []
-    for mass_map in mass_maps:
-        value = mass_map.header.get("COS_S8")
+    for header in mass_map_headers:
+        value = header.get("COS_S8")
         if value is not None:
             header_values.append(float(value))
-    if header_values and len(header_values) != len(mass_maps):
+    if header_values and len(header_values) != len(mass_map_headers):
         raise ValueError("COS_S8 must be present in either every mass-map header or none")
     if header_values:
         values = np.asarray(header_values, dtype=np.float64)
@@ -460,41 +476,17 @@ def run_validation(args: argparse.Namespace) -> tuple[Path, Path, Path]:
     if float(np.max(z_hi)) > table_z_max:
         raise ValueError("shell redshift exceeds the PINOCCHIO cosmology table")
 
-    compact_pixels: np.ndarray | None = None
-    nside: int | None = None
-    mass_maps: list[Any] = []
-    uncollapsed_maps: list[np.ndarray] = []
-    total_maps: list[np.ndarray] = []
-    for row in rows:
-        mass_map_path = _resolve_input_path(row["mass_map_path"], args.manifest)
-        output_path = _resolve_input_path(row["output_npz"], args.manifest)
-        mass_map = read_pinocchio_mass_map_fits(mass_map_path)
-        mass_maps.append(mass_map)
-        if mass_map.ordering.strip().upper() != "RING":
-            raise ValueError(f"theory validation requires RING maps: {mass_map_path}")
-        try:
-            with np.load(output_path, allow_pickle=False) as painted_file:
-                painted = np.asarray(painted_file["nfw_particle_counts"], dtype=np.float64)
-        except (OSError, KeyError) as exc:
-            raise ValueError(f"cannot read painted NFW counts: {output_path}") from exc
-        if painted.shape != mass_map.temperature.shape:
-            raise ValueError(f"painted and PINOCCHIO map shapes differ: {output_path}")
-        if compact_pixels is None:
-            compact_pixels = np.asarray(mass_map.pixel, dtype=np.int64)
-            nside = mass_map.nside
-        elif mass_map.nside != nside or not np.array_equal(mass_map.pixel, compact_pixels):
-            raise ValueError("all segments must use the same NSIDE and compact RING pixel rows")
-        uncollapsed = np.asarray(mass_map.temperature, dtype=np.float64)
-        uncollapsed_maps.append(uncollapsed)
-        total_maps.append(uncollapsed + painted)
-
-    assert compact_pixels is not None and nside is not None
+    first_mass_map_path = _resolve_input_path(rows[0]["mass_map_path"], args.manifest)
+    first_mass_map = read_pinocchio_mass_map_fits(first_mass_map_path)
+    if first_mass_map.ordering.strip().upper() != "RING":
+        raise ValueError(f"theory validation requires RING maps: {first_mass_map_path}")
+    compact_pixels = np.array(first_mass_map.pixel, dtype=np.int64, copy=True)
+    nside = first_mass_map.nside
     if np.unique(compact_pixels).size != compact_pixels.size:
         raise ValueError("compact map contains duplicate HEALPix pixels")
     npix = 12 * nside**2
     if np.any(compact_pixels < 0) or np.any(compact_pixels >= npix):
         raise ValueError("compact map contains out-of-range HEALPix pixels")
-    f_sky = compact_pixels.size / npix
     lmax = 2 * nside if args.ell_max is None else args.ell_max
     if lmax < 2 or lmax > 3 * nside - 1:
         raise ValueError("ell_max must satisfy 2 <= ell_max <= 3*nside-1")
@@ -510,9 +502,80 @@ def run_validation(args: argparse.Namespace) -> tuple[Path, Path, Path]:
     ):
         raise ValueError("adaptive projection, sigma8, and mask controls are inconsistent")
 
+    print("[theory] building NaMaster mask-coupling workspace", flush=True)
+    coupling = build_mask_coupling(
+        compact_pixels,
+        nside,
+        lmax,
+        bin_width=args.ell_bin_width,
+        n_iter=args.mask_sht_iterations,
+    )
+    f_sky = coupling.f_sky
+
+    print("[theory] measuring constant-deprojected pseudo-spectra", flush=True)
+    ell = np.arange(2, lmax + 1, dtype=np.int64)
+    observed_shell = np.empty((len(rows), ell.size), dtype=np.float64)
+    mean_uncollapsed = np.empty(len(rows), dtype=np.float64)
+    mean_total = np.empty(len(rows), dtype=np.float64)
+    summed_counts = np.zeros(compact_pixels.size, dtype=np.float64)
+    full_sky_buffer = np.zeros(npix, dtype=np.float64)
+    mass_map_headers: list[dict[str, Any]] = []
+    for index, row in enumerate(rows):
+        mass_map_path = _resolve_input_path(row["mass_map_path"], args.manifest)
+        if index == 0:
+            mass_map = first_mass_map
+            first_mass_map = None
+        else:
+            mass_map = read_pinocchio_mass_map_fits(mass_map_path)
+        if mass_map.ordering.strip().upper() != "RING":
+            raise ValueError(f"theory validation requires RING maps: {mass_map_path}")
+        if mass_map.nside != nside or not np.array_equal(mass_map.pixel, compact_pixels):
+            raise ValueError("all segments must use the same NSIDE and compact RING pixel rows")
+        mass_map_headers.append({"COS_S8": mass_map.header.get("COS_S8")})
+
+        output_path = _resolve_input_path(row["output_npz"], args.manifest)
+        try:
+            with np.load(output_path, allow_pickle=False) as painted_file:
+                total_counts = np.array(
+                    painted_file["nfw_particle_counts"],
+                    dtype=np.float64,
+                    copy=True,
+                    order="C",
+                )
+        except (OSError, KeyError) as exc:
+            raise ValueError(f"cannot read painted NFW counts: {output_path}") from exc
+        if total_counts.shape != mass_map.temperature.shape:
+            raise ValueError(f"painted and PINOCCHIO map shapes differ: {output_path}")
+        mean_uncollapsed[index] = np.mean(mass_map.temperature, dtype=np.float64)
+        np.add(total_counts, mass_map.temperature, out=total_counts)
+        mean_total[index] = np.mean(total_counts, dtype=np.float64)
+        if not np.isfinite(mean_total[index]) or mean_total[index] <= 0.0:
+            raise ValueError(f"total shell map must have a positive finite mean: {output_path}")
+        summed_counts += total_counts
+        del mass_map
+        gc.collect()
+        observed_shell[index] = estimate_pseudo_cls(
+            total_counts,
+            compact_pixels,
+            coupling,
+            full_sky_buffer=full_sky_buffer,
+        )[ell]
+        del total_counts
+        print(f"[theory] measured shell {index + 1}/{len(rows)}", flush=True)
+
+    print("[theory] measuring summed map", flush=True)
+    observed_sum = estimate_pseudo_cls(
+        summed_counts,
+        compact_pixels,
+        coupling,
+        full_sky_buffer=full_sky_buffer,
+    )[ell]
+    del summed_counts, full_sky_buffer
+    gc.collect()
+
     reference_sigma8, sigma8_source = sigma8_reference(
         run_metadata.sigma8_input,
-        mass_maps,
+        mass_map_headers,
         reconstructed_sigma8=reconstructed_sigma8,
     )
     sigma8_relative_error = abs(reconstructed_sigma8 - reference_sigma8) / reference_sigma8
@@ -529,36 +592,6 @@ def run_validation(args: argparse.Namespace) -> tuple[Path, Path, Path]:
             f"relative_error={sigma8_relative_error:.6g}, tolerance={args.sigma8_rtol:.6g}"
         )
 
-    print("[theory] building NaMaster mask-coupling workspace", flush=True)
-    coupling = build_mask_coupling(
-        compact_pixels,
-        nside,
-        lmax,
-        bin_width=args.ell_bin_width,
-        n_iter=args.mask_sht_iterations,
-    )
-    f_sky = coupling.f_sky
-
-    print("[theory] measuring constant-deprojected pseudo-spectra", flush=True)
-    observed_shell_full = np.stack(
-        [
-            estimate_pseudo_cls(counts, compact_pixels, coupling)
-            for counts in total_maps
-        ]
-    )
-    observed_sum_full = estimate_pseudo_cls(
-        np.sum(np.stack(total_maps), axis=0),
-        compact_pixels,
-        coupling,
-    )
-    ell = np.arange(2, lmax + 1, dtype=np.int64)
-    observed_shell = observed_shell_full[:, ell]
-    observed_sum = observed_sum_full[ell]
-
-    mean_uncollapsed = np.asarray([np.mean(values) for values in uncollapsed_maps])
-    mean_total = np.asarray([np.mean(values) for values in total_maps])
-    if np.any(mean_total <= 0.0):
-        raise ValueError("every total shell map must have a positive mean")
     shell_weights = mean_total / np.sum(mean_total)
     chi_lo = np.asarray(comoving_distance_mpc_h(jnp.asarray(z_lo), linear_theory))
     chi_hi = np.asarray(comoving_distance_mpc_h(jnp.asarray(z_hi), linear_theory))
