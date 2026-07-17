@@ -60,6 +60,12 @@ are evaluated in batches until every shell and the count-weighted sum agree
 with Limber within one percent for 20 consecutive multipoles. Limber begins at
 the first multipole in that confirmation interval. The default exact search
 cap is `ell=512`; failure to converge before the cap aborts the validation.
+Independent exact multipoles can be evaluated concurrently with spawned worker
+processes selected by `--exact-workers`. Each child is restricted to one native
+thread to avoid nested oversubscription. The Leonardo submission example uses
+all 112 physical cores and checks the Limber criterion after each
+112-multipole batch. The larger batch may calculate exact multipoles beyond the
+eventual transition, but allows the full node to work concurrently.
 
 Above the switch, and for the one-halo term at every multipole, the code uses
 
@@ -154,9 +160,10 @@ shells nearest its configurable target redshifts. The gray residual bands are
 Gaussian mode-counting guides, not covariance estimates.
 
 At high NSIDE, map measurement streams one shell at a time and reuses one
-full-sky NaMaster input buffer. The submission example requests 64 GB explicitly
-because the mask, harmonic coefficients, and MASTER workspace are still
-full-sky objects even though the input maps use compact pixel rows.
+full-sky NaMaster input buffer. The full-node submission requests the usable
+DCGP node memory explicitly because the mask, harmonic coefficients, MASTER
+workspace, and spawned exact-projection runtimes coexist even though the input
+maps use compact pixel rows.
 
 The uncompensated one-halo term approaches a constant at low k. Its diagnostic
 ratio must be inspected before interpreting large-scale agreement. The model

@@ -17,6 +17,7 @@ import glob
 import hashlib
 from dataclasses import dataclass
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 import jax
@@ -81,7 +82,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ell-exact-cap", type=int, default=512)
     parser.add_argument("--limber-match-rtol", type=float, default=0.01)
     parser.add_argument("--limber-match-width", type=int, default=20)
-    parser.add_argument("--exact-batch-size", type=int, default=64)
+    parser.add_argument("--exact-batch-size", type=int, default=20)
+    parser.add_argument("--exact-workers", type=int, default=1)
     parser.add_argument("--radial-order", type=int, default=64)
     parser.add_argument("--profile-order", type=int, default=64)
     parser.add_argument("--exact-relative-tolerance", type=float, default=1.0e-4)
@@ -497,6 +499,7 @@ def run_validation(args: argparse.Namespace) -> tuple[Path, Path, Path]:
         or args.limber_match_rtol <= 0.0
         or args.limber_match_width < 1
         or args.exact_batch_size < 1
+        or args.exact_workers < 1
         or args.sigma8_rtol <= 0.0
         or args.mask_sht_iterations < 0
     ):
@@ -520,7 +523,9 @@ def run_validation(args: argparse.Namespace) -> tuple[Path, Path, Path]:
     summed_counts = np.zeros(compact_pixels.size, dtype=np.float64)
     full_sky_buffer = np.zeros(npix, dtype=np.float64)
     mass_map_headers: list[dict[str, Any]] = []
+    measurement_started = perf_counter()
     for index, row in enumerate(rows):
+        shell_started = perf_counter()
         mass_map_path = _resolve_input_path(row["mass_map_path"], args.manifest)
         if index == 0:
             mass_map = first_mass_map
@@ -561,7 +566,12 @@ def run_validation(args: argparse.Namespace) -> tuple[Path, Path, Path]:
             full_sky_buffer=full_sky_buffer,
         )[ell]
         del total_counts
-        print(f"[theory] measured shell {index + 1}/{len(rows)}", flush=True)
+        print(
+            f"[theory] measured shell {index + 1}/{len(rows)} "
+            f"in {perf_counter() - shell_started:.1f}s "
+            f"(total {perf_counter() - measurement_started:.1f}s)",
+            flush=True,
+        )
 
     print("[theory] measuring summed map", flush=True)
     observed_sum = estimate_pseudo_cls(
@@ -617,7 +627,29 @@ def run_validation(args: argparse.Namespace) -> tuple[Path, Path, Path]:
             f"pixel window for NSIDE={nside} before validation"
         ) from exc
     theta_resolution = _consistent_float(rows, "theta_resolution_rad")
-    print("[theory] computing full-sky exact/Limber and one-halo spectra", flush=True)
+    theory_started = perf_counter()
+    exact_batch_started = theory_started
+
+    def report_exact_batch(event: str, ell_min: int, ell_max: int) -> None:
+        nonlocal exact_batch_started
+        if event == "start":
+            exact_batch_started = perf_counter()
+            print(
+                f"[theory] exact multipoles {ell_min}-{ell_max} started",
+                flush=True,
+            )
+        elif event == "complete":
+            print(
+                f"[theory] exact multipoles {ell_min}-{ell_max} completed in "
+                f"{perf_counter() - exact_batch_started:.1f}s",
+                flush=True,
+            )
+
+    print(
+        "[theory] computing full-sky exact/Limber and one-halo spectra "
+        f"with {args.exact_workers} exact workers",
+        flush=True,
+    )
     theory = hybrid_angular_power_spectra(
         jnp.asarray(ell),
         z_lo,
@@ -636,6 +668,8 @@ def run_validation(args: argparse.Namespace) -> tuple[Path, Path, Path]:
         limber_match_rtol=args.limber_match_rtol,
         limber_match_width=args.limber_match_width,
         exact_batch_size=args.exact_batch_size,
+        exact_workers=args.exact_workers,
+        exact_batch_callback=report_exact_batch,
         radial_order=args.radial_order,
         profile_order=args.profile_order,
         exact_relative_tolerance=args.exact_relative_tolerance,
@@ -643,7 +677,8 @@ def run_validation(args: argparse.Namespace) -> tuple[Path, Path, Path]:
 
     theory_np = {field: np.asarray(getattr(theory, field)) for field in theory._fields}
     print(
-        f"[theory] Limber starts at ell={int(theory_np['ell_limber_start'])}",
+        f"[theory] Limber starts at ell={int(theory_np['ell_limber_start'])}; "
+        f"theory completed in {perf_counter() - theory_started:.1f}s",
         flush=True,
     )
     print("[theory] forward-coupling theory components through the mask", flush=True)
@@ -711,6 +746,10 @@ def run_validation(args: argparse.Namespace) -> tuple[Path, Path, Path]:
         sigma8_relative_tolerance=np.asarray(args.sigma8_rtol),
         limber_match_relative_tolerance=np.asarray(args.limber_match_rtol),
         limber_match_width=np.asarray(args.limber_match_width, dtype=np.int64),
+        ell_exact_cap=np.asarray(args.ell_exact_cap, dtype=np.int64),
+        exact_batch_size=np.asarray(args.exact_batch_size, dtype=np.int64),
+        exact_workers=np.asarray(args.exact_workers, dtype=np.int64),
+        exact_relative_tolerance=np.asarray(args.exact_relative_tolerance),
         mask_sht_iterations=np.asarray(args.mask_sht_iterations, dtype=np.int64),
         mask_pixel_sha256=np.asarray(
             hashlib.sha256(np.ascontiguousarray(compact_pixels).view(np.uint8)).hexdigest()
@@ -783,6 +822,10 @@ def run_validation(args: argparse.Namespace) -> tuple[Path, Path, Path]:
                 "limber_match_summed_relative_error": theory_np[
                     "limber_match_summed_relative_error"
                 ],
+                "ell_exact_cap": args.ell_exact_cap,
+                "exact_batch_size": args.exact_batch_size,
+                "exact_workers": args.exact_workers,
+                "exact_relative_tolerance": args.exact_relative_tolerance,
                 "mask_sht_iterations": args.mask_sht_iterations,
                 "theory_convention": "constant_deprojected_pseudo_cl_over_f_sky",
             }

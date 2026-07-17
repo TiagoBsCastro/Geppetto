@@ -257,6 +257,7 @@ def test_angular_power_validation_end_to_end(tmp_path, monkeypatch):
             limber_match_rtol=0.01,
             limber_match_width=2,
             exact_batch_size=4,
+            exact_workers=1,
             radial_order=4,
             profile_order=6,
             exact_relative_tolerance=1.0e-3,

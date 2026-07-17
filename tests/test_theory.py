@@ -331,6 +331,24 @@ def test_exact_linear_projection_converges_to_limber_at_switch():
     np.testing.assert_allclose(exact[0], limber, rtol=0.1)
 
 
+def test_exact_linear_projection_process_workers_preserve_results():
+    pytest.importorskip("scipy")
+    case = Path(__file__).parents[1] / "examples" / "pinocchio_geppetto_case"
+    theory = read_pinocchio_cosmology_table(case / "pinocchio.example.cosmology.out")
+    arguments = (
+        np.asarray([2, 3]),
+        np.asarray([0.05]),
+        np.asarray([0.1]),
+        theory,
+    )
+
+    serial = exact_linear_shell_cls(*arguments, radial_order=16, workers=1)
+    parallel = exact_linear_shell_cls(*arguments, radial_order=16, workers=2)
+
+    np.testing.assert_allclose(parallel[0], serial[0], rtol=1.0e-12, atol=0.0)
+    np.testing.assert_allclose(parallel[1], serial[1], rtol=1.0e-12, atol=0.0)
+
+
 def test_nfw_3d_transform_matches_projected_profile_hankel_transform():
     scipy = pytest.importorskip("scipy.special")
     mass = jnp.asarray(1.0e14)

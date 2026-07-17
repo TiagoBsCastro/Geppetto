@@ -13,7 +13,10 @@ outside this module.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import os
+from collections.abc import Callable, Sequence
+from concurrent.futures import ProcessPoolExecutor
+from multiprocessing import get_context
 from typing import NamedTuple
 
 import jax.numpy as jnp
@@ -461,6 +464,69 @@ def limber_shell_cls(
     )
 
 
+class _ExactProjectionState(NamedTuple):
+    log_k_table: np.ndarray
+    log_power_table: np.ndarray
+    chi_nodes: np.ndarray
+    transfer_weight: np.ndarray
+    weights: np.ndarray
+    shell_midpoint: np.ndarray
+    shell_width: np.ndarray
+    k_table_max: float
+    log_k_min: float
+    relative_tolerance: float
+
+
+_EXACT_PROJECTION_STATE: _ExactProjectionState | None = None
+
+
+def _integrate_exact_multipole(
+    ell_value: int,
+    state: _ExactProjectionState,
+) -> tuple[np.ndarray, float]:
+    """Integrate one exact multipole using process-local read-only state."""
+
+    from scipy.integrate import quad_vec
+    from scipy.special import spherical_jn
+
+    if ell_value < 0:
+        raise ValueError("ell values must be non-negative")
+    transverse_k = (ell_value + 0.5) / state.shell_midpoint
+    radial_tail_k = 40.0 * np.pi / state.shell_width
+    k_max = min(state.k_table_max, float(np.max(transverse_k + radial_tail_k)))
+    log_k_max = np.log(k_max)
+
+    def integrand(log_k: float) -> np.ndarray:
+        k = np.exp(log_k)
+        power = np.exp(np.interp(log_k, state.log_k_table, state.log_power_table))
+        bessel = spherical_jn(ell_value, k * state.chi_nodes)
+        transfer = np.sum(state.transfer_weight * bessel, axis=1)
+        summed_transfer = np.sum(state.weights * transfer)
+        prefactor = (2.0 / np.pi) * k**3 * power
+        return prefactor * np.concatenate([transfer**2, [summed_transfer**2]])
+
+    integrated, _ = quad_vec(
+        integrand,
+        state.log_k_min,
+        log_k_max,
+        epsabs=1.0e-14,
+        epsrel=state.relative_tolerance,
+        limit=2000,
+    )
+    return integrated[:-1], float(integrated[-1])
+
+
+def _initialize_exact_projection_worker(state: _ExactProjectionState) -> None:
+    global _EXACT_PROJECTION_STATE
+    _EXACT_PROJECTION_STATE = state
+
+
+def _integrate_exact_multipole_worker(ell_value: int) -> tuple[np.ndarray, float]:
+    if _EXACT_PROJECTION_STATE is None:
+        raise RuntimeError("exact projection worker was not initialized")
+    return _integrate_exact_multipole(ell_value, _EXACT_PROJECTION_STATE)
+
+
 def exact_linear_shell_cls(
     ell: np.ndarray,
     z_lo: np.ndarray,
@@ -470,18 +536,20 @@ def exact_linear_shell_cls(
     shell_weights: np.ndarray | None = None,
     radial_order: int = 64,
     relative_tolerance: float = 1.0e-4,
+    workers: int = 1,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Return exact low-ell linear shell autos and weighted-sum spectrum.
 
     This concentration-independent orchestration path uses SciPy's spherical
-    Bessel functions and adaptive vector quadrature. Install ``geppetto[theory]``
-    to use it. The differentiable one-halo and Limber kernels do not depend on
-    SciPy.
+    Bessel functions and adaptive vector quadrature. Independent multipoles
+    are evaluated in ``workers`` spawned processes. Install
+    ``geppetto[theory]`` to use it. The differentiable one-halo and Limber
+    kernels do not depend on SciPy.
     """
 
     try:
-        from scipy.integrate import quad_vec
-        from scipy.special import spherical_jn
+        __import__("scipy.integrate")
+        __import__("scipy.special")
     except ImportError as exc:  # pragma: no cover - depends on optional install
         raise ImportError(
             "exact_linear_shell_cls requires scipy; install geppetto[theory]"
@@ -496,6 +564,8 @@ def exact_linear_shell_cls(
         raise ValueError("each shell must satisfy z_hi > z_lo")
     if relative_tolerance <= 0.0:
         raise ValueError("relative_tolerance must be positive")
+    if workers < 1:
+        raise ValueError("exact projection workers must be positive")
 
     n_shell = z_lo_values.size
     if shell_weights is None:
@@ -532,41 +602,55 @@ def exact_linear_shell_cls(
 
     shell_result = np.empty((n_shell, ell_values.size), dtype=np.float64)
     summed_result = np.empty(ell_values.size, dtype=np.float64)
-    log_k_min = float(log_k_table[0])
     shell_midpoint = 0.5 * (chi_lo + chi_hi)
     shell_width = chi_hi - chi_lo
+    state = _ExactProjectionState(
+        log_k_table=log_k_table,
+        log_power_table=log_power_table,
+        chi_nodes=chi_nodes,
+        transfer_weight=transfer_weight,
+        weights=weights,
+        shell_midpoint=shell_midpoint,
+        shell_width=shell_width,
+        k_table_max=float(k_table[-1]),
+        log_k_min=float(log_k_table[0]),
+        relative_tolerance=relative_tolerance,
+    )
 
-    for ell_index, ell_value in enumerate(ell_values):
-        if ell_value < 0:
-            raise ValueError("ell values must be non-negative")
-        # A finite top-hat shell suppresses radial modes far above 1/DeltaChi.
-        # Truncating after 40 radial oscillations avoids aliasing those
-        # cancellations on the fixed radial quadrature while retaining a
-        # converged low-ell transfer integral.
-        transverse_k = (ell_value + 0.5) / shell_midpoint
-        radial_tail_k = 40.0 * np.pi / shell_width
-        k_max = min(float(k_table[-1]), float(np.max(transverse_k + radial_tail_k)))
-        log_k_max = np.log(k_max)
-
-        def integrand(log_k: float, ell_order: int = int(ell_value)) -> np.ndarray:
-            k = np.exp(log_k)
-            power = np.exp(np.interp(log_k, log_k_table, log_power_table))
-            bessel = spherical_jn(ell_order, k * chi_nodes)
-            transfer = np.sum(transfer_weight * bessel, axis=1)
-            summed_transfer = np.sum(weights * transfer)
-            prefactor = (2.0 / np.pi) * k**3 * power
-            return prefactor * np.concatenate([transfer**2, [summed_transfer**2]])
-
-        integrated, _ = quad_vec(
-            integrand,
-            log_k_min,
-            log_k_max,
-            epsabs=1.0e-14,
-            epsrel=relative_tolerance,
-            limit=2000,
+    if workers == 1 or ell_values.size == 1:
+        integrated_multipoles = (
+            _integrate_exact_multipole(int(ell_value), state) for ell_value in ell_values
         )
-        shell_result[:, ell_index] = integrated[:-1]
-        summed_result[ell_index] = integrated[-1]
+        for ell_index, (shell_integrated, sum_integrated) in enumerate(
+            integrated_multipoles
+        ):
+            shell_result[:, ell_index] = shell_integrated
+            summed_result[ell_index] = sum_integrated
+    else:
+        previous_omp_threads = os.environ.get("OMP_NUM_THREADS")
+        os.environ["OMP_NUM_THREADS"] = "1"
+        try:
+            with ProcessPoolExecutor(
+                max_workers=min(workers, ell_values.size),
+                mp_context=get_context("spawn"),
+                initializer=_initialize_exact_projection_worker,
+                initargs=(state,),
+            ) as executor:
+                integrated_multipoles = executor.map(
+                    _integrate_exact_multipole_worker,
+                    (int(ell_value) for ell_value in ell_values),
+                    chunksize=1,
+                )
+                for ell_index, (shell_integrated, sum_integrated) in enumerate(
+                    integrated_multipoles
+                ):
+                    shell_result[:, ell_index] = shell_integrated
+                    summed_result[ell_index] = sum_integrated
+        finally:
+            if previous_omp_threads is None:
+                os.environ.pop("OMP_NUM_THREADS", None)
+            else:
+                os.environ["OMP_NUM_THREADS"] = previous_omp_threads
 
     return shell_result, summed_result
 
@@ -661,6 +745,8 @@ def hybrid_angular_power_spectra(
     limber_match_rtol: float = 0.01,
     limber_match_width: int = 20,
     exact_batch_size: int = 64,
+    exact_workers: int = 1,
+    exact_batch_callback: Callable[[str, int, int], None] | None = None,
     radial_order: int = 64,
     profile_order: int = 64,
     exact_relative_tolerance: float = 1.0e-4,
@@ -689,8 +775,13 @@ def hybrid_angular_power_spectra(
         raise ValueError("ell must be a non-empty vector of increasing multipoles")
     if ell_exact_cap < 0:
         raise ValueError("ell_exact_cap must be non-negative")
-    if limber_match_rtol <= 0.0 or limber_match_width < 1 or exact_batch_size < 1:
-        raise ValueError("Limber tolerance, match width, and exact batch size must be positive")
+    if (
+        limber_match_rtol <= 0.0
+        or limber_match_width < 1
+        or exact_batch_size < 1
+        or exact_workers < 1
+    ):
+        raise ValueError("Limber and exact projection controls must be positive")
     if ell_exact_cap > 0 and np.any(np.diff(ell_numpy) != 1):
         raise ValueError("adaptive exact-to-Limber selection requires contiguous multipoles")
 
@@ -730,6 +821,10 @@ def hybrid_angular_power_spectra(
         transition: int | None = None
         for batch_start in range(0, exact_indices_all.size, exact_batch_size):
             batch_indices = exact_indices_all[batch_start : batch_start + exact_batch_size]
+            batch_ell_min = int(ell_numpy[batch_indices[0]])
+            batch_ell_max = int(ell_numpy[batch_indices[-1]])
+            if exact_batch_callback is not None:
+                exact_batch_callback("start", batch_ell_min, batch_ell_max)
             exact_shell_batch, exact_sum_batch = exact_linear_shell_cls(
                 ell_numpy[batch_indices],
                 z_lo_values,
@@ -738,7 +833,10 @@ def hybrid_angular_power_spectra(
                 shell_weights=np.asarray(weights),
                 radial_order=radial_order,
                 relative_tolerance=exact_relative_tolerance,
+                workers=exact_workers,
             )
+            if exact_batch_callback is not None:
+                exact_batch_callback("complete", batch_ell_min, batch_ell_max)
             exact_shell_blocks.append(exact_shell_batch)
             exact_sum_blocks.append(exact_sum_batch)
             exact_count = sum(block.shape[1] for block in exact_shell_blocks)

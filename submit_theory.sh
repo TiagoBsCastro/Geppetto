@@ -3,9 +3,10 @@
 #SBATCH --partition=dcgp_usr_prod
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=4
-#SBATCH --mem=64GB
-#SBATCH --time=04:00:00
+#SBATCH --cpus-per-task=112
+#SBATCH --mem=494000MB
+#SBATCH --exclusive
+#SBATCH --time=24:00:00
 #SBATCH --account=CMPNS_inafts
 #SBATCH --output=logs/geppetto_theory_%j.out
 #SBATCH --error=logs/geppetto_theory_%j.err
@@ -21,6 +22,8 @@ conda activate geppetto-dev
 cd ~/scratch/Geppetto
 
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-4}"
+export OMP_PLACES=cores
+export OMP_PROC_BIND=spread
 export MKL_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
 
@@ -32,4 +35,6 @@ python examples/validate_pinocchio_angular_power.py \
 	--ell-exact-cap 512 \
 	--limber-match-rtol 0.01 \
 	--limber-match-width 20 \
+	--exact-batch-size 112 \
+	--exact-workers 112 \
 	--output-dir /leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/geppetto_reduced/angular_power_validation
