@@ -87,6 +87,49 @@ def test_sigma8_reference_rejects_partial_or_inconsistent_headers():
         )
 
 
+def test_exact_projection_checkpoint_computes_only_missing_multipoles(tmp_path):
+    module = _load_example_module()
+    checkpoint = tmp_path / "exact_checkpoint.npz"
+    computed: list[np.ndarray] = []
+
+    def compute(ell):
+        ell_values = np.asarray(ell, dtype=np.int64)
+        computed.append(ell_values.copy())
+        shell = np.stack((ell_values, 2 * ell_values)).astype(np.float64)
+        return shell, 3.0 * ell_values
+
+    first = module.exact_batch_with_checkpoint(
+        checkpoint,
+        "fingerprint",
+        np.asarray([2, 3]),
+        2,
+        compute,
+    )
+    second = module.exact_batch_with_checkpoint(
+        checkpoint,
+        "fingerprint",
+        np.asarray([3, 4]),
+        2,
+        compute,
+    )
+    third = module.exact_batch_with_checkpoint(
+        checkpoint,
+        "fingerprint",
+        np.asarray([4, 2]),
+        2,
+        compute,
+    )
+
+    assert checkpoint.exists()
+    assert [values.tolist() for values in computed] == [[2, 3], [4]]
+    np.testing.assert_allclose(first[0], [[2, 3], [4, 6]])
+    np.testing.assert_allclose(second[0], [[3, 4], [6, 8]])
+    np.testing.assert_allclose(third[0], [[4, 2], [8, 4]])
+    assert first[2] is False
+    assert second[2] is False
+    assert third[2] is True
+
+
 def test_theory_component_coupling_includes_deprojection_and_fsky():
     module = _load_example_module()
 

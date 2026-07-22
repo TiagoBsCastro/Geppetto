@@ -56,16 +56,26 @@ C_\ell^{\rm lin}=\frac{2}{\pi}\int dk\,k^2P_0(k)
 \]
 
 The integral is restricted to the tabulated PINOCCHIO k range. Exact spectra
-are evaluated in batches until every shell and the count-weighted sum agree
-with Limber within one percent for 20 consecutive multipoles. Limber begins at
-the first multipole in that confirmation interval. The default exact search
-cap is `ell=512`; failure to converge before the cap aborts the validation.
+are evaluated in batches until each shell and the count-weighted sum
+independently agree with Limber within one percent for 20 consecutive
+multipoles. Each spectrum switches at the first multipole in its own
+confirmation interval. The default exact search cap is `ell=512`; failure of
+any spectrum to converge before the cap aborts the validation and reports its
+maximum relative error over the final confirmation window.
 Independent exact multipoles can be evaluated concurrently with spawned worker
 processes selected by `--exact-workers`. Each child is restricted to one native
-thread to avoid nested oversubscription. The Leonardo submission example uses
-all 112 physical cores and checks the Limber criterion after each
-112-multipole batch. The larger batch may calculate exact multipoles beyond the
-eventual transition, but allows the full node to work concurrently.
+thread without inheriting the parent OpenMP affinity, allowing the operating
+system to distribute workers across the task's allocated cores. The Leonardo
+submission example uses all 112 physical cores and checks the Limber criterion
+after each 112-multipole batch. The larger batch may calculate exact
+multipoles beyond the eventual transition, but allows the full node to work
+concurrently.
+
+Completed exact batches are atomically accumulated in
+`angular_power_exact_checkpoint.npz`. A rerun with identical projection inputs
+restores those multipoles and computes only missing batches. The checkpoint is
+removed after all final validation products have been written; it remains
+available after a timeout, node failure, or convergence error.
 
 Above the switch, and for the one-halo term at every multipole, the code uses
 
@@ -134,7 +144,7 @@ Outputs are:
 
 - `angular_power_theory.npz`: schema-v2 unbinned measured spectra, full-sky
   base components, mask-coupled comparison components, normalization closure,
-  and exact-to-Limber diagnostics;
+  and per-shell plus summed-spectrum exact-to-Limber diagnostics;
 - `angular_power_binned.csv`: binned measured, linear, one-halo, shot-noise,
   clustering, and total spectra;
 - `angular_power_diagnostics.csv`: shell weights, map means, resolved HMF mass

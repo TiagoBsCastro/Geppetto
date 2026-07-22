@@ -15,6 +15,9 @@ import csv
 import gc
 import glob
 import hashlib
+import os
+import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
@@ -36,7 +39,9 @@ from geppetto.io import (
 )
 from geppetto.profiles import NFWProfileParams
 from geppetto.theory import (
+    LinearTheoryTable,
     comoving_distance_mpc_h,
+    exact_linear_shell_cls,
     hybrid_angular_power_spectra,
     linear_matter_power,
     one_halo_matter_power,
@@ -45,6 +50,7 @@ from geppetto.theory import (
 )
 
 VALIDATION_SCHEMA_VERSION = 2
+EXACT_CHECKPOINT_SCHEMA_VERSION = 1
 THEORY_COMPONENTS = ("linear", "one_halo", "particle_shot_noise")
 
 
@@ -95,6 +101,130 @@ def parse_args() -> argparse.Namespace:
         default="float64",
     )
     return parser.parse_args()
+
+
+def exact_checkpoint_fingerprint(
+    z_lo: np.ndarray,
+    z_hi: np.ndarray,
+    shell_weights: np.ndarray,
+    linear_theory: LinearTheoryTable,
+    *,
+    radial_order: int,
+    relative_tolerance: float,
+) -> str:
+    """Return a deterministic fingerprint for exact-projection inputs."""
+
+    digest = hashlib.sha256()
+    digest.update(f"schema={EXACT_CHECKPOINT_SCHEMA_VERSION}".encode())
+    digest.update(f"radial_order={radial_order}".encode())
+    digest.update(f"relative_tolerance={relative_tolerance:.17g}".encode())
+    for value in (
+        z_lo,
+        z_hi,
+        shell_weights,
+        np.asarray(linear_theory.h),
+        np.asarray(linear_theory.omega_m0),
+        linear_theory.scale_factor,
+        linear_theory.chi_mpc_h,
+        linear_theory.growth,
+        linear_theory.k_h_mpc,
+        linear_theory.power_mpc_h3,
+    ):
+        array = np.ascontiguousarray(np.asarray(value))
+        digest.update(array.dtype.str.encode())
+        digest.update(np.asarray(array.shape, dtype=np.int64).tobytes())
+        digest.update(array.view(np.uint8))
+    return digest.hexdigest()
+
+
+def exact_batch_with_checkpoint(
+    checkpoint_path: Path,
+    fingerprint: str,
+    ell: np.ndarray,
+    n_shell: int,
+    compute: Callable[[np.ndarray], tuple[np.ndarray, np.ndarray]],
+) -> tuple[np.ndarray, np.ndarray, bool]:
+    """Load or compute one exact batch and atomically extend its checkpoint.
+
+    ``compute`` receives only missing multipoles. The boolean result reports
+    whether the complete requested batch came from the checkpoint.
+    """
+
+    requested = np.asarray(ell, dtype=np.int64)
+    if requested.ndim != 1 or requested.size == 0 or np.unique(requested).size != requested.size:
+        raise ValueError("exact checkpoint requests must contain unique multipoles")
+    cached_ell = np.empty(0, dtype=np.int64)
+    cached_shell = np.empty((n_shell, 0), dtype=np.float64)
+    cached_sum = np.empty(0, dtype=np.float64)
+    if checkpoint_path.exists():
+        try:
+            with np.load(checkpoint_path, allow_pickle=False) as checkpoint:
+                stored_fingerprint = str(checkpoint["fingerprint"].item())
+                stored_schema = int(checkpoint["schema_version"])
+                if (
+                    stored_schema == EXACT_CHECKPOINT_SCHEMA_VERSION
+                    and stored_fingerprint == fingerprint
+                ):
+                    cached_ell = np.asarray(checkpoint["ell"], dtype=np.int64)
+                    cached_shell = np.asarray(checkpoint["shell_linear"], dtype=np.float64)
+                    cached_sum = np.asarray(checkpoint["summed_linear"], dtype=np.float64)
+        except (OSError, KeyError, ValueError) as exc:
+            raise ValueError(f"cannot read exact-projection checkpoint: {checkpoint_path}") from exc
+    if cached_shell.shape != (n_shell, cached_ell.size) or cached_sum.shape != cached_ell.shape:
+        raise ValueError(f"exact-projection checkpoint has inconsistent shapes: {checkpoint_path}")
+    if cached_ell.size and (
+        np.unique(cached_ell).size != cached_ell.size
+        or not np.all(np.isfinite(cached_shell))
+        or not np.all(np.isfinite(cached_sum))
+    ):
+        raise ValueError(f"exact-projection checkpoint contains invalid values: {checkpoint_path}")
+
+    cached_lookup = {int(value): index for index, value in enumerate(cached_ell)}
+    missing = np.asarray(
+        [value for value in requested if int(value) not in cached_lookup], dtype=np.int64
+    )
+    cache_hit = missing.size == 0
+    if missing.size:
+        missing_shell, missing_sum = compute(missing)
+        missing_shell = np.asarray(missing_shell, dtype=np.float64)
+        missing_sum = np.asarray(missing_sum, dtype=np.float64)
+        if missing_shell.shape != (n_shell, missing.size) or missing_sum.shape != missing.shape:
+            raise ValueError("exact-projection compute callback returned inconsistent shapes")
+        if not np.all(np.isfinite(missing_shell)) or not np.all(np.isfinite(missing_sum)):
+            raise ValueError("exact-projection compute callback returned non-finite values")
+        combined_ell = np.concatenate((cached_ell, missing))
+        combined_shell = np.concatenate((cached_shell, missing_shell), axis=1)
+        combined_sum = np.concatenate((cached_sum, missing_sum))
+        order = np.argsort(combined_ell)
+        cached_ell = combined_ell[order]
+        cached_shell = combined_shell[:, order]
+        cached_sum = combined_sum[order]
+        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                dir=checkpoint_path.parent,
+                prefix=f".{checkpoint_path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as handle:
+                temporary_path = Path(handle.name)
+                np.savez_compressed(
+                    handle,
+                    schema_version=np.asarray(EXACT_CHECKPOINT_SCHEMA_VERSION, dtype=np.int64),
+                    fingerprint=np.asarray(fingerprint),
+                    ell=cached_ell,
+                    shell_linear=cached_shell,
+                    summed_linear=cached_sum,
+                )
+            os.replace(temporary_path, checkpoint_path)
+        finally:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
+        cached_lookup = {int(value): index for index, value in enumerate(cached_ell)}
+
+    requested_indices = np.asarray([cached_lookup[int(value)] for value in requested], dtype=np.int64)
+    return cached_shell[:, requested_indices], cached_sum[requested_indices], cache_hit
 
 
 def load_manifest(path: Path) -> list[dict[str, str]]:
@@ -505,6 +635,9 @@ def run_validation(args: argparse.Namespace) -> tuple[Path, Path, Path]:
     ):
         raise ValueError("adaptive projection, sigma8, and mask controls are inconsistent")
 
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    exact_checkpoint_path = args.output_dir / "angular_power_exact_checkpoint.npz"
+
     print("[theory] building NaMaster mask-coupling workspace", flush=True)
     coupling = build_mask_coupling(
         compact_pixels,
@@ -629,6 +762,14 @@ def run_validation(args: argparse.Namespace) -> tuple[Path, Path, Path]:
     theta_resolution = _consistent_float(rows, "theta_resolution_rad")
     theory_started = perf_counter()
     exact_batch_started = theory_started
+    exact_fingerprint = exact_checkpoint_fingerprint(
+        z_lo,
+        z_hi,
+        shell_weights,
+        linear_theory,
+        radial_order=args.radial_order,
+        relative_tolerance=args.exact_relative_tolerance,
+    )
 
     def report_exact_batch(event: str, ell_min: int, ell_max: int) -> None:
         nonlocal exact_batch_started
@@ -644,6 +785,34 @@ def run_validation(args: argparse.Namespace) -> tuple[Path, Path, Path]:
                 f"{perf_counter() - exact_batch_started:.1f}s",
                 flush=True,
             )
+
+    def compute_exact_batch(batch_ell: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        return exact_linear_shell_cls(
+            batch_ell,
+            z_lo,
+            z_hi,
+            linear_theory,
+            shell_weights=shell_weights,
+            radial_order=args.radial_order,
+            relative_tolerance=args.exact_relative_tolerance,
+            workers=args.exact_workers,
+        )
+
+    def evaluate_exact_batch(batch_ell: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        shell_result, summed_result, cache_hit = exact_batch_with_checkpoint(
+            exact_checkpoint_path,
+            exact_fingerprint,
+            batch_ell,
+            len(rows),
+            compute_exact_batch,
+        )
+        action = "restored from" if cache_hit else "saved to"
+        print(
+            f"[theory] exact multipoles {int(batch_ell[0])}-{int(batch_ell[-1])} "
+            f"{action} {exact_checkpoint_path}",
+            flush=True,
+        )
+        return shell_result, summed_result
 
     print(
         "[theory] computing full-sky exact/Limber and one-halo spectra "
@@ -670,6 +839,7 @@ def run_validation(args: argparse.Namespace) -> tuple[Path, Path, Path]:
         exact_batch_size=args.exact_batch_size,
         exact_workers=args.exact_workers,
         exact_batch_callback=report_exact_batch,
+        exact_batch_evaluator=evaluate_exact_batch,
         radial_order=args.radial_order,
         profile_order=args.profile_order,
         exact_relative_tolerance=args.exact_relative_tolerance,
@@ -677,7 +847,10 @@ def run_validation(args: argparse.Namespace) -> tuple[Path, Path, Path]:
 
     theory_np = {field: np.asarray(getattr(theory, field)) for field in theory._fields}
     print(
-        f"[theory] Limber starts at ell={int(theory_np['ell_limber_start'])}; "
+        "[theory] Limber starts at "
+        f"ell={int(theory_np['summed_ell_limber_start'])} for the summed spectrum and "
+        f"ell={int(np.min(theory_np['shell_ell_limber_start']))}-"
+        f"{int(np.max(theory_np['shell_ell_limber_start']))} across shells; "
         f"theory completed in {perf_counter() - theory_started:.1f}s",
         flush=True,
     )
@@ -716,7 +889,6 @@ def run_validation(args: argparse.Namespace) -> tuple[Path, Path, Path]:
         [linear_matter_power(jnp.asarray(diagnostic_k), z, linear_theory) for z in midpoint_z]
     )
 
-    args.output_dir.mkdir(parents=True, exist_ok=True)
     theory_path = args.output_dir / "angular_power_theory.npz"
     print(f"[theory] writing {theory_path}", flush=True)
     np.savez_compressed(
@@ -732,6 +904,8 @@ def run_validation(args: argparse.Namespace) -> tuple[Path, Path, Path]:
         summed_one_halo=theory_np["summed_one_halo"],
         summed_particle_shot_noise=theory_np["summed_particle_shot_noise"],
         shell_weights=theory_np["shell_weights"],
+        shell_ell_limber_start=theory_np["shell_ell_limber_start"],
+        summed_ell_limber_start=theory_np["summed_ell_limber_start"],
         ell_limber_start=theory_np["ell_limber_start"],
         limber_match_shell_relative_error=theory_np[
             "limber_match_shell_relative_error"
@@ -815,7 +989,9 @@ def run_validation(args: argparse.Namespace) -> tuple[Path, Path, Path]:
                 "reconstructed_sigma8": reconstructed_sigma8,
                 "sigma8_relative_error": sigma8_relative_error,
                 "sigma8_reference_source": sigma8_source,
-                "ell_limber_start": int(theory_np["ell_limber_start"]),
+                "ell_limber_start": int(theory_np["summed_ell_limber_start"]),
+                "shell_ell_limber_start": int(theory_np["shell_ell_limber_start"][index]),
+                "summed_ell_limber_start": int(theory_np["summed_ell_limber_start"]),
                 "limber_match_shell_relative_error": theory_np[
                     "limber_match_shell_relative_error"
                 ][index],
@@ -832,6 +1008,7 @@ def run_validation(args: argparse.Namespace) -> tuple[Path, Path, Path]:
         )
     diagnostics_path = args.output_dir / "angular_power_diagnostics.csv"
     _write_csv(diagnostics_path, diagnostic_rows)
+    exact_checkpoint_path.unlink(missing_ok=True)
     return theory_path, binned_path, diagnostics_path
 
 

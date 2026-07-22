@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import jax
@@ -26,6 +27,7 @@ from geppetto.theory import (
     one_halo_matter_power,
     particle_count_shot_noise,
     resolved_halo_mass_fraction,
+    select_independent_limber_transitions,
     select_limber_transition,
     sigma8_from_linear_power,
     spherical_top_hat_window,
@@ -269,6 +271,76 @@ def test_select_limber_transition_reports_no_match():
     assert summed_error == pytest.approx(1.0 - 1.0 / 1.1)
 
 
+def test_independent_limber_transitions_allow_different_shell_switches():
+    ell = np.arange(2, 11)
+    limber_shell = np.ones((2, ell.size))
+    exact_shell = limber_shell.copy()
+    exact_shell[0, :2] = 1.2
+    exact_shell[1, :4] = 1.3
+    limber_sum = np.ones(ell.size)
+    exact_sum = limber_sum.copy()
+    exact_sum[:3] = 1.4
+
+    shell_transition, summed_transition, shell_error, summed_error = (
+        select_independent_limber_transitions(
+            ell,
+            exact_shell,
+            exact_sum,
+            limber_shell,
+            limber_sum,
+            relative_tolerance=0.01,
+            consecutive_multipoles=2,
+        )
+    )
+
+    np.testing.assert_array_equal(shell_transition, [4, 6])
+    assert summed_transition == 5
+    np.testing.assert_allclose(shell_error, 0.0)
+    assert summed_error == pytest.approx(0.0)
+
+
+def test_hybrid_projection_applies_independent_transitions(monkeypatch):
+    def fake_limber(ell, *args, **kwargs):
+        values = jnp.ones_like(jnp.asarray(ell), dtype=jnp.float32)
+        return values, jnp.zeros_like(values)
+
+    def fake_exact(ell, z_lo, *args, **kwargs):
+        ell_values = np.asarray(ell)
+        shell = np.stack(
+            (
+                np.where(ell_values < 4, 2.0, 1.0),
+                np.where(ell_values < 6, 3.0, 1.0),
+            )
+        )
+        summed = np.where(ell_values < 5, 2.0, 0.5)
+        return shell, summed
+
+    monkeypatch.setattr(theory_module, "limber_shell_cls", fake_limber)
+    monkeypatch.setattr(theory_module, "exact_linear_shell_cls", fake_exact)
+    result = hybrid_angular_power_spectra(
+        jnp.arange(2, 11),
+        [0.1, 0.2],
+        [0.2, 0.3],
+        _linear_theory(),
+        _mass_function(),
+        ConcentrationParams(),
+        [NFWProfileParams(), NFWProfileParams()],
+        shell_weights=jnp.ones(2),
+        ell_exact_cap=8,
+        limber_match_width=2,
+        exact_batch_size=7,
+    )
+
+    np.testing.assert_array_equal(result.shell_ell_limber_start, [4, 6])
+    assert result.summed_ell_limber_start == 5
+    np.testing.assert_allclose(result.shell_linear[0], [2.0, 2.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0])
+    np.testing.assert_allclose(result.shell_linear[1], [3.0, 3.0, 3.0, 3.0, 1.0, 1.0, 1.0, 1.0, 1.0])
+    np.testing.assert_allclose(
+        result.summed_linear,
+        [2.0, 2.0, 2.0, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5],
+    )
+
+
 def test_hybrid_projection_fails_when_limber_does_not_match_before_cap(monkeypatch):
     def fake_limber(ell, *args, **kwargs):
         values = jnp.ones_like(jnp.asarray(ell), dtype=jnp.float32)
@@ -281,7 +353,7 @@ def test_hybrid_projection_fails_when_limber_does_not_match_before_cap(monkeypat
     monkeypatch.setattr(theory_module, "limber_shell_cls", fake_limber)
     monkeypatch.setattr(theory_module, "exact_linear_shell_cls", fake_exact)
 
-    with pytest.raises(ValueError, match="did not converge"):
+    with pytest.raises(ValueError, match=r"final_window=5-6"):
         hybrid_angular_power_spectra(
             jnp.arange(2, 11),
             [0.1],
@@ -331,7 +403,7 @@ def test_exact_linear_projection_converges_to_limber_at_switch():
     np.testing.assert_allclose(exact[0], limber, rtol=0.1)
 
 
-def test_exact_linear_projection_process_workers_preserve_results():
+def test_exact_linear_projection_process_workers_preserve_results(monkeypatch):
     pytest.importorskip("scipy")
     case = Path(__file__).parents[1] / "examples" / "pinocchio_geppetto_case"
     theory = read_pinocchio_cosmology_table(case / "pinocchio.example.cosmology.out")
@@ -342,11 +414,17 @@ def test_exact_linear_projection_process_workers_preserve_results():
         theory,
     )
 
+    monkeypatch.setenv("OMP_NUM_THREADS", "8")
+    monkeypatch.setenv("OMP_PLACES", "cores")
+    monkeypatch.setenv("OMP_PROC_BIND", "spread")
     serial = exact_linear_shell_cls(*arguments, radial_order=16, workers=1)
     parallel = exact_linear_shell_cls(*arguments, radial_order=16, workers=2)
 
     np.testing.assert_allclose(parallel[0], serial[0], rtol=1.0e-12, atol=0.0)
     np.testing.assert_allclose(parallel[1], serial[1], rtol=1.0e-12, atol=0.0)
+    assert os.environ["OMP_NUM_THREADS"] == "8"
+    assert os.environ["OMP_PLACES"] == "cores"
+    assert os.environ["OMP_PROC_BIND"] == "spread"
 
 
 def test_nfw_3d_transform_matches_projected_profile_hankel_transform():

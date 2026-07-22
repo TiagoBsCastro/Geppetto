@@ -2,11 +2,12 @@
 #SBATCH --job-name=geppetto_theory
 #SBATCH --partition=dcgp_usr_prod
 #SBATCH --nodes=1
+#SBATCH --qos=dcgp_qos_lprod
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=112
 #SBATCH --mem=494000MB
 #SBATCH --exclusive
-#SBATCH --time=24:00:00
+#SBATCH --time=4-00:00:00
 #SBATCH --account=CMPNS_inafts
 #SBATCH --output=logs/geppetto_theory_%j.out
 #SBATCH --error=logs/geppetto_theory_%j.err
@@ -27,7 +28,8 @@ export OMP_PROC_BIND=spread
 export MKL_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
 
-python examples/validate_pinocchio_angular_power.py \
+srun --ntasks=1 --cpus-per-task="${SLURM_CPUS_PER_TASK:-112}" --cpu-bind=cores \
+	python examples/validate_pinocchio_angular_power.py \
 	--manifest /leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/geppetto_reduced/painted_nfw_manifest.csv \
 	--params /leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/params.txt \
 	--cosmology-table /leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/pinocchio.000.cosmology.out \

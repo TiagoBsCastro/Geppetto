@@ -92,6 +92,8 @@ class AngularPowerSpectra(NamedTuple):
     summed_clustering: Array
     summed_total: Array
     shell_weights: Array
+    shell_ell_limber_start: Array
+    summed_ell_limber_start: Array
     ell_limber_start: Array
     limber_match_shell_relative_error: Array
     limber_match_summed_relative_error: Array
@@ -627,8 +629,11 @@ def exact_linear_shell_cls(
             shell_result[:, ell_index] = shell_integrated
             summed_result[ell_index] = sum_integrated
     else:
-        previous_omp_threads = os.environ.get("OMP_NUM_THREADS")
+        affinity_environment = ("OMP_NUM_THREADS", "OMP_PLACES", "OMP_PROC_BIND")
+        previous_affinity = {name: os.environ.get(name) for name in affinity_environment}
         os.environ["OMP_NUM_THREADS"] = "1"
+        os.environ.pop("OMP_PLACES", None)
+        os.environ["OMP_PROC_BIND"] = "FALSE"
         try:
             with ProcessPoolExecutor(
                 max_workers=min(workers, ell_values.size),
@@ -647,10 +652,11 @@ def exact_linear_shell_cls(
                     shell_result[:, ell_index] = shell_integrated
                     summed_result[ell_index] = sum_integrated
         finally:
-            if previous_omp_threads is None:
-                os.environ.pop("OMP_NUM_THREADS", None)
-            else:
-                os.environ["OMP_NUM_THREADS"] = previous_omp_threads
+            for name, previous_value in previous_affinity.items():
+                if previous_value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = previous_value
 
     return shell_result, summed_result
 
@@ -726,6 +732,100 @@ def select_limber_transition(
     return None, np.max(shell_error, axis=1), float(np.max(sum_error))
 
 
+def select_independent_limber_transitions(
+    ell: np.ndarray,
+    exact_shell: np.ndarray,
+    exact_sum: np.ndarray,
+    limber_shell: np.ndarray,
+    limber_sum: np.ndarray,
+    *,
+    relative_tolerance: float,
+    consecutive_multipoles: int,
+) -> tuple[np.ndarray, int | None, np.ndarray, float]:
+    """Select exact-to-Limber transitions independently for each spectrum.
+
+    A shell does not need to enter its valid Limber regime at the same
+    multipole as every other shell. The returned shell transition array uses
+    ``-1`` for spectra that have not matched. Errors for matched spectra are
+    maxima over their accepted confirmation windows; unmatched errors are
+    maxima over the final available window, which diagnoses the failure near
+    the exact-projection cap rather than the expected low-multipole mismatch.
+    """
+
+    ell_values = np.asarray(ell, dtype=np.int64)
+    exact_shell_values = np.asarray(exact_shell, dtype=np.float64)
+    exact_sum_values = np.asarray(exact_sum, dtype=np.float64)
+    limber_shell_values = np.asarray(limber_shell, dtype=np.float64)
+    limber_sum_values = np.asarray(limber_sum, dtype=np.float64)
+    if ell_values.ndim != 1 or ell_values.size == 0:
+        raise ValueError("transition ell values must be a non-empty vector")
+    if np.any(np.diff(ell_values) != 1):
+        raise ValueError("transition ell values must be contiguous")
+    if exact_shell_values.shape != limber_shell_values.shape or exact_shell_values.shape[1:] != (
+        ell_values.size,
+    ):
+        raise ValueError("exact and Limber shell spectra must have shape (n_shell, n_ell)")
+    if exact_sum_values.shape != (ell_values.size,) or limber_sum_values.shape != (
+        ell_values.size,
+    ):
+        raise ValueError("exact and Limber summed spectra must have shape (n_ell,)")
+    if relative_tolerance <= 0.0:
+        raise ValueError("Limber relative tolerance must be positive")
+    if consecutive_multipoles < 1:
+        raise ValueError("Limber match width must be positive")
+
+    tiny = np.finfo(np.float64).tiny
+    shell_scale = np.maximum(np.abs(exact_shell_values), np.abs(limber_shell_values))
+    shell_error_values = np.abs(exact_shell_values - limber_shell_values) / np.maximum(
+        shell_scale, tiny
+    )
+    sum_scale = np.maximum(np.abs(exact_sum_values), np.abs(limber_sum_values))
+    sum_error_values = np.abs(exact_sum_values - limber_sum_values) / np.maximum(
+        sum_scale, tiny
+    )
+    n_candidate = ell_values.size - consecutive_multipoles + 1
+    final_start = max(0, ell_values.size - consecutive_multipoles)
+
+    shell_transition = np.full(exact_shell_values.shape[0], -1, dtype=np.int64)
+    shell_error = np.empty(exact_shell_values.shape[0], dtype=np.float64)
+    for shell_index, errors in enumerate(shell_error_values):
+        accepted_start = next(
+            (
+                start
+                for start in range(max(0, n_candidate))
+                if np.all(errors[start : start + consecutive_multipoles] <= relative_tolerance)
+            ),
+            None,
+        )
+        if accepted_start is None:
+            shell_error[shell_index] = float(np.max(errors[final_start:]))
+        else:
+            shell_transition[shell_index] = int(ell_values[accepted_start])
+            shell_error[shell_index] = float(
+                np.max(errors[accepted_start : accepted_start + consecutive_multipoles])
+            )
+
+    summed_start = next(
+        (
+            start
+            for start in range(max(0, n_candidate))
+            if np.all(
+                sum_error_values[start : start + consecutive_multipoles] <= relative_tolerance
+            )
+        ),
+        None,
+    )
+    if summed_start is None:
+        summed_transition = None
+        summed_error = float(np.max(sum_error_values[final_start:]))
+    else:
+        summed_transition = int(ell_values[summed_start])
+        summed_error = float(
+            np.max(sum_error_values[summed_start : summed_start + consecutive_multipoles])
+        )
+    return shell_transition, summed_transition, shell_error, summed_error
+
+
 def hybrid_angular_power_spectra(
     ell: Array,
     z_lo: Sequence[float],
@@ -747,16 +847,19 @@ def hybrid_angular_power_spectra(
     exact_batch_size: int = 64,
     exact_workers: int = 1,
     exact_batch_callback: Callable[[str, int, int], None] | None = None,
+    exact_batch_evaluator: Callable[[np.ndarray], tuple[np.ndarray, np.ndarray]] | None = None,
     radial_order: int = 64,
     profile_order: int = 64,
     exact_relative_tolerance: float = 1.0e-4,
 ) -> AngularPowerSpectra:
     """Compute hybrid exact/Limber spectra for disjoint PINOCCHIO shells.
 
-    Exact spherical-Bessel projection is used until shell and weighted-sum
-    spectra agree with Limber within ``limber_match_rtol`` for
-    ``limber_match_width`` consecutive multipoles. The search is bounded by
-    ``ell_exact_cap``. A zero cap explicitly selects Limber at all multipoles.
+    Exact spherical-Bessel projection is used until each shell and the
+    weighted-sum spectrum independently agree with Limber within
+    ``limber_match_rtol`` for ``limber_match_width`` consecutive multipoles.
+    The search is bounded by ``ell_exact_cap``. A zero cap explicitly selects
+    Limber at all multipoles. ``exact_batch_evaluator`` may provide externally
+    cached exact batches; it receives only the requested multipole vector.
     One-halo power always uses Limber. This wrapper performs
     concentration-independent SciPy orchestration; use :func:`limber_shell_cls`
     directly inside concentration-gradient transformations.
@@ -811,30 +914,48 @@ def hybrid_angular_power_spectra(
     summed_linear = jnp.sum(weights[:, None] ** 2 * shell_linear, axis=0)
     summed_one_halo = jnp.sum(weights[:, None] ** 2 * shell_one_halo, axis=0)
 
-    ell_limber_start = int(ell_numpy[0])
+    shell_ell_limber_start = np.full(z_lo_values.size, int(ell_numpy[0]), dtype=np.int64)
+    summed_ell_limber_start = int(ell_numpy[0])
     shell_match_error = np.full(z_lo_values.size, np.nan, dtype=np.float64)
     summed_match_error = np.nan
     if ell_exact_cap > 0 and np.any(ell_numpy <= ell_exact_cap):
         exact_indices_all = np.flatnonzero(ell_numpy <= ell_exact_cap)
         exact_shell_blocks: list[np.ndarray] = []
         exact_sum_blocks: list[np.ndarray] = []
-        transition: int | None = None
+        shell_transition = np.full(z_lo_values.size, -1, dtype=np.int64)
+        summed_transition: int | None = None
         for batch_start in range(0, exact_indices_all.size, exact_batch_size):
             batch_indices = exact_indices_all[batch_start : batch_start + exact_batch_size]
             batch_ell_min = int(ell_numpy[batch_indices[0]])
             batch_ell_max = int(ell_numpy[batch_indices[-1]])
             if exact_batch_callback is not None:
                 exact_batch_callback("start", batch_ell_min, batch_ell_max)
-            exact_shell_batch, exact_sum_batch = exact_linear_shell_cls(
-                ell_numpy[batch_indices],
-                z_lo_values,
-                z_hi_values,
-                linear_theory,
-                shell_weights=np.asarray(weights),
-                radial_order=radial_order,
-                relative_tolerance=exact_relative_tolerance,
-                workers=exact_workers,
-            )
+            if exact_batch_evaluator is None:
+                exact_shell_batch, exact_sum_batch = exact_linear_shell_cls(
+                    ell_numpy[batch_indices],
+                    z_lo_values,
+                    z_hi_values,
+                    linear_theory,
+                    shell_weights=np.asarray(weights),
+                    radial_order=radial_order,
+                    relative_tolerance=exact_relative_tolerance,
+                    workers=exact_workers,
+                )
+            else:
+                exact_shell_batch, exact_sum_batch = exact_batch_evaluator(
+                    ell_numpy[batch_indices]
+                )
+            exact_shell_batch = np.asarray(exact_shell_batch, dtype=np.float64)
+            exact_sum_batch = np.asarray(exact_sum_batch, dtype=np.float64)
+            expected_shell_shape = (z_lo_values.size, batch_indices.size)
+            if exact_shell_batch.shape != expected_shell_shape or exact_sum_batch.shape != (
+                batch_indices.size,
+            ):
+                raise ValueError("exact batch evaluator returned inconsistent spectrum shapes")
+            if not np.all(np.isfinite(exact_shell_batch)) or not np.all(
+                np.isfinite(exact_sum_batch)
+            ):
+                raise ValueError("exact batch evaluator returned non-finite spectra")
             if exact_batch_callback is not None:
                 exact_batch_callback("complete", batch_ell_min, batch_ell_max)
             exact_shell_blocks.append(exact_shell_batch)
@@ -843,7 +964,12 @@ def hybrid_angular_power_spectra(
             if exact_count < limber_match_width or ell_numpy[-1] <= ell_exact_cap:
                 continue
             compared_indices = exact_indices_all[:exact_count]
-            transition, shell_match_error, summed_match_error = select_limber_transition(
+            (
+                shell_transition,
+                summed_transition,
+                shell_match_error,
+                summed_match_error,
+            ) = select_independent_limber_transitions(
                 ell_numpy[compared_indices],
                 np.concatenate(exact_shell_blocks, axis=1),
                 np.concatenate(exact_sum_blocks),
@@ -852,18 +978,23 @@ def hybrid_angular_power_spectra(
                 relative_tolerance=limber_match_rtol,
                 consecutive_multipoles=limber_match_width,
             )
-            if transition is not None:
+            if np.all(shell_transition >= 0) and summed_transition is not None:
                 break
 
         exact_shell = np.concatenate(exact_shell_blocks, axis=1)
         exact_sum = np.concatenate(exact_sum_blocks)
         exact_indices = exact_indices_all[: exact_sum.size]
         if ell_numpy[-1] <= ell_exact_cap:
-            ell_limber_start = int(ell_numpy[-1]) + 1
-            use_exact = exact_indices
+            shell_ell_limber_start.fill(int(ell_numpy[-1]) + 1)
+            summed_ell_limber_start = int(ell_numpy[-1]) + 1
         else:
-            if transition is None:
-                _, shell_match_error, summed_match_error = select_limber_transition(
+            if np.any(shell_transition < 0) or summed_transition is None:
+                (
+                    shell_transition,
+                    summed_transition,
+                    shell_match_error,
+                    summed_match_error,
+                ) = select_independent_limber_transitions(
                     ell_numpy[exact_indices],
                     exact_shell,
                     exact_sum,
@@ -872,46 +1003,46 @@ def hybrid_angular_power_spectra(
                     relative_tolerance=limber_match_rtol,
                     consecutive_multipoles=limber_match_width,
                 )
-                exact_shell_values = np.asarray(exact_shell)
-                limber_shell_values = np.asarray(shell_linear)[:, exact_indices]
-                shell_scale = np.maximum(
-                    np.abs(exact_shell_values), np.abs(limber_shell_values)
-                )
-                shell_errors = np.abs(exact_shell_values - limber_shell_values) / np.maximum(
-                    shell_scale, np.finfo(np.float64).tiny
-                )
-                exact_sum_values = np.asarray(exact_sum)
-                limber_sum_values = np.asarray(summed_linear)[exact_indices]
-                sum_scale = np.maximum(np.abs(exact_sum_values), np.abs(limber_sum_values))
-                sum_errors = np.abs(exact_sum_values - limber_sum_values) / np.maximum(
-                    sum_scale, np.finfo(np.float64).tiny
-                )
-                shell_location = np.unravel_index(np.argmax(shell_errors), shell_errors.shape)
-                sum_index = int(np.argmax(sum_errors))
-                if shell_errors[shell_location] >= sum_errors[sum_index]:
-                    worst_label = f"shell={shell_location[0]}"
-                    worst_index = shell_location[1]
-                    worst_error = float(shell_errors[shell_location])
+                unmatched_shells = np.flatnonzero(shell_transition < 0)
+                if unmatched_shells.size and (
+                    summed_transition is not None
+                    or np.max(shell_match_error[unmatched_shells]) >= summed_match_error
+                ):
+                    worst_shell = int(
+                        unmatched_shells[np.argmax(shell_match_error[unmatched_shells])]
+                    )
+                    worst_label = f"shell={worst_shell}"
+                    worst_error = float(shell_match_error[worst_shell])
                 else:
                     worst_label = "summed_spectrum"
-                    worst_index = sum_index
-                    worst_error = float(sum_errors[sum_index])
+                    worst_error = float(summed_match_error)
+                final_window_start = int(
+                    ell_numpy[exact_indices[max(0, exact_indices.size - limber_match_width)]]
+                )
                 raise ValueError(
-                    "exact and Limber linear projections did not converge before "
+                    "an exact and Limber linear projection did not converge before "
                     f"ell_exact_cap={ell_exact_cap}: {worst_label}, "
-                    f"ell={ell_numpy[exact_indices[worst_index]]}, "
+                    f"final_window={final_window_start}-{ell_numpy[exact_indices[-1]]}, "
                     f"maximum_relative_error={worst_error:.6g}"
                 )
-            ell_limber_start = transition
-            use_exact = exact_indices[ell_numpy[exact_indices] < ell_limber_start]
-        if use_exact.size:
-            exact_lookup = np.searchsorted(exact_indices, use_exact)
-            jax_indices = jnp.asarray(use_exact)
-            shell_linear = shell_linear.at[:, jax_indices].set(
-                jnp.asarray(exact_shell[:, exact_lookup])
-            )
-            summed_linear = summed_linear.at[jax_indices].set(
-                jnp.asarray(exact_sum[exact_lookup])
+            shell_ell_limber_start = shell_transition
+            summed_ell_limber_start = int(summed_transition)
+        for shell_index, transition in enumerate(shell_ell_limber_start):
+            use_exact = exact_indices[ell_numpy[exact_indices] < transition]
+            if use_exact.size:
+                exact_lookup = np.searchsorted(exact_indices, use_exact)
+                shell_linear = shell_linear.at[shell_index, jnp.asarray(use_exact)].set(
+                    jnp.asarray(
+                        exact_shell[shell_index, exact_lookup], dtype=shell_linear.dtype
+                    )
+                )
+        use_exact_sum = exact_indices[
+            ell_numpy[exact_indices] < summed_ell_limber_start
+        ]
+        if use_exact_sum.size:
+            exact_lookup = np.searchsorted(exact_indices, use_exact_sum)
+            summed_linear = summed_linear.at[jnp.asarray(use_exact_sum)].set(
+                jnp.asarray(exact_sum[exact_lookup], dtype=summed_linear.dtype)
             )
 
     if pixel_window is None:
@@ -964,7 +1095,9 @@ def hybrid_angular_power_spectra(
         summed_clustering=summed_clustering,
         summed_total=summed_clustering + summed_shot,
         shell_weights=weights,
-        ell_limber_start=jnp.asarray(ell_limber_start),
+        shell_ell_limber_start=jnp.asarray(shell_ell_limber_start),
+        summed_ell_limber_start=jnp.asarray(summed_ell_limber_start),
+        ell_limber_start=jnp.asarray(summed_ell_limber_start),
         limber_match_shell_relative_error=jnp.asarray(shell_match_error),
         limber_match_summed_relative_error=jnp.asarray(summed_match_error),
     )
