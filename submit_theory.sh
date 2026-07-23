@@ -28,7 +28,7 @@ export OMP_PROC_BIND=spread
 export MKL_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
 
-srun --ntasks=1 --cpus-per-task="${SLURM_CPUS_PER_TASK:-112}" --cpu-bind=cores \
+srun --ntasks=1 --cpus-per-task="${SLURM_CPUS_PER_TASK:-112}" --cpu-bind=none \
 	python examples/validate_pinocchio_angular_power.py \
 	--manifest /leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/geppetto_reduced/painted_nfw_manifest.csv \
 	--params /leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/params.txt \
@@ -39,4 +39,6 @@ srun --ntasks=1 --cpus-per-task="${SLURM_CPUS_PER_TASK:-112}" --cpu-bind=cores \
 	--limber-match-width 20 \
 	--exact-batch-size 112 \
 	--exact-workers 112 \
+	--exact-radial-order 512 \
+	--exact-radial-tail-periods 256 \
 	--output-dir /leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/geppetto_reduced/angular_power_validation

@@ -302,6 +302,8 @@ def test_angular_power_validation_end_to_end(tmp_path, monkeypatch):
             exact_batch_size=4,
             exact_workers=1,
             radial_order=4,
+            exact_radial_order=8,
+            exact_radial_tail_periods=40.0,
             profile_order=6,
             exact_relative_tolerance=1.0e-3,
             sigma8_rtol=0.01,

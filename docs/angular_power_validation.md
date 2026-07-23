@@ -71,6 +71,17 @@ after each 112-multipole batch. The larger batch may calculate exact
 multipoles beyond the eventual transition, but allows the full node to work
 concurrently.
 
+Exact and Limber radial quadratures have separate controls. Limber retains the
+64-node `--radial-order` default. Exact projection defaults to
+`--exact-radial-order 512`, because the observer-adjacent shell requires many
+more nodes to resolve high-multipole Bessel oscillations. Each exact shell has
+its own wavenumber cutoff: its tail spans at least 40 radial periods, grows
+with the shell's transverse wavenumber, and is capped by
+`--exact-radial-tail-periods` (default 256). Samples above a shell's cutoff do
+not enter either its auto-spectrum or the weighted summed transfer. This
+prevents a nearby shell from forcing unresolved high-frequency evaluations
+into every distant shell.
+
 Completed exact batches are atomically accumulated in
 `angular_power_exact_checkpoint.npz`. A rerun with identical projection inputs
 restores those multipoles and computes only missing batches. The checkpoint is

@@ -91,6 +91,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--exact-batch-size", type=int, default=20)
     parser.add_argument("--exact-workers", type=int, default=1)
     parser.add_argument("--radial-order", type=int, default=64)
+    parser.add_argument("--exact-radial-order", type=int, default=512)
+    parser.add_argument("--exact-radial-tail-periods", type=float, default=256.0)
     parser.add_argument("--profile-order", type=int, default=64)
     parser.add_argument("--exact-relative-tolerance", type=float, default=1.0e-4)
     parser.add_argument("--sigma8-rtol", type=float, default=0.01)
@@ -110,6 +112,7 @@ def exact_checkpoint_fingerprint(
     linear_theory: LinearTheoryTable,
     *,
     radial_order: int,
+    radial_tail_periods: float,
     relative_tolerance: float,
 ) -> str:
     """Return a deterministic fingerprint for exact-projection inputs."""
@@ -117,6 +120,7 @@ def exact_checkpoint_fingerprint(
     digest = hashlib.sha256()
     digest.update(f"schema={EXACT_CHECKPOINT_SCHEMA_VERSION}".encode())
     digest.update(f"radial_order={radial_order}".encode())
+    digest.update(f"radial_tail_periods={radial_tail_periods:.17g}".encode())
     digest.update(f"relative_tolerance={relative_tolerance:.17g}".encode())
     for value in (
         z_lo,
@@ -622,7 +626,12 @@ def run_validation(args: argparse.Namespace) -> tuple[Path, Path, Path]:
     lmax = 2 * nside if args.ell_max is None else args.ell_max
     if lmax < 2 or lmax > 3 * nside - 1:
         raise ValueError("ell_max must satisfy 2 <= ell_max <= 3*nside-1")
-    if args.ell_bin_width < 1 or args.radial_order < 2 or args.profile_order < 2:
+    if (
+        args.ell_bin_width < 1
+        or args.radial_order < 2
+        or args.exact_radial_order < 2
+        or args.profile_order < 2
+    ):
         raise ValueError("bin width and quadrature orders must be positive")
     if (
         args.ell_exact_cap < 0
@@ -630,6 +639,7 @@ def run_validation(args: argparse.Namespace) -> tuple[Path, Path, Path]:
         or args.limber_match_width < 1
         or args.exact_batch_size < 1
         or args.exact_workers < 1
+        or args.exact_radial_tail_periods < 40.0
         or args.sigma8_rtol <= 0.0
         or args.mask_sht_iterations < 0
     ):
@@ -767,7 +777,8 @@ def run_validation(args: argparse.Namespace) -> tuple[Path, Path, Path]:
         z_hi,
         shell_weights,
         linear_theory,
-        radial_order=args.radial_order,
+        radial_order=args.exact_radial_order,
+        radial_tail_periods=args.exact_radial_tail_periods,
         relative_tolerance=args.exact_relative_tolerance,
     )
 
@@ -793,7 +804,8 @@ def run_validation(args: argparse.Namespace) -> tuple[Path, Path, Path]:
             z_hi,
             linear_theory,
             shell_weights=shell_weights,
-            radial_order=args.radial_order,
+            radial_order=args.exact_radial_order,
+            radial_tail_periods=args.exact_radial_tail_periods,
             relative_tolerance=args.exact_relative_tolerance,
             workers=args.exact_workers,
         )
@@ -841,6 +853,8 @@ def run_validation(args: argparse.Namespace) -> tuple[Path, Path, Path]:
         exact_batch_callback=report_exact_batch,
         exact_batch_evaluator=evaluate_exact_batch,
         radial_order=args.radial_order,
+        exact_radial_order=args.exact_radial_order,
+        exact_radial_tail_periods=args.exact_radial_tail_periods,
         profile_order=args.profile_order,
         exact_relative_tolerance=args.exact_relative_tolerance,
     )
@@ -923,6 +937,8 @@ def run_validation(args: argparse.Namespace) -> tuple[Path, Path, Path]:
         ell_exact_cap=np.asarray(args.ell_exact_cap, dtype=np.int64),
         exact_batch_size=np.asarray(args.exact_batch_size, dtype=np.int64),
         exact_workers=np.asarray(args.exact_workers, dtype=np.int64),
+        exact_radial_order=np.asarray(args.exact_radial_order, dtype=np.int64),
+        exact_radial_tail_periods=np.asarray(args.exact_radial_tail_periods),
         exact_relative_tolerance=np.asarray(args.exact_relative_tolerance),
         mask_sht_iterations=np.asarray(args.mask_sht_iterations, dtype=np.int64),
         mask_pixel_sha256=np.asarray(
@@ -1001,6 +1017,8 @@ def run_validation(args: argparse.Namespace) -> tuple[Path, Path, Path]:
                 "ell_exact_cap": args.ell_exact_cap,
                 "exact_batch_size": args.exact_batch_size,
                 "exact_workers": args.exact_workers,
+                "exact_radial_order": args.exact_radial_order,
+                "exact_radial_tail_periods": args.exact_radial_tail_periods,
                 "exact_relative_tolerance": args.exact_relative_tolerance,
                 "mask_sht_iterations": args.mask_sht_iterations,
                 "theory_convention": "constant_deprojected_pseudo_cl_over_f_sky",

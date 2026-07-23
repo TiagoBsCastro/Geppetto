@@ -403,6 +403,48 @@ def test_exact_linear_projection_converges_to_limber_at_switch():
     np.testing.assert_allclose(exact[0], limber, rtol=0.1)
 
 
+def test_exact_near_observer_shell_requires_converged_radial_order():
+    pytest.importorskip("scipy")
+    case = Path(__file__).parents[1] / "examples" / "pinocchio_geppetto_case"
+    theory = read_pinocchio_cosmology_table(case / "pinocchio.example.cosmology.out")
+    arguments = (
+        np.asarray([256]),
+        np.asarray([0.0]),
+        np.asarray([0.05]),
+        theory,
+    )
+
+    under_resolved, _ = exact_linear_shell_cls(
+        *arguments,
+        radial_order=64,
+        radial_tail_periods=128,
+    )
+    converged, _ = exact_linear_shell_cls(
+        *arguments,
+        radial_order=256,
+        radial_tail_periods=128,
+    )
+    reference, _ = exact_linear_shell_cls(
+        *arguments,
+        radial_order=384,
+        radial_tail_periods=128,
+    )
+
+    np.testing.assert_allclose(converged, reference, rtol=1.0e-8, atol=0.0)
+    assert abs(under_resolved[0, 0] / reference[0, 0] - 1.0) > 0.1
+
+
+def test_exact_projection_rejects_too_short_radial_tail():
+    with pytest.raises(ValueError, match="at least 40"):
+        exact_linear_shell_cls(
+            np.asarray([2]),
+            np.asarray([0.1]),
+            np.asarray([0.2]),
+            _linear_theory(),
+            radial_tail_periods=39.0,
+        )
+
+
 def test_exact_linear_projection_process_workers_preserve_results(monkeypatch):
     pytest.importorskip("scipy")
     case = Path(__file__).parents[1] / "examples" / "pinocchio_geppetto_case"
@@ -417,8 +459,18 @@ def test_exact_linear_projection_process_workers_preserve_results(monkeypatch):
     monkeypatch.setenv("OMP_NUM_THREADS", "8")
     monkeypatch.setenv("OMP_PLACES", "cores")
     monkeypatch.setenv("OMP_PROC_BIND", "spread")
-    serial = exact_linear_shell_cls(*arguments, radial_order=16, workers=1)
-    parallel = exact_linear_shell_cls(*arguments, radial_order=16, workers=2)
+    serial = exact_linear_shell_cls(
+        *arguments,
+        radial_order=16,
+        radial_tail_periods=40,
+        workers=1,
+    )
+    parallel = exact_linear_shell_cls(
+        *arguments,
+        radial_order=16,
+        radial_tail_periods=40,
+        workers=2,
+    )
 
     np.testing.assert_allclose(parallel[0], serial[0], rtol=1.0e-12, atol=0.0)
     np.testing.assert_allclose(parallel[1], serial[1], rtol=1.0e-12, atol=0.0)

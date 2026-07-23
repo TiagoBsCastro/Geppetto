@@ -477,6 +477,7 @@ class _ExactProjectionState(NamedTuple):
     k_table_max: float
     log_k_min: float
     relative_tolerance: float
+    radial_tail_periods: float
 
 
 _EXACT_PROJECTION_STATE: _ExactProjectionState | None = None
@@ -488,34 +489,58 @@ def _integrate_exact_multipole(
 ) -> tuple[np.ndarray, float]:
     """Integrate one exact multipole using process-local read-only state."""
 
-    from scipy.integrate import quad_vec
+    from scipy.integrate import quad
     from scipy.special import spherical_jn
 
     if ell_value < 0:
         raise ValueError("ell values must be non-negative")
     transverse_k = (ell_value + 0.5) / state.shell_midpoint
-    radial_tail_k = 40.0 * np.pi / state.shell_width
-    k_max = min(state.k_table_max, float(np.max(transverse_k + radial_tail_k)))
-    log_k_max = np.log(k_max)
+    transverse_periods = transverse_k * state.shell_width / np.pi
+    tail_periods = np.clip(transverse_periods, 40.0, state.radial_tail_periods)
+    radial_tail_k = tail_periods * np.pi / state.shell_width
+    shell_k_max = np.minimum(state.k_table_max, transverse_k + radial_tail_k)
+    k_max = float(np.max(shell_k_max))
 
-    def integrand(log_k: float) -> np.ndarray:
+    def power_at_log_k(log_k: float) -> tuple[float, float]:
         k = np.exp(log_k)
         power = np.exp(np.interp(log_k, state.log_k_table, state.log_power_table))
+        return k, (2.0 / np.pi) * k**3 * power
+
+    def shell_integrand(log_k: float, shell_index: int) -> float:
+        k, prefactor = power_at_log_k(log_k)
+        bessel = spherical_jn(ell_value, k * state.chi_nodes[shell_index])
+        transfer = np.sum(state.transfer_weight[shell_index] * bessel)
+        return float(prefactor * transfer**2)
+
+    shell_integrated = np.empty(state.chi_nodes.shape[0], dtype=np.float64)
+    for shell_index, shell_limit in enumerate(shell_k_max):
+        shell_integrated[shell_index], _ = quad(
+            shell_integrand,
+            state.log_k_min,
+            np.log(shell_limit),
+            args=(shell_index,),
+            epsabs=1.0e-14,
+            epsrel=state.relative_tolerance,
+            limit=2000,
+        )
+
+    def summed_integrand(log_k: float) -> float:
+        k, prefactor = power_at_log_k(log_k)
         bessel = spherical_jn(ell_value, k * state.chi_nodes)
         transfer = np.sum(state.transfer_weight * bessel, axis=1)
+        transfer = np.where(k <= shell_k_max, transfer, 0.0)
         summed_transfer = np.sum(state.weights * transfer)
-        prefactor = (2.0 / np.pi) * k**3 * power
-        return prefactor * np.concatenate([transfer**2, [summed_transfer**2]])
+        return float(prefactor * summed_transfer**2)
 
-    integrated, _ = quad_vec(
-        integrand,
+    summed_integrated, _ = quad(
+        summed_integrand,
         state.log_k_min,
-        log_k_max,
+        np.log(k_max),
         epsabs=1.0e-14,
         epsrel=state.relative_tolerance,
         limit=2000,
     )
-    return integrated[:-1], float(integrated[-1])
+    return shell_integrated, float(summed_integrated)
 
 
 def _initialize_exact_projection_worker(state: _ExactProjectionState) -> None:
@@ -536,15 +561,20 @@ def exact_linear_shell_cls(
     linear_theory: LinearTheoryTable,
     *,
     shell_weights: np.ndarray | None = None,
-    radial_order: int = 64,
+    radial_order: int = 512,
+    radial_tail_periods: float = 256.0,
     relative_tolerance: float = 1.0e-4,
     workers: int = 1,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Return exact low-ell linear shell autos and weighted-sum spectrum.
 
     This concentration-independent orchestration path uses SciPy's spherical
-    Bessel functions and adaptive vector quadrature. Independent multipoles
-    are evaluated in ``workers`` spawned processes. Install
+    Bessel functions and adaptive scalar quadrature. Shell autos use
+    shell-specific wavenumber cutoffs, while the weighted sum retains
+    cross-shell correlations up to each shell's cutoff. The radial tail spans
+    at least 40 oscillation periods and grows with transverse wavenumber up to
+    ``radial_tail_periods``. Independent multipoles are evaluated in
+    ``workers`` spawned processes. Install
     ``geppetto[theory]`` to use it. The differentiable one-halo and Limber
     kernels do not depend on SciPy.
     """
@@ -566,6 +596,8 @@ def exact_linear_shell_cls(
         raise ValueError("each shell must satisfy z_hi > z_lo")
     if relative_tolerance <= 0.0:
         raise ValueError("relative_tolerance must be positive")
+    if radial_tail_periods < 40.0:
+        raise ValueError("radial_tail_periods must be at least 40")
     if workers < 1:
         raise ValueError("exact projection workers must be positive")
 
@@ -617,6 +649,7 @@ def exact_linear_shell_cls(
         k_table_max=float(k_table[-1]),
         log_k_min=float(log_k_table[0]),
         relative_tolerance=relative_tolerance,
+        radial_tail_periods=float(radial_tail_periods),
     )
 
     if workers == 1 or ell_values.size == 1:
@@ -849,6 +882,8 @@ def hybrid_angular_power_spectra(
     exact_batch_callback: Callable[[str, int, int], None] | None = None,
     exact_batch_evaluator: Callable[[np.ndarray], tuple[np.ndarray, np.ndarray]] | None = None,
     radial_order: int = 64,
+    exact_radial_order: int = 512,
+    exact_radial_tail_periods: float = 256.0,
     profile_order: int = 64,
     exact_relative_tolerance: float = 1.0e-4,
 ) -> AngularPowerSpectra:
@@ -883,6 +918,8 @@ def hybrid_angular_power_spectra(
         or limber_match_width < 1
         or exact_batch_size < 1
         or exact_workers < 1
+        or exact_radial_order < 2
+        or exact_radial_tail_periods < 40.0
     ):
         raise ValueError("Limber and exact projection controls must be positive")
     if ell_exact_cap > 0 and np.any(np.diff(ell_numpy) != 1):
@@ -937,7 +974,8 @@ def hybrid_angular_power_spectra(
                     z_hi_values,
                     linear_theory,
                     shell_weights=np.asarray(weights),
-                    radial_order=radial_order,
+                    radial_order=exact_radial_order,
+                    radial_tail_periods=exact_radial_tail_periods,
                     relative_tolerance=exact_relative_tolerance,
                     workers=exact_workers,
                 )
