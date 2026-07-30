@@ -92,11 +92,16 @@ class AngularPowerSpectra(NamedTuple):
     summed_clustering: Array
     summed_total: Array
     shell_weights: Array
-    shell_ell_limber_start: Array
+    shell_ell_high_ell_start: Array
     summed_ell_limber_start: Array
     ell_limber_start: Array
-    limber_match_shell_relative_error: Array
+    high_ell_match_shell_relative_error: Array
     limber_match_summed_relative_error: Array
+    shell_linear_high_ell_mode: Array
+
+
+LINEAR_HIGH_ELL_LIMBER = 0
+LINEAR_HIGH_ELL_FINITE_WIDTH = 1
 
 
 def gauss_legendre_rule(order: int) -> QuadratureRule:
@@ -466,6 +471,86 @@ def limber_shell_cls(
     )
 
 
+def finite_width_flat_sky_linear_shell_cls(
+    ell: Array,
+    z_lo: float,
+    z_hi: float,
+    linear_theory: LinearTheoryTable,
+    *,
+    radial_quadrature: QuadratureRule | None = None,
+    line_of_sight_quadrature: QuadratureRule | None = None,
+    line_of_sight_tail_periods: float = 40.0,
+) -> Array:
+    """Return the finite-width flat-sky linear ``C_ell`` for one count shell.
+
+    The shell field is the dimensionless count overdensity with radial window
+    ``W(chi) = 3 chi^2 / (chi_hi^3 - chi_lo^3)`` for comoving ``chi`` in
+    ``Mpc/h``. Unlike standard Limber, this approximation retains the Fourier
+    transform of the complete top-hat radial window and its growth evolution:
+
+    ``C_ell = integral dk_parallel P0(k) |W_D(k_parallel)|^2 / (pi chi_mid^2)``.
+
+    It is intended as the high-ell continuation for geometrically thin
+    shells. The orchestration layer validates it against the exact full-sky
+    projection before selecting it. The calculation is JAX-compatible and
+    independent of concentration parameters.
+    """
+
+    if z_hi <= z_lo:
+        raise ValueError("finite-width shell must satisfy z_hi > z_lo")
+    if line_of_sight_tail_periods <= 0.0:
+        raise ValueError("line-of-sight tail periods must be positive")
+    if radial_quadrature is None:
+        radial_quadrature = gauss_legendre_rule(256)
+    if line_of_sight_quadrature is None:
+        line_of_sight_quadrature = gauss_legendre_rule(512)
+
+    ell_values = jnp.asarray(ell)
+    scalar_ell = ell_values.ndim == 0
+    ell_vector = jnp.atleast_1d(ell_values)
+    chi_lo = comoving_distance_mpc_h(jnp.asarray(z_lo), linear_theory)
+    chi_hi = comoving_distance_mpc_h(jnp.asarray(z_hi), linear_theory)
+    midpoint = 0.5 * (chi_lo + chi_hi)
+    half_width = 0.5 * (chi_hi - chi_lo)
+    chi = midpoint + half_width * radial_quadrature.nodes
+    dchi_weight = half_width * radial_quadrature.weights
+    redshift = redshift_at_comoving_distance(chi, linear_theory)
+    shell_volume_per_sr = (chi_hi**3 - chi_lo**3) / 3.0
+    transfer_weight = (
+        dchi_weight
+        * chi**2
+        / shell_volume_per_sr
+        * growth_factor(redshift, linear_theory)
+    )
+
+    u_max = line_of_sight_tail_periods * jnp.pi
+    u = 0.5 * u_max * (line_of_sight_quadrature.nodes + 1.0)
+    du_weight = 0.5 * u_max * line_of_sight_quadrature.weights
+    phase = u[:, None] * radial_quadrature.nodes[None, :]
+    radial_window_power = (
+        jnp.sum(jnp.cos(phase) * transfer_weight[None, :], axis=1) ** 2
+        + jnp.sum(jnp.sin(phase) * transfer_weight[None, :], axis=1) ** 2
+    )
+    k_parallel = u / half_width
+
+    def project_one_ell(ell_value: Array) -> Array:
+        k_transverse = (ell_value + 0.5) / midpoint
+        k = jnp.sqrt(k_transverse**2 + k_parallel**2)
+        power = linear_matter_power(k, jnp.zeros_like(k), linear_theory)
+        power = jnp.where(
+            (k >= linear_theory.k_h_mpc[0]) & (k <= linear_theory.k_h_mpc[-1]),
+            power,
+            0.0,
+        )
+        return (
+            jnp.sum(du_weight * power * radial_window_power)
+            / (jnp.pi * midpoint**2 * half_width)
+        )
+
+    result = lax.map(project_one_ell, ell_vector)
+    return result[0] if scalar_ell else result
+
+
 class _ExactProjectionState(NamedTuple):
     log_k_table: np.ndarray
     log_power_table: np.ndarray
@@ -706,6 +791,24 @@ def particle_count_shot_noise(
     return pixel_area_sr * uncollapsed / total**2
 
 
+def _stable_match_start(
+    relative_error: np.ndarray,
+    relative_tolerance: float,
+    minimum_multipoles: int,
+) -> int | None:
+    """Return the first match that remains valid through the tested range."""
+
+    errors = np.asarray(relative_error, dtype=np.float64)
+    if errors.ndim != 1 or errors.size < minimum_multipoles:
+        return None
+    suffix_maximum = np.maximum.accumulate(errors[::-1])[::-1]
+    candidate = np.flatnonzero(
+        (suffix_maximum <= relative_tolerance)
+        & (np.arange(errors.size) <= errors.size - minimum_multipoles)
+    )
+    return None if candidate.size == 0 else int(candidate[0])
+
+
 def select_limber_transition(
     ell: np.ndarray,
     exact_shell: np.ndarray,
@@ -716,12 +819,12 @@ def select_limber_transition(
     relative_tolerance: float,
     consecutive_multipoles: int,
 ) -> tuple[int | None, np.ndarray, float]:
-    """Select the first numerically matched exact-to-Limber transition.
+    """Select a stable exact-to-Limber transition.
 
-    Arrays contain the same contiguous multipoles. A candidate is accepted
-    only when every shell and the count-weighted sum agree for the requested
-    number of consecutive multipoles. Returned errors are maxima over that
-    confirmation interval.
+    A candidate is accepted only when every shell and the count-weighted sum
+    remain within tolerance through the complete tested exact range, with at
+    least ``consecutive_multipoles`` available. This rejects transient
+    matches.
     """
 
     ell_values = np.asarray(ell, dtype=np.int64)
@@ -754,14 +857,17 @@ def select_limber_transition(
     )
     sum_error = np.abs(exact_sum_values - limber_sum_values) / np.maximum(sum_scale, tiny)
     worst_error = np.maximum(np.max(shell_error, axis=0), sum_error)
-    for start in range(0, ell_values.size - consecutive_multipoles + 1):
-        stop = start + consecutive_multipoles
-        if np.all(worst_error[start:stop] <= relative_tolerance):
-            return (
-                int(ell_values[start]),
-                np.max(shell_error[:, start:stop], axis=1),
-                float(np.max(sum_error[start:stop])),
-            )
+    start = _stable_match_start(
+        worst_error,
+        relative_tolerance,
+        consecutive_multipoles,
+    )
+    if start is not None:
+        return (
+            int(ell_values[start]),
+            np.max(shell_error[:, start:], axis=1),
+            float(np.max(sum_error[start:])),
+        )
     return None, np.max(shell_error, axis=1), float(np.max(sum_error))
 
 
@@ -775,14 +881,12 @@ def select_independent_limber_transitions(
     relative_tolerance: float,
     consecutive_multipoles: int,
 ) -> tuple[np.ndarray, int | None, np.ndarray, float]:
-    """Select exact-to-Limber transitions independently for each spectrum.
+    """Select stable exact-to-Limber transitions for each spectrum.
 
-    A shell does not need to enter its valid Limber regime at the same
-    multipole as every other shell. The returned shell transition array uses
-    ``-1`` for spectra that have not matched. Errors for matched spectra are
-    maxima over their accepted confirmation windows; unmatched errors are
-    maxima over the final available window, which diagnoses the failure near
-    the exact-projection cap rather than the expected low-multipole mismatch.
+    A match must remain within tolerance through the complete tested exact
+    range. The returned shell transition array uses ``-1`` for spectra that
+    have not matched. Unmatched errors are maxima over the final available
+    window, which diagnoses the failure near the exact-projection cap.
     """
 
     ell_values = np.asarray(ell, dtype=np.int64)
@@ -816,47 +920,82 @@ def select_independent_limber_transitions(
     sum_error_values = np.abs(exact_sum_values - limber_sum_values) / np.maximum(
         sum_scale, tiny
     )
-    n_candidate = ell_values.size - consecutive_multipoles + 1
     final_start = max(0, ell_values.size - consecutive_multipoles)
 
     shell_transition = np.full(exact_shell_values.shape[0], -1, dtype=np.int64)
     shell_error = np.empty(exact_shell_values.shape[0], dtype=np.float64)
     for shell_index, errors in enumerate(shell_error_values):
-        accepted_start = next(
-            (
-                start
-                for start in range(max(0, n_candidate))
-                if np.all(errors[start : start + consecutive_multipoles] <= relative_tolerance)
-            ),
-            None,
+        accepted_start = _stable_match_start(
+            errors,
+            relative_tolerance,
+            consecutive_multipoles,
         )
         if accepted_start is None:
             shell_error[shell_index] = float(np.max(errors[final_start:]))
         else:
             shell_transition[shell_index] = int(ell_values[accepted_start])
-            shell_error[shell_index] = float(
-                np.max(errors[accepted_start : accepted_start + consecutive_multipoles])
-            )
+            shell_error[shell_index] = float(np.max(errors[accepted_start:]))
 
-    summed_start = next(
-        (
-            start
-            for start in range(max(0, n_candidate))
-            if np.all(
-                sum_error_values[start : start + consecutive_multipoles] <= relative_tolerance
-            )
-        ),
-        None,
+    summed_start = _stable_match_start(
+        sum_error_values,
+        relative_tolerance,
+        consecutive_multipoles,
     )
     if summed_start is None:
         summed_transition = None
         summed_error = float(np.max(sum_error_values[final_start:]))
     else:
         summed_transition = int(ell_values[summed_start])
-        summed_error = float(
-            np.max(sum_error_values[summed_start : summed_start + consecutive_multipoles])
-        )
+        summed_error = float(np.max(sum_error_values[summed_start:]))
     return shell_transition, summed_transition, shell_error, summed_error
+
+
+def select_shell_high_ell_projection(
+    exact_shell: np.ndarray,
+    candidate_shell: np.ndarray,
+    candidate_modes: np.ndarray,
+    *,
+    comparison_width: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Select the most accurate high-ell candidate for each shell.
+
+    ``candidate_shell`` has shape ``(n_candidate, n_shell, n_ell)`` over the
+    exact comparison range. Selection minimizes the maximum relative error in
+    the final ``comparison_width`` multipoles. The returned mode identifiers
+    correspond to ``candidate_modes``.
+    """
+
+    exact_values = np.asarray(exact_shell, dtype=np.float64)
+    candidate_values = np.asarray(candidate_shell, dtype=np.float64)
+    modes = np.asarray(candidate_modes, dtype=np.int64)
+    if exact_values.ndim != 2:
+        raise ValueError("exact shell spectra must have shape (n_shell, n_ell)")
+    if (
+        candidate_values.ndim != 3
+        or candidate_values.shape[1:] != exact_values.shape
+        or modes.shape != (candidate_values.shape[0],)
+    ):
+        raise ValueError(
+            "candidate shell spectra must have shape (n_candidate, n_shell, n_ell)"
+        )
+    if comparison_width < 1 or exact_values.shape[1] < comparison_width:
+        raise ValueError("projection comparison width exceeds the exact range")
+    if not np.all(np.isfinite(candidate_values)):
+        raise ValueError("high-ell projection candidates must be finite")
+
+    tiny = np.finfo(np.float64).tiny
+    scale = np.maximum(np.abs(candidate_values), np.abs(exact_values)[None, :, :])
+    relative_error = np.abs(candidate_values - exact_values[None, :, :]) / np.maximum(
+        scale,
+        tiny,
+    )
+    final_error = np.max(relative_error[:, :, -comparison_width:], axis=2)
+    selected_candidate = np.argmin(final_error, axis=0)
+    shell_index = np.arange(exact_values.shape[0])
+    return (
+        candidate_values[selected_candidate, shell_index],
+        modes[selected_candidate],
+    )
 
 
 def hybrid_angular_power_spectra(
@@ -884,20 +1023,22 @@ def hybrid_angular_power_spectra(
     radial_order: int = 64,
     exact_radial_order: int = 512,
     exact_radial_tail_periods: float = 256.0,
+    finite_width_radial_order: int = 256,
+    finite_width_line_of_sight_order: int = 512,
+    finite_width_tail_periods: float = 40.0,
     profile_order: int = 64,
     exact_relative_tolerance: float = 1.0e-4,
 ) -> AngularPowerSpectra:
-    """Compute hybrid exact/Limber spectra for disjoint PINOCCHIO shells.
+    """Compute hybrid exact/high-ell spectra for disjoint PINOCCHIO shells.
 
-    Exact spherical-Bessel projection is used until each shell and the
-    weighted-sum spectrum independently agree with Limber within
-    ``limber_match_rtol`` for ``limber_match_width`` consecutive multipoles.
-    The search is bounded by ``ell_exact_cap``. A zero cap explicitly selects
-    Limber at all multipoles. ``exact_batch_evaluator`` may provide externally
-    cached exact batches; it receives only the requested multipole vector.
-    One-halo power always uses Limber. This wrapper performs
-    concentration-independent SciPy orchestration; use :func:`limber_shell_cls`
-    directly inside concentration-gradient transformations.
+    Shells select between standard Limber and a finite-width flat-sky
+    projection by comparison with the exact spherical-Bessel result. The
+    count-weighted summed spectrum retains standard Limber because its broad
+    radial window includes cross-shell correlations in the exact branch.
+    Each transition must remain within ``limber_match_rtol`` through the
+    complete exact range. The search is bounded by ``ell_exact_cap``. A zero
+    cap uses a geometric shell-mode fallback without exact validation.
+    One-halo power always uses Limber.
     """
 
     ell_values = jnp.asarray(ell)
@@ -920,6 +1061,9 @@ def hybrid_angular_power_spectra(
         or exact_workers < 1
         or exact_radial_order < 2
         or exact_radial_tail_periods < 40.0
+        or finite_width_radial_order < 2
+        or finite_width_line_of_sight_order < 2
+        or finite_width_tail_periods <= 0.0
     ):
         raise ValueError("Limber and exact projection controls must be positive")
     if ell_exact_cap > 0 and np.any(np.diff(ell_numpy) != 1):
@@ -930,6 +1074,10 @@ def hybrid_angular_power_spectra(
         raise ValueError("shell_weights must have shape (n_shell,)")
     weights = weights / jnp.sum(weights)
     radial_quadrature = gauss_legendre_rule(radial_order)
+    finite_width_radial_quadrature = gauss_legendre_rule(finite_width_radial_order)
+    finite_width_line_of_sight_quadrature = gauss_legendre_rule(
+        finite_width_line_of_sight_order
+    )
     profile_quadrature = gauss_legendre_rule(profile_order)
     limber_results = [
         limber_shell_cls(
@@ -947,20 +1095,57 @@ def hybrid_angular_power_spectra(
         for lo, hi, shell_profile in zip(z_lo_values, z_hi_values, profiles, strict=True)
     ]
     shell_linear = jnp.stack([result[0] for result in limber_results])
+    shell_limber_linear = shell_linear
+    shell_finite_width_linear = jnp.stack(
+        [
+            finite_width_flat_sky_linear_shell_cls(
+                ell_values,
+                float(lo),
+                float(hi),
+                linear_theory,
+                radial_quadrature=finite_width_radial_quadrature,
+                line_of_sight_quadrature=finite_width_line_of_sight_quadrature,
+                line_of_sight_tail_periods=finite_width_tail_periods,
+            )
+            for lo, hi in zip(z_lo_values, z_hi_values, strict=True)
+        ]
+    )
     shell_one_halo = jnp.stack([result[1] for result in limber_results])
     summed_linear = jnp.sum(weights[:, None] ** 2 * shell_linear, axis=0)
     summed_one_halo = jnp.sum(weights[:, None] ** 2 * shell_one_halo, axis=0)
 
-    shell_ell_limber_start = np.full(z_lo_values.size, int(ell_numpy[0]), dtype=np.int64)
+    shell_ell_high_ell_start = np.full(
+        z_lo_values.size,
+        int(ell_numpy[0]),
+        dtype=np.int64,
+    )
     summed_ell_limber_start = int(ell_numpy[0])
     shell_match_error = np.full(z_lo_values.size, np.nan, dtype=np.float64)
     summed_match_error = np.nan
+    chi_lo_values = np.asarray(
+        comoving_distance_mpc_h(jnp.asarray(z_lo_values), linear_theory)
+    )
+    chi_hi_values = np.asarray(
+        comoving_distance_mpc_h(jnp.asarray(z_hi_values), linear_theory)
+    )
+    fractional_width = (chi_hi_values - chi_lo_values) / (
+        0.5 * (chi_hi_values + chi_lo_values)
+    )
+    shell_high_ell_mode = np.where(
+        fractional_width <= 0.3,
+        LINEAR_HIGH_ELL_FINITE_WIDTH,
+        LINEAR_HIGH_ELL_LIMBER,
+    )
+    shell_linear = jnp.where(
+        jnp.asarray(shell_high_ell_mode)[:, None]
+        == LINEAR_HIGH_ELL_FINITE_WIDTH,
+        shell_finite_width_linear,
+        shell_limber_linear,
+    )
     if ell_exact_cap > 0 and np.any(ell_numpy <= ell_exact_cap):
         exact_indices_all = np.flatnonzero(ell_numpy <= ell_exact_cap)
         exact_shell_blocks: list[np.ndarray] = []
         exact_sum_blocks: list[np.ndarray] = []
-        shell_transition = np.full(z_lo_values.size, -1, dtype=np.int64)
-        summed_transition: int | None = None
         for batch_start in range(0, exact_indices_all.size, exact_batch_size):
             batch_indices = exact_indices_all[batch_start : batch_start + exact_batch_size]
             batch_ell_min = int(ell_numpy[batch_indices[0]])
@@ -998,49 +1183,53 @@ def hybrid_angular_power_spectra(
                 exact_batch_callback("complete", batch_ell_min, batch_ell_max)
             exact_shell_blocks.append(exact_shell_batch)
             exact_sum_blocks.append(exact_sum_batch)
-            exact_count = sum(block.shape[1] for block in exact_shell_blocks)
-            if exact_count < limber_match_width or ell_numpy[-1] <= ell_exact_cap:
-                continue
-            compared_indices = exact_indices_all[:exact_count]
+
+        exact_shell = np.concatenate(exact_shell_blocks, axis=1)
+        exact_sum = np.concatenate(exact_sum_blocks)
+        exact_indices = exact_indices_all
+        if ell_numpy[-1] <= ell_exact_cap:
+            shell_ell_high_ell_start.fill(int(ell_numpy[-1]) + 1)
+            summed_ell_limber_start = int(ell_numpy[-1]) + 1
+        else:
+            selected_exact_shell, shell_high_ell_mode = (
+                select_shell_high_ell_projection(
+                    exact_shell,
+                    np.stack(
+                        (
+                            np.asarray(shell_limber_linear)[:, exact_indices],
+                            np.asarray(shell_finite_width_linear)[:, exact_indices],
+                        )
+                    ),
+                    np.asarray(
+                        (
+                            LINEAR_HIGH_ELL_LIMBER,
+                            LINEAR_HIGH_ELL_FINITE_WIDTH,
+                        )
+                    ),
+                    comparison_width=limber_match_width,
+                )
+            )
+            shell_linear = jnp.where(
+                jnp.asarray(shell_high_ell_mode)[:, None]
+                == LINEAR_HIGH_ELL_FINITE_WIDTH,
+                shell_finite_width_linear,
+                shell_limber_linear,
+            )
             (
                 shell_transition,
                 summed_transition,
                 shell_match_error,
                 summed_match_error,
             ) = select_independent_limber_transitions(
-                ell_numpy[compared_indices],
-                np.concatenate(exact_shell_blocks, axis=1),
-                np.concatenate(exact_sum_blocks),
-                np.asarray(shell_linear)[:, compared_indices],
-                np.asarray(summed_linear)[compared_indices],
+                ell_numpy[exact_indices],
+                exact_shell,
+                exact_sum,
+                selected_exact_shell,
+                np.asarray(summed_linear)[exact_indices],
                 relative_tolerance=limber_match_rtol,
                 consecutive_multipoles=limber_match_width,
             )
-            if np.all(shell_transition >= 0) and summed_transition is not None:
-                break
-
-        exact_shell = np.concatenate(exact_shell_blocks, axis=1)
-        exact_sum = np.concatenate(exact_sum_blocks)
-        exact_indices = exact_indices_all[: exact_sum.size]
-        if ell_numpy[-1] <= ell_exact_cap:
-            shell_ell_limber_start.fill(int(ell_numpy[-1]) + 1)
-            summed_ell_limber_start = int(ell_numpy[-1]) + 1
-        else:
             if np.any(shell_transition < 0) or summed_transition is None:
-                (
-                    shell_transition,
-                    summed_transition,
-                    shell_match_error,
-                    summed_match_error,
-                ) = select_independent_limber_transitions(
-                    ell_numpy[exact_indices],
-                    exact_shell,
-                    exact_sum,
-                    np.asarray(shell_linear)[:, exact_indices],
-                    np.asarray(summed_linear)[exact_indices],
-                    relative_tolerance=limber_match_rtol,
-                    consecutive_multipoles=limber_match_width,
-                )
                 unmatched_shells = np.flatnonzero(shell_transition < 0)
                 if unmatched_shells.size and (
                     summed_transition is not None
@@ -1058,14 +1247,14 @@ def hybrid_angular_power_spectra(
                     ell_numpy[exact_indices[max(0, exact_indices.size - limber_match_width)]]
                 )
                 raise ValueError(
-                    "an exact and Limber linear projection did not converge before "
+                    "an exact and high-ell linear projection did not converge before "
                     f"ell_exact_cap={ell_exact_cap}: {worst_label}, "
                     f"final_window={final_window_start}-{ell_numpy[exact_indices[-1]]}, "
                     f"maximum_relative_error={worst_error:.6g}"
                 )
-            shell_ell_limber_start = shell_transition
+            shell_ell_high_ell_start = shell_transition
             summed_ell_limber_start = int(summed_transition)
-        for shell_index, transition in enumerate(shell_ell_limber_start):
+        for shell_index, transition in enumerate(shell_ell_high_ell_start):
             use_exact = exact_indices[ell_numpy[exact_indices] < transition]
             if use_exact.size:
                 exact_lookup = np.searchsorted(exact_indices, use_exact)
@@ -1133,9 +1322,10 @@ def hybrid_angular_power_spectra(
         summed_clustering=summed_clustering,
         summed_total=summed_clustering + summed_shot,
         shell_weights=weights,
-        shell_ell_limber_start=jnp.asarray(shell_ell_limber_start),
+        shell_ell_high_ell_start=jnp.asarray(shell_ell_high_ell_start),
         summed_ell_limber_start=jnp.asarray(summed_ell_limber_start),
         ell_limber_start=jnp.asarray(summed_ell_limber_start),
-        limber_match_shell_relative_error=jnp.asarray(shell_match_error),
+        high_ell_match_shell_relative_error=jnp.asarray(shell_match_error),
         limber_match_summed_relative_error=jnp.asarray(summed_match_error),
+        shell_linear_high_ell_mode=jnp.asarray(shell_high_ell_mode),
     )

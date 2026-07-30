@@ -41,4 +41,7 @@ srun --ntasks=1 --cpus-per-task="${SLURM_CPUS_PER_TASK:-112}" --cpu-bind=none \
 	--exact-workers 112 \
 	--exact-radial-order 512 \
 	--exact-radial-tail-periods 256 \
+	--finite-width-radial-order 256 \
+	--finite-width-los-order 512 \
+	--finite-width-tail-periods 40 \
 	--output-dir /leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/geppetto_reduced/angular_power_validation

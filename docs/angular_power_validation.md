@@ -56,20 +56,19 @@ C_\ell^{\rm lin}=\frac{2}{\pi}\int dk\,k^2P_0(k)
 \]
 
 The integral is restricted to the tabulated PINOCCHIO k range. Exact spectra
-are evaluated in batches until each shell and the count-weighted sum
-independently agree with Limber within one percent for 20 consecutive
-multipoles. Each spectrum switches at the first multipole in its own
-confirmation interval. The default exact search cap is `ell=512`; failure of
-any spectrum to converge before the cap aborts the validation and reports its
-maximum relative error over the final confirmation window.
+are evaluated in batches through the configured comparison cap. A transition
+is accepted only when the high-multipole approximation stays within one
+percent from that multipole through the complete exact range, with at least 20
+multipoles available. This prevents an accidental short agreement interval
+from hiding a later divergence. The default exact search cap is `ell=512`;
+failure of any spectrum to converge before the cap aborts the validation and
+reports its maximum relative error over the final comparison window.
 Independent exact multipoles can be evaluated concurrently with spawned worker
 processes selected by `--exact-workers`. Each child is restricted to one native
 thread without inheriting the parent OpenMP affinity, allowing the operating
 system to distribute workers across the task's allocated cores. The Leonardo
-submission example uses all 112 physical cores and checks the Limber criterion
-after each 112-multipole batch. The larger batch may calculate exact
-multipoles beyond the eventual transition, but allows the full node to work
-concurrently.
+submission example uses all 112 physical cores and checkpoints each
+112-multipole batch.
 
 Exact and Limber radial quadratures have separate controls. Limber retains the
 64-node `--radial-order` default. Exact projection defaults to
@@ -88,16 +87,51 @@ restores those multipoles and computes only missing batches. The checkpoint is
 removed after all final validation products have been written; it remains
 available after a timeout, node failure, or convergence error.
 
-Above the switch, and for the one-halo term at every multipole, the code uses
+Standard Limber does not reach one-percent accuracy by `ell=512` for the
+narrow, hard-edged radial shells in this light cone. For each individual
+shell, the validator therefore also computes the finite-width flat-sky
+projection
+
+\[
+C_{\ell,i}^{\rm fw} =
+\frac{1}{\pi\chi_{i,\rm mid}^2}
+\int_0^\infty dk_\parallel\,
+P_0\!\left(
+\sqrt{k_\parallel^2+
+\left[\frac{\ell+1/2}{\chi_{i,\rm mid}}\right]^2}
+\right)
+\left|\widetilde{W_iD}(k_\parallel)\right|^2,
+\]
+
+where
+
+\[
+\widetilde{W_iD}(k_\parallel)
+=
+\int_{\chi_{i,\rm lo}}^{\chi_{i,\rm hi}}
+d\chi\,W_i(\chi)D(\chi)e^{ik_\parallel\chi}.
+\]
+
+This keeps the Fourier width of the radial top hat instead of replacing it by
+a radial delta function. The integration defaults to 256 radial nodes, 512
+line-of-sight nodes, and 40 radial Fourier periods. Each shell selects either
+this finite-width result or standard Limber according to which has the smaller
+maximum error over the final exact-comparison window. The selected branch must
+then satisfy the stable one-percent transition test described above. The mode
+is recorded as `finite_width_flat_sky` or `limber` in the NPZ and diagnostics.
+
+For standard Limber, and for the one-halo term at every multipole, the code uses
 
 \[
 C_\ell=\int d\chi\,\frac{W_i(\chi)^2}{\chi^2}
 P\!\left(\frac{\ell+1/2}{\chi},z(\chi)\right).
 \]
 
-The spectrum of the summed map uses measured mean-count shell weights. Exact
-linear projection retains cross-shell correlations. Disjoint one-halo shells
-have no Limber cross term. A HEALPix pixel window is applied to clustering
+The spectrum of the summed map uses measured mean-count shell weights. Its
+broad radial window retains standard Limber as the high-multipole branch,
+while exact low-multipole projection retains cross-shell correlations.
+Disjoint one-halo shells have no Limber cross term. A HEALPix pixel window is
+applied to clustering
 terms.
 
 ## Power-Spectrum Normalization
@@ -153,14 +187,14 @@ deconvolution is performed.
 
 Outputs are:
 
-- `angular_power_theory.npz`: schema-v2 unbinned measured spectra, full-sky
+- `angular_power_theory.npz`: schema-v3 unbinned measured spectra, full-sky
   base components, mask-coupled comparison components, normalization closure,
-  and per-shell plus summed-spectrum exact-to-Limber diagnostics;
+  and exact-to-high-ell projection diagnostics, including each shell's mode;
 - `angular_power_binned.csv`: binned measured, linear, one-halo, shot-noise,
   clustering, and total spectra;
 - `angular_power_diagnostics.csv`: shell weights, map means, resolved HMF mass
   fractions, the one-halo/linear ratio at the lowest tabulated k, the
-  reconstructed `sigma8` closure, the exact-to-Limber transition, and the mask
+  reconstructed `sigma8` closure, high-ell transition and mode, and the mask
   convention.
 
 Install the validation and plotting extras and generate the publication figures with:

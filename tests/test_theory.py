@@ -15,9 +15,12 @@ from geppetto.io import (
 )
 from geppetto.profiles import NFWProfileParams, nfw_projected_surface_density
 from geppetto.theory import (
+    LINEAR_HIGH_ELL_FINITE_WIDTH,
+    LINEAR_HIGH_ELL_LIMBER,
     HaloMassFunctionTable,
     LinearTheoryTable,
     exact_linear_shell_cls,
+    finite_width_flat_sky_linear_shell_cls,
     gauss_legendre_rule,
     hybrid_angular_power_spectra,
     limber_shell_cls,
@@ -29,6 +32,7 @@ from geppetto.theory import (
     resolved_halo_mass_fraction,
     select_independent_limber_transitions,
     select_limber_transition,
+    select_shell_high_ell_projection,
     sigma8_from_linear_power,
     spherical_top_hat_window,
 )
@@ -227,7 +231,7 @@ def test_hybrid_spectra_shapes_weighted_one_halo_and_shot_noise():
     assert result.ell_limber_start == 20
 
 
-def test_select_limber_transition_requires_all_consecutive_matches():
+def test_select_limber_transition_rejects_a_transient_match():
     ell = np.arange(20, 30)
     limber_shell = np.ones((2, ell.size))
     limber_sum = np.ones(ell.size)
@@ -246,7 +250,7 @@ def test_select_limber_transition_requires_all_consecutive_matches():
         consecutive_multipoles=3,
     )
 
-    assert transition == 23
+    assert transition == 27
     np.testing.assert_allclose(shell_error, 0.0)
     assert summed_error == pytest.approx(0.0)
 
@@ -299,6 +303,27 @@ def test_independent_limber_transitions_allow_different_shell_switches():
     assert summed_error == pytest.approx(0.0)
 
 
+def test_shell_high_ell_projection_selects_smallest_final_error():
+    exact = np.ones((2, 5))
+    limber = exact.copy()
+    finite_width = exact.copy()
+    limber[0, -2:] *= 1.08
+    finite_width[1, -2:] *= 1.05
+
+    selected, modes = select_shell_high_ell_projection(
+        exact,
+        np.stack((limber, finite_width)),
+        np.asarray((LINEAR_HIGH_ELL_LIMBER, LINEAR_HIGH_ELL_FINITE_WIDTH)),
+        comparison_width=2,
+    )
+
+    np.testing.assert_allclose(selected, exact)
+    np.testing.assert_array_equal(
+        modes,
+        [LINEAR_HIGH_ELL_FINITE_WIDTH, LINEAR_HIGH_ELL_LIMBER],
+    )
+
+
 def test_hybrid_projection_applies_independent_transitions(monkeypatch):
     def fake_limber(ell, *args, **kwargs):
         values = jnp.ones_like(jnp.asarray(ell), dtype=jnp.float32)
@@ -316,6 +341,11 @@ def test_hybrid_projection_applies_independent_transitions(monkeypatch):
         return shell, summed
 
     monkeypatch.setattr(theory_module, "limber_shell_cls", fake_limber)
+    monkeypatch.setattr(
+        theory_module,
+        "finite_width_flat_sky_linear_shell_cls",
+        lambda ell, *args, **kwargs: jnp.ones_like(jnp.asarray(ell), dtype=jnp.float32),
+    )
     monkeypatch.setattr(theory_module, "exact_linear_shell_cls", fake_exact)
     result = hybrid_angular_power_spectra(
         jnp.arange(2, 11),
@@ -331,7 +361,7 @@ def test_hybrid_projection_applies_independent_transitions(monkeypatch):
         exact_batch_size=7,
     )
 
-    np.testing.assert_array_equal(result.shell_ell_limber_start, [4, 6])
+    np.testing.assert_array_equal(result.shell_ell_high_ell_start, [4, 6])
     assert result.summed_ell_limber_start == 5
     np.testing.assert_allclose(result.shell_linear[0], [2.0, 2.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0])
     np.testing.assert_allclose(result.shell_linear[1], [3.0, 3.0, 3.0, 3.0, 1.0, 1.0, 1.0, 1.0, 1.0])
@@ -351,6 +381,11 @@ def test_hybrid_projection_fails_when_limber_does_not_match_before_cap(monkeypat
         return values, np.full(len(ell), 1.2)
 
     monkeypatch.setattr(theory_module, "limber_shell_cls", fake_limber)
+    monkeypatch.setattr(
+        theory_module,
+        "finite_width_flat_sky_linear_shell_cls",
+        lambda ell, *args, **kwargs: jnp.ones_like(jnp.asarray(ell), dtype=jnp.float32),
+    )
     monkeypatch.setattr(theory_module, "exact_linear_shell_cls", fake_exact)
 
     with pytest.raises(ValueError, match=r"final_window=5-6"):
@@ -401,6 +436,50 @@ def test_exact_linear_projection_converges_to_limber_at_switch():
     assert exact.shape == (1, 1)
     np.testing.assert_allclose(exact_sum, exact[0], rtol=1.0e-8)
     np.testing.assert_allclose(exact[0], limber, rtol=0.1)
+
+
+def test_finite_width_projection_matches_exact_for_thin_shell():
+    pytest.importorskip("scipy")
+    case = Path(__file__).parents[1] / "examples" / "pinocchio_geppetto_case"
+    theory = read_pinocchio_cosmology_table(case / "pinocchio.example.cosmology.out")
+    ell = np.asarray([100])
+    exact, _ = exact_linear_shell_cls(
+        ell,
+        np.asarray([1.9]),
+        np.asarray([2.0]),
+        theory,
+        radial_order=256,
+        radial_tail_periods=80,
+    )
+    finite_width = finite_width_flat_sky_linear_shell_cls(
+        jnp.asarray(ell),
+        1.9,
+        2.0,
+        theory,
+        radial_quadrature=gauss_legendre_rule(128),
+        line_of_sight_quadrature=gauss_legendre_rule(256),
+        line_of_sight_tail_periods=40,
+    )
+
+    def projected_sum(amplitude):
+        scaled = theory._replace(
+            power_mpc_h3=amplitude * theory.power_mpc_h3,
+        )
+        return jnp.sum(
+            finite_width_flat_sky_linear_shell_cls(
+                jnp.asarray(ell),
+                1.9,
+                2.0,
+                scaled,
+                radial_quadrature=gauss_legendre_rule(32),
+                line_of_sight_quadrature=gauss_legendre_rule(64),
+                line_of_sight_tail_periods=20,
+            )
+        )
+
+    assert finite_width.shape == (1,)
+    assert jnp.isfinite(jax.grad(projected_sum)(jnp.asarray(1.0)))
+    np.testing.assert_allclose(finite_width, exact[0], rtol=0.01)
 
 
 def test_exact_near_observer_shell_requires_converged_radial_order():

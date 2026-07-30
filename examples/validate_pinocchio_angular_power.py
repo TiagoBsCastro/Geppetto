@@ -39,6 +39,8 @@ from geppetto.io import (
 )
 from geppetto.profiles import NFWProfileParams
 from geppetto.theory import (
+    LINEAR_HIGH_ELL_FINITE_WIDTH,
+    LINEAR_HIGH_ELL_LIMBER,
     LinearTheoryTable,
     comoving_distance_mpc_h,
     exact_linear_shell_cls,
@@ -49,7 +51,7 @@ from geppetto.theory import (
     sigma8_from_linear_power,
 )
 
-VALIDATION_SCHEMA_VERSION = 2
+VALIDATION_SCHEMA_VERSION = 3
 EXACT_CHECKPOINT_SCHEMA_VERSION = 1
 THEORY_COMPONENTS = ("linear", "one_halo", "particle_shot_noise")
 
@@ -93,6 +95,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--radial-order", type=int, default=64)
     parser.add_argument("--exact-radial-order", type=int, default=512)
     parser.add_argument("--exact-radial-tail-periods", type=float, default=256.0)
+    parser.add_argument("--finite-width-radial-order", type=int, default=256)
+    parser.add_argument("--finite-width-los-order", type=int, default=512)
+    parser.add_argument("--finite-width-tail-periods", type=float, default=40.0)
     parser.add_argument("--profile-order", type=int, default=64)
     parser.add_argument("--exact-relative-tolerance", type=float, default=1.0e-4)
     parser.add_argument("--sigma8-rtol", type=float, default=0.01)
@@ -630,6 +635,8 @@ def run_validation(args: argparse.Namespace) -> tuple[Path, Path, Path]:
         args.ell_bin_width < 1
         or args.radial_order < 2
         or args.exact_radial_order < 2
+        or args.finite_width_radial_order < 2
+        or args.finite_width_los_order < 2
         or args.profile_order < 2
     ):
         raise ValueError("bin width and quadrature orders must be positive")
@@ -640,6 +647,7 @@ def run_validation(args: argparse.Namespace) -> tuple[Path, Path, Path]:
         or args.exact_batch_size < 1
         or args.exact_workers < 1
         or args.exact_radial_tail_periods < 40.0
+        or args.finite_width_tail_periods <= 0.0
         or args.sigma8_rtol <= 0.0
         or args.mask_sht_iterations < 0
     ):
@@ -855,16 +863,28 @@ def run_validation(args: argparse.Namespace) -> tuple[Path, Path, Path]:
         radial_order=args.radial_order,
         exact_radial_order=args.exact_radial_order,
         exact_radial_tail_periods=args.exact_radial_tail_periods,
+        finite_width_radial_order=args.finite_width_radial_order,
+        finite_width_line_of_sight_order=args.finite_width_los_order,
+        finite_width_tail_periods=args.finite_width_tail_periods,
         profile_order=args.profile_order,
         exact_relative_tolerance=args.exact_relative_tolerance,
     )
 
     theory_np = {field: np.asarray(getattr(theory, field)) for field in theory._fields}
+    high_ell_mode = np.asarray(theory_np["shell_linear_high_ell_mode"], dtype=np.int64)
+    mode_names = np.where(
+        high_ell_mode == LINEAR_HIGH_ELL_FINITE_WIDTH,
+        "finite_width_flat_sky",
+        "limber",
+    )
     print(
-        "[theory] Limber starts at "
+        "[theory] high-ell projection starts at "
         f"ell={int(theory_np['summed_ell_limber_start'])} for the summed spectrum and "
-        f"ell={int(np.min(theory_np['shell_ell_limber_start']))}-"
-        f"{int(np.max(theory_np['shell_ell_limber_start']))} across shells; "
+        f"ell={int(np.min(theory_np['shell_ell_high_ell_start']))}-"
+        f"{int(np.max(theory_np['shell_ell_high_ell_start']))} across shells; "
+        f"shell modes: finite_width_flat_sky="
+        f"{int(np.count_nonzero(high_ell_mode == LINEAR_HIGH_ELL_FINITE_WIDTH))}, "
+        f"limber={int(np.count_nonzero(high_ell_mode == LINEAR_HIGH_ELL_LIMBER))}; "
         f"theory completed in {perf_counter() - theory_started:.1f}s",
         flush=True,
     )
@@ -918,27 +938,33 @@ def run_validation(args: argparse.Namespace) -> tuple[Path, Path, Path]:
         summed_one_halo=theory_np["summed_one_halo"],
         summed_particle_shot_noise=theory_np["summed_particle_shot_noise"],
         shell_weights=theory_np["shell_weights"],
-        shell_ell_limber_start=theory_np["shell_ell_limber_start"],
+        shell_ell_high_ell_start=theory_np["shell_ell_high_ell_start"],
         summed_ell_limber_start=theory_np["summed_ell_limber_start"],
         ell_limber_start=theory_np["ell_limber_start"],
-        limber_match_shell_relative_error=theory_np[
-            "limber_match_shell_relative_error"
+        high_ell_match_shell_relative_error=theory_np[
+            "high_ell_match_shell_relative_error"
         ],
         limber_match_summed_relative_error=theory_np[
             "limber_match_summed_relative_error"
         ],
+        shell_linear_high_ell_mode=mode_names,
         reference_sigma8=np.asarray(reference_sigma8),
         reconstructed_sigma8=np.asarray(reconstructed_sigma8),
         sigma8_relative_error=np.asarray(sigma8_relative_error),
         sigma8_reference_source=np.asarray(sigma8_source),
         sigma8_relative_tolerance=np.asarray(args.sigma8_rtol),
-        limber_match_relative_tolerance=np.asarray(args.limber_match_rtol),
-        limber_match_width=np.asarray(args.limber_match_width, dtype=np.int64),
+        high_ell_match_relative_tolerance=np.asarray(args.limber_match_rtol),
+        high_ell_match_width=np.asarray(args.limber_match_width, dtype=np.int64),
         ell_exact_cap=np.asarray(args.ell_exact_cap, dtype=np.int64),
         exact_batch_size=np.asarray(args.exact_batch_size, dtype=np.int64),
         exact_workers=np.asarray(args.exact_workers, dtype=np.int64),
         exact_radial_order=np.asarray(args.exact_radial_order, dtype=np.int64),
         exact_radial_tail_periods=np.asarray(args.exact_radial_tail_periods),
+        finite_width_radial_order=np.asarray(
+            args.finite_width_radial_order, dtype=np.int64
+        ),
+        finite_width_los_order=np.asarray(args.finite_width_los_order, dtype=np.int64),
+        finite_width_tail_periods=np.asarray(args.finite_width_tail_periods),
         exact_relative_tolerance=np.asarray(args.exact_relative_tolerance),
         mask_sht_iterations=np.asarray(args.mask_sht_iterations, dtype=np.int64),
         mask_pixel_sha256=np.asarray(
@@ -1006,19 +1032,25 @@ def run_validation(args: argparse.Namespace) -> tuple[Path, Path, Path]:
                 "sigma8_relative_error": sigma8_relative_error,
                 "sigma8_reference_source": sigma8_source,
                 "ell_limber_start": int(theory_np["summed_ell_limber_start"]),
-                "shell_ell_limber_start": int(theory_np["shell_ell_limber_start"][index]),
+                "shell_ell_high_ell_start": int(
+                    theory_np["shell_ell_high_ell_start"][index]
+                ),
                 "summed_ell_limber_start": int(theory_np["summed_ell_limber_start"]),
-                "limber_match_shell_relative_error": theory_np[
-                    "limber_match_shell_relative_error"
+                "high_ell_match_shell_relative_error": theory_np[
+                    "high_ell_match_shell_relative_error"
                 ][index],
                 "limber_match_summed_relative_error": theory_np[
                     "limber_match_summed_relative_error"
                 ],
+                "shell_linear_high_ell_mode": mode_names[index],
                 "ell_exact_cap": args.ell_exact_cap,
                 "exact_batch_size": args.exact_batch_size,
                 "exact_workers": args.exact_workers,
                 "exact_radial_order": args.exact_radial_order,
                 "exact_radial_tail_periods": args.exact_radial_tail_periods,
+                "finite_width_radial_order": args.finite_width_radial_order,
+                "finite_width_los_order": args.finite_width_los_order,
+                "finite_width_tail_periods": args.finite_width_tail_periods,
                 "exact_relative_tolerance": args.exact_relative_tolerance,
                 "mask_sht_iterations": args.mask_sht_iterations,
                 "theory_convention": "constant_deprojected_pseudo_cl_over_f_sky",

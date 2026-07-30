@@ -42,10 +42,12 @@ P_mm(k,z) = P_linear(k,z) + P_1h(k,z)
 The linear spectrum, growth, distances, and background density are read from
 PINOCCHIO's `*.cosmology.out`. The one-halo term uses measured `*.mf.out` mass
 functions and the same concentration relation and mass definition recorded in
-`painted_nfw_manifest.csv`. Exact spherical-Bessel projection is retained until
-all shells agree with Limber within one percent over 20 consecutive multipoles;
-the default exact search cap is `ell=512`. The one-halo term uses Limber at all
-multipoles.
+`painted_nfw_manifest.csv`. Exact spherical-Bessel projection validates each
+shell's high-multipole continuation, selected between standard Limber and a
+finite-width flat-sky projection that retains the hard radial shell window.
+The selected branch must stay within one percent through the exact comparison
+range; the default exact search cap is `ell=512`. The broad summed window and
+the one-halo term use Limber at high multipoles.
 
 Run the map comparison after painting all segments:
 

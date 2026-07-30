@@ -304,6 +304,9 @@ def test_angular_power_validation_end_to_end(tmp_path, monkeypatch):
             radial_order=4,
             exact_radial_order=8,
             exact_radial_tail_periods=40.0,
+            finite_width_radial_order=8,
+            finite_width_los_order=8,
+            finite_width_tail_periods=8.0,
             profile_order=6,
             exact_relative_tolerance=1.0e-3,
             sigma8_rtol=0.01,
@@ -318,7 +321,8 @@ def test_angular_power_validation_end_to_end(tmp_path, monkeypatch):
         assert result["observed_shell"].shape == (2, 6)
         assert result["shell_linear_pseudo_over_fsky"].shape == (2, 6)
         assert result["summed_linear_pseudo_over_fsky"].shape == (6,)
-        assert int(result["validation_schema_version"]) == 2
+        assert int(result["validation_schema_version"]) == 3
+        assert result["shell_linear_high_ell_mode"].shape == (2,)
         assert result["sigma8_reference_source"].item() == "cosmology_power_spectrum"
         assert float(result["sigma8_relative_error"]) == pytest.approx(0.0)
     assert len(outputs[1].read_text(encoding="utf-8").splitlines()) > 2

@@ -41,7 +41,7 @@ def _write_validation_products(path):
     summed_total = summed_linear + summed_one_halo + summed_shot
     np.savez_compressed(
         path / "angular_power_theory.npz",
-        validation_schema_version=np.asarray(2),
+        validation_schema_version=np.asarray(3),
         observed_shell=shell_total * np.array([[0.9], [0.95], [1.05], [1.1]]),
         observed_sum=summed_total,
         ell=ell,
@@ -56,6 +56,10 @@ def _write_validation_products(path):
         reconstructed_sigma8=np.asarray(0.809),
         sigma8_relative_error=np.asarray(abs(0.809 / 0.81 - 1.0)),
         ell_limber_start=np.asarray(6),
+        shell_ell_high_ell_start=np.asarray([5, 5, 6, 6]),
+        shell_linear_high_ell_mode=np.asarray(
+            ["finite_width_flat_sky", "finite_width_flat_sky", "limber", "limber"]
+        ),
     )
 
     rows = []
@@ -104,6 +108,10 @@ def _write_validation_products(path):
                 "reconstructed_sigma8": 0.809,
                 "sigma8_relative_error": abs(0.809 / 0.81 - 1.0),
                 "ell_limber_start": 6,
+                "shell_ell_high_ell_start": 5 if index < 2 else 6,
+                "shell_linear_high_ell_mode": (
+                    "finite_width_flat_sky" if index < 2 else "limber"
+                ),
                 "theory_convention": "constant_deprojected_pseudo_cl_over_f_sky",
             }
             for index, (z_lo, z_hi) in enumerate(

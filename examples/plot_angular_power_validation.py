@@ -27,6 +27,8 @@ NPZ_KEYS = (
     "reconstructed_sigma8",
     "sigma8_relative_error",
     "ell_limber_start",
+    "shell_ell_high_ell_start",
+    "shell_linear_high_ell_mode",
 )
 
 BINNED_COLUMNS = (
@@ -56,6 +58,8 @@ DIAGNOSTIC_COLUMNS = (
     "reconstructed_sigma8",
     "sigma8_relative_error",
     "ell_limber_start",
+    "shell_ell_high_ell_start",
+    "shell_linear_high_ell_mode",
     "theory_convention",
 )
 
@@ -183,7 +187,7 @@ def load_validation_data(input_dir: Path) -> AngularPowerValidationData:
                     f"{theory_path} is a legacy validation archive; rerun angular validation"
                 )
             schema = np.asarray(source["validation_schema_version"])
-            if schema.shape != () or int(schema) != 2:
+            if schema.shape != () or int(schema) != 3:
                 raise ValueError(
                     f"{theory_path} uses an unsupported validation schema; "
                     "rerun angular validation"
