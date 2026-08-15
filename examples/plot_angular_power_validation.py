@@ -13,6 +13,8 @@ import numpy as np
 
 NPZ_KEYS = (
     "validation_schema_version",
+    "linear_power_evolution",
+    "one_halo_compensation",
     "observed_shell",
     "observed_sum",
     "ell",
@@ -60,6 +62,8 @@ DIAGNOSTIC_COLUMNS = (
     "ell_limber_start",
     "shell_ell_high_ell_start",
     "shell_linear_high_ell_mode",
+    "linear_power_evolution",
+    "one_halo_compensation",
     "theory_convention",
 )
 
@@ -187,10 +191,9 @@ def load_validation_data(input_dir: Path) -> AngularPowerValidationData:
                     f"{theory_path} is a legacy validation archive; rerun angular validation"
                 )
             schema = np.asarray(source["validation_schema_version"])
-            if schema.shape != () or int(schema) != 3:
+            if schema.shape != () or int(schema) != 4:
                 raise ValueError(
-                    f"{theory_path} uses an unsupported validation schema; "
-                    "rerun angular validation"
+                    f"{theory_path} uses an unsupported validation schema; rerun angular validation"
                 )
             missing = set(NPZ_KEYS) - set(source.files)
             if missing:
@@ -199,13 +202,15 @@ def load_validation_data(input_dir: Path) -> AngularPowerValidationData:
     except OSError as exc:
         raise ValueError(f"cannot read validation archive: {theory_path}") from exc
 
+    power_evolution = str(np.asarray(arrays["linear_power_evolution"]).item())
+    if power_evolution not in {"scalar_growth", "scale_dependent_camb"}:
+        raise ValueError(f"{theory_path} declares an unsupported linear-power evolution")
+    compensation = str(np.asarray(arrays["one_halo_compensation"]).item())
+    if compensation != "lagrangian_top_hat_difference":
+        raise ValueError(f"{theory_path} declares an unsupported one-halo compensation")
+
     ell = _require_vector("ell", arrays["ell"])
-    if (
-        ell.size == 0
-        or np.any(ell < 0)
-        or np.any(ell != np.rint(ell))
-        or np.any(np.diff(ell) <= 0)
-    ):
+    if ell.size == 0 or np.any(ell < 0) or np.any(ell != np.rint(ell)) or np.any(np.diff(ell) <= 0):
         raise ValueError("NPZ multipoles must be non-negative increasing integers")
     n_ell = ell.size
     summed = {
@@ -227,9 +232,7 @@ def load_validation_data(input_dir: Path) -> AngularPowerValidationData:
         ),
     }
     summed["summed_total"] = (
-        summed["summed_linear"]
-        + summed["summed_one_halo"]
-        + summed["summed_particle_shot_noise"]
+        summed["summed_linear"] + summed["summed_one_halo"] + summed["summed_particle_shot_noise"]
     )
     shell_weights = _require_vector("shell_weights", arrays["shell_weights"])
     expected_shell_shape = (shell_weights.size, n_ell)
@@ -241,9 +244,7 @@ def load_validation_data(input_dir: Path) -> AngularPowerValidationData:
     ):
         values = np.asarray(arrays[key])
         if values.shape != expected_shell_shape or not np.all(np.isfinite(values)):
-            raise ValueError(
-                f"NPZ array {key!r} must be finite with shape {expected_shell_shape}"
-            )
+            raise ValueError(f"NPZ array {key!r} must be finite with shape {expected_shell_shape}")
 
     shell_linear = arrays["shell_linear_pseudo_over_fsky"]
     shell_one_halo = arrays["shell_one_halo_pseudo_over_fsky"]
@@ -272,13 +273,9 @@ def load_validation_data(input_dir: Path) -> AngularPowerValidationData:
     )
     if np.any(bin_ell_max < bin_ell_min) or np.any(np.diff(bin_ell_effective) <= 0.0):
         raise ValueError("summed multipole bins must be ordered and non-empty")
-    if np.any(bin_ell_effective < bin_ell_min) or np.any(
-        bin_ell_effective >= bin_ell_max + 1
-    ):
+    if np.any(bin_ell_effective < bin_ell_min) or np.any(bin_ell_effective >= bin_ell_max + 1):
         raise ValueError("effective multipoles must lie inside their bins")
-    f_sky_values = np.asarray(
-        [_finite_float(row, "f_sky", binned_path) for row in summed_rows]
-    )
+    f_sky_values = np.asarray([_finite_float(row, "f_sky", binned_path) for row in summed_rows])
     if not np.allclose(f_sky_values, f_sky_values[0], rtol=0.0, atol=1.0e-12):
         raise ValueError("binned rows do not share one f_sky value")
     f_sky = float(f_sky_values[0])
@@ -311,6 +308,10 @@ def load_validation_data(input_dir: Path) -> AngularPowerValidationData:
             raise ValueError("diagnostic and binned f_sky values disagree")
         if row["theory_convention"] != convention:
             raise ValueError("diagnostic table uses an unsupported theory convention")
+        if row["linear_power_evolution"] != power_evolution:
+            raise ValueError("diagnostic and NPZ linear-power evolution values disagree")
+        if row["one_halo_compensation"] != compensation:
+            raise ValueError("diagnostic and NPZ one-halo compensation values disagree")
         for key in ("reference_sigma8", "reconstructed_sigma8", "sigma8_relative_error"):
             if not np.isclose(
                 _finite_float(row, key, diagnostics_path),
@@ -462,9 +463,7 @@ def _load_plotting() -> tuple[Any, Any]:
         import matplotlib.pyplot as plt
         from matplotlib.colors import TwoSlopeNorm
     except ImportError as exc:  # pragma: no cover - optional install
-        raise ImportError(
-            "figure generation requires matplotlib; install geppetto[plot]"
-        ) from exc
+        raise ImportError("figure generation requires matplotlib; install geppetto[plot]") from exc
     return plt, TwoSlopeNorm
 
 
@@ -611,12 +610,8 @@ def render_validation_figures(
         ratio_axis.set_xlabel(r"Multipole $\ell$")
         ratio_axis.set_ylabel("Measured / theory")
         ratio_axis.legend(frameon=False, loc="lower left")
-        ratio_axis.text(
-            0.015, 0.91, "(b)", transform=ratio_axis.transAxes, va="top", weight="bold"
-        )
-        outputs.extend(
-            _save_figure(figure, output_dir / "angular_power_summed", png_dpi)
-        )
+        ratio_axis.text(0.015, 0.91, "(b)", transform=ratio_axis.transAxes, va="top", weight="bold")
+        outputs.extend(_save_figure(figure, output_dir / "angular_power_summed", png_dpi))
         plt.close(figure)
 
         selected_shells = representative_shell_indices(data, representative_redshifts)
@@ -642,9 +637,7 @@ def render_validation_figures(
         for panel_index, (shell_index, grid_cell) in enumerate(
             zip(selected_shells, outer_grid, strict=True)
         ):
-            panel_grid = grid_cell.subgridspec(
-                2, 1, height_ratios=(2.7, 1.0), hspace=0.05
-            )
+            panel_grid = grid_cell.subgridspec(2, 1, height_ratios=(2.7, 1.0), hspace=0.05)
             spectrum_axis = figure.add_subplot(panel_grid[0])
             ratio_axis = figure.add_subplot(panel_grid[1], sharex=spectrum_axis)
             spectrum_axis.loglog(
@@ -688,16 +681,12 @@ def render_validation_figures(
                 (
                     scale[visible] * data.shell_linear[shell_index, visible],
                     scale[visible] * data.shell_one_halo[shell_index, visible],
-                    scale[visible]
-                    * data.shell_particle_shot_noise[shell_index, visible],
+                    scale[visible] * data.shell_particle_shot_noise[shell_index, visible],
                 )
             )
             spectrum_axis.set_ylim(
                 0.7 * float(np.min(panel_components[panel_components > 0.0])),
-                1.4
-                * float(
-                    np.max(bin_scale * data.binned_observed_shell[shell_index])
-                ),
+                1.4 * float(np.max(bin_scale * data.binned_observed_shell[shell_index])),
             )
             spectrum_axis.tick_params(labelbottom=False)
             spectrum_axis.set_title(
@@ -734,9 +723,7 @@ def render_validation_figures(
                 linewidth=0.7,
             )
             ratio_axis.set_xscale("log")
-            ratio_axis.set_xlim(
-                float(data.bin_ell_min[0]), float(data.bin_ell_max[-1] + 1)
-            )
+            ratio_axis.set_xlim(float(data.bin_ell_min[0]), float(data.bin_ell_max[-1] + 1))
             ratio_axis.set_ylim(
                 1.0 - representative_ratio_extent,
                 1.0 + representative_ratio_extent,
@@ -789,9 +776,7 @@ def render_validation_figures(
         axis.set_ylabel("Redshift $z$")
         colorbar = figure.colorbar(image, ax=axis, pad=0.02, extend="both")
         colorbar.set_label("Measured / theory")
-        outputs.extend(
-            _save_figure(figure, output_dir / "angular_power_shell_residuals", png_dpi)
-        )
+        outputs.extend(_save_figure(figure, output_dir / "angular_power_shell_residuals", png_dpi))
         plt.close(figure)
 
     return tuple(outputs)

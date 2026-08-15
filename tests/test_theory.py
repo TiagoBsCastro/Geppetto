@@ -18,6 +18,7 @@ from geppetto.theory import (
     LINEAR_HIGH_ELL_FINITE_WIDTH,
     LINEAR_HIGH_ELL_LIMBER,
     HaloMassFunctionTable,
+    LinearPowerEvolutionTable,
     LinearTheoryTable,
     exact_linear_shell_cls,
     finite_width_flat_sky_linear_shell_cls,
@@ -61,6 +62,16 @@ def _mass_function() -> HaloMassFunctionTable:
     )
 
 
+def _separable_power_evolution() -> LinearPowerEvolutionTable:
+    theory = _linear_theory()
+    scale_factor = jnp.linspace(0.5, 1.0, 33)
+    return LinearPowerEvolutionTable(
+        scale_factor=scale_factor,
+        k_h_mpc=theory.k_h_mpc,
+        power_mpc_h3=scale_factor[:, None] ** 2 * theory.power_mpc_h3[None, :],
+    )
+
+
 def test_linear_power_uses_pinocchio_growth_squared():
     theory = _linear_theory()
     present = linear_matter_power(jnp.asarray(0.1), 0.0, theory)
@@ -68,6 +79,38 @@ def test_linear_power_uses_pinocchio_growth_squared():
 
     assert present == pytest.approx(1000.0)
     assert redshift_one == pytest.approx(250.0)
+
+
+def test_linear_power_uses_scale_dependent_pinocchio_table_when_supplied():
+    theory = _linear_theory()
+    evolution = LinearPowerEvolutionTable(
+        scale_factor=jnp.asarray([0.5, 1.0]),
+        k_h_mpc=jnp.asarray([0.01, 0.1]),
+        power_mpc_h3=jnp.asarray([[100.0, 400.0], [1000.0, 1000.0]]),
+    )
+
+    power = linear_matter_power(
+        jnp.asarray([0.01, 0.1]),
+        jnp.asarray(1.0),
+        theory,
+        evolution,
+    )
+    gradient = jax.grad(
+        lambda amplitude: jnp.sum(
+            linear_matter_power(
+                jnp.asarray([0.01, 0.1]),
+                jnp.asarray(1.0),
+                theory,
+                evolution._replace(
+                    power_mpc_h3=amplitude * evolution.power_mpc_h3
+                ),
+            )
+        )
+    )(1.0)
+
+    np.testing.assert_allclose(power, [100.0, 400.0])
+    assert jnp.isfinite(gradient)
+    assert gradient > 0.0
 
 
 def test_top_hat_sigma8_is_finite_differentiable_and_scales_with_power():
@@ -160,6 +203,30 @@ def test_one_halo_power_shape_gradient_and_ngp_independence():
     assert ngp_gradient == pytest.approx(0.0, abs=1.0e-8)
 
 
+def test_compensated_one_halo_power_vanishes_as_k_to_fourth():
+    power_at_zero = one_halo_matter_power(
+        jnp.asarray(0.0),
+        0.2,
+        _linear_theory(),
+        _mass_function(),
+        ConcentrationParams(),
+        profile_quadrature=gauss_legendre_rule(32),
+    )
+    k = jnp.asarray([0.005, 0.01])
+    low_k_power = one_halo_matter_power(
+        k,
+        0.2,
+        _linear_theory(),
+        _mass_function(),
+        ConcentrationParams(),
+        profile_quadrature=gauss_legendre_rule(32),
+    )
+    logarithmic_slope = jnp.log(low_k_power[1] / low_k_power[0]) / jnp.log(2.0)
+
+    assert power_at_zero == pytest.approx(0.0, abs=1.0e-20)
+    assert logarithmic_slope == pytest.approx(4.0, abs=0.08)
+
+
 def test_resolved_mass_fraction_uses_only_measured_hmf_support():
     fraction = resolved_halo_mass_fraction(0.0, _mass_function(), Cosmology(omega_m=0.3))
     assert jnp.isfinite(fraction)
@@ -198,6 +265,30 @@ def test_limber_shell_cls_shape_and_concentration_gradient():
     assert jnp.all(jnp.isfinite(linear))
     assert jnp.all(jnp.isfinite(one_halo))
     assert jnp.isfinite(jax.grad(one_halo_sum)(5.71))
+
+
+def test_scale_dependent_limber_reduces_to_scalar_growth_for_separable_power():
+    arguments = (
+        jnp.asarray([20, 40, 60]),
+        0.1,
+        0.2,
+        _linear_theory(),
+        _mass_function(),
+        ConcentrationParams(),
+    )
+    scalar, _ = limber_shell_cls(
+        *arguments,
+        radial_quadrature=gauss_legendre_rule(16),
+        profile_quadrature=gauss_legendre_rule(8),
+    )
+    scale_dependent, _ = limber_shell_cls(
+        *arguments,
+        power_evolution=_separable_power_evolution(),
+        radial_quadrature=gauss_legendre_rule(16),
+        profile_quadrature=gauss_legendre_rule(8),
+    )
+
+    np.testing.assert_allclose(scale_dependent, scalar, rtol=5.0e-4)
 
 
 def test_hybrid_spectra_shapes_weighted_one_halo_and_shot_noise():
@@ -363,8 +454,12 @@ def test_hybrid_projection_applies_independent_transitions(monkeypatch):
 
     np.testing.assert_array_equal(result.shell_ell_high_ell_start, [4, 6])
     assert result.summed_ell_limber_start == 5
-    np.testing.assert_allclose(result.shell_linear[0], [2.0, 2.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0])
-    np.testing.assert_allclose(result.shell_linear[1], [3.0, 3.0, 3.0, 3.0, 1.0, 1.0, 1.0, 1.0, 1.0])
+    np.testing.assert_allclose(
+        result.shell_linear[0], [2.0, 2.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+    )
+    np.testing.assert_allclose(
+        result.shell_linear[1], [3.0, 3.0, 3.0, 3.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+    )
     np.testing.assert_allclose(
         result.summed_linear,
         [2.0, 2.0, 2.0, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5],
@@ -482,6 +577,58 @@ def test_finite_width_projection_matches_exact_for_thin_shell():
     np.testing.assert_allclose(finite_width, exact[0], rtol=0.01)
 
 
+def test_scale_dependent_finite_width_reduces_to_separable_growth():
+    ell = jnp.asarray([40, 80])
+    common = {
+        "radial_quadrature": gauss_legendre_rule(32),
+        "line_of_sight_quadrature": gauss_legendre_rule(64),
+        "line_of_sight_tail_periods": 20,
+    }
+    scalar = finite_width_flat_sky_linear_shell_cls(
+        ell,
+        0.1,
+        0.2,
+        _linear_theory(),
+        **common,
+    )
+    scale_dependent = finite_width_flat_sky_linear_shell_cls(
+        ell,
+        0.1,
+        0.2,
+        _linear_theory(),
+        power_evolution=_separable_power_evolution(),
+        **common,
+    )
+
+    np.testing.assert_allclose(scale_dependent, scalar, rtol=8.0e-4)
+
+
+def test_scale_dependent_exact_projection_reduces_to_separable_growth():
+    pytest.importorskip("scipy")
+    arguments = (
+        np.asarray([20]),
+        np.asarray([0.1]),
+        np.asarray([0.2]),
+        _linear_theory(),
+    )
+    scalar = exact_linear_shell_cls(
+        *arguments,
+        radial_order=32,
+        radial_tail_periods=40,
+        relative_tolerance=1.0e-3,
+    )
+    scale_dependent = exact_linear_shell_cls(
+        *arguments,
+        power_evolution=_separable_power_evolution(),
+        radial_order=32,
+        radial_tail_periods=40,
+        relative_tolerance=1.0e-3,
+    )
+
+    np.testing.assert_allclose(scale_dependent[0], scalar[0], rtol=1.0e-3)
+    np.testing.assert_allclose(scale_dependent[1], scalar[1], rtol=1.0e-3)
+
+
 def test_exact_near_observer_shell_requires_converged_radial_order():
     pytest.importorskip("scipy")
     case = Path(__file__).parents[1] / "examples" / "pinocchio_geppetto_case"
@@ -521,6 +668,23 @@ def test_exact_projection_rejects_too_short_radial_tail():
             np.asarray([0.2]),
             _linear_theory(),
             radial_tail_periods=39.0,
+        )
+
+
+def test_exact_projection_rejects_invalid_power_evolution_axes():
+    evolution = _separable_power_evolution()._replace(
+        k_h_mpc=jnp.asarray([0.0, 0.01, 0.1, 1.0, 10.0])
+    )
+
+    with pytest.raises(ValueError, match="positive finite P"):
+        exact_linear_shell_cls(
+            np.asarray([2]),
+            np.asarray([0.1]),
+            np.asarray([0.2]),
+            _linear_theory(),
+            power_evolution=evolution,
+            radial_order=8,
+            radial_tail_periods=40.0,
         )
 
 
@@ -586,10 +750,13 @@ def test_nfw_3d_transform_matches_projected_profile_hankel_transform():
     k = 0.5
     radial_weight = np.asarray(radius * sigma)
     normalization = np.trapezoid(radial_weight, np.asarray(radius))
-    hankel = np.trapezoid(
-        radial_weight * scipy.j0(k * np.asarray(radius)),
-        np.asarray(radius),
-    ) / normalization
+    hankel = (
+        np.trapezoid(
+            radial_weight * scipy.j0(k * np.asarray(radius)),
+            np.asarray(radius),
+        )
+        / normalization
+    )
     transform = nfw_fourier_profile(
         jnp.asarray(k),
         jnp.asarray([mass]),

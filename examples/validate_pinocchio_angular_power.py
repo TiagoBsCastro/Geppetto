@@ -33,6 +33,7 @@ from geppetto.io import (
     PinocchioCatalogError,
     healpix_pixel_area_sr,
     read_pinocchio_cosmology_table,
+    read_pinocchio_linear_power_evolution,
     read_pinocchio_mass_function_series,
     read_pinocchio_mass_map_fits,
     read_pinocchio_parameter_file,
@@ -41,6 +42,7 @@ from geppetto.profiles import NFWProfileParams
 from geppetto.theory import (
     LINEAR_HIGH_ELL_FINITE_WIDTH,
     LINEAR_HIGH_ELL_LIMBER,
+    LinearPowerEvolutionTable,
     LinearTheoryTable,
     comoving_distance_mpc_h,
     exact_linear_shell_cls,
@@ -51,8 +53,8 @@ from geppetto.theory import (
     sigma8_from_linear_power,
 )
 
-VALIDATION_SCHEMA_VERSION = 3
-EXACT_CHECKPOINT_SCHEMA_VERSION = 1
+VALIDATION_SCHEMA_VERSION = 4
+EXACT_CHECKPOINT_SCHEMA_VERSION = 2
 THEORY_COMPONENTS = ("linear", "one_halo", "particle_shot_noise")
 
 
@@ -115,6 +117,7 @@ def exact_checkpoint_fingerprint(
     z_hi: np.ndarray,
     shell_weights: np.ndarray,
     linear_theory: LinearTheoryTable,
+    power_evolution: LinearPowerEvolutionTable | None = None,
     *,
     radial_order: int,
     radial_tail_periods: float,
@@ -127,6 +130,13 @@ def exact_checkpoint_fingerprint(
     digest.update(f"radial_order={radial_order}".encode())
     digest.update(f"radial_tail_periods={radial_tail_periods:.17g}".encode())
     digest.update(f"relative_tolerance={relative_tolerance:.17g}".encode())
+    digest.update(
+        (
+            "linear_power_evolution=scalar_growth"
+            if power_evolution is None
+            else "linear_power_evolution=scale_dependent"
+        ).encode()
+    )
     for value in (
         z_lo,
         z_hi,
@@ -143,6 +153,16 @@ def exact_checkpoint_fingerprint(
         digest.update(array.dtype.str.encode())
         digest.update(np.asarray(array.shape, dtype=np.int64).tobytes())
         digest.update(array.view(np.uint8))
+    if power_evolution is not None:
+        for value in (
+            power_evolution.scale_factor,
+            power_evolution.k_h_mpc,
+            power_evolution.power_mpc_h3,
+        ):
+            array = np.ascontiguousarray(np.asarray(value))
+            digest.update(array.dtype.str.encode())
+            digest.update(np.asarray(array.shape, dtype=np.int64).tobytes())
+            digest.update(array.view(np.uint8))
     return digest.hexdigest()
 
 
@@ -232,7 +252,9 @@ def exact_batch_with_checkpoint(
                 temporary_path.unlink(missing_ok=True)
         cached_lookup = {int(value): index for index, value in enumerate(cached_ell)}
 
-    requested_indices = np.asarray([cached_lookup[int(value)] for value in requested], dtype=np.int64)
+    requested_indices = np.asarray(
+        [cached_lookup[int(value)] for value in requested], dtype=np.int64
+    )
     return cached_shell[:, requested_indices], cached_sum[requested_indices], cache_hit
 
 
@@ -271,9 +293,7 @@ def load_manifest(path: Path) -> list[dict[str, str]]:
     if "nfw_profile_support" in rows[0]:
         support = {row["nfw_profile_support"].strip() for row in rows}
         if support != {"hard_3d_r_delta_los_projection"}:
-            raise ValueError(
-                "theory validation requires hard_3d_r_delta_los_projection maps"
-            )
+            raise ValueError("theory validation requires hard_3d_r_delta_los_projection maps")
     if "nfw_paint_mode" in rows[0]:
         paint_mode = {row["nfw_paint_mode"].strip() for row in rows}
         if paint_mode != {"adaptive_global_support"}:
@@ -509,9 +529,7 @@ def sigma8_reference(
         return sigma8_input, "parameter_file"
     if not np.isfinite(header_sigma8):
         if not np.isfinite(reconstructed_sigma8) or reconstructed_sigma8 <= 0.0:
-            raise ValueError(
-                "cosmology-table sigma8 fallback must be positive and finite"
-            )
+            raise ValueError("cosmology-table sigma8 fallback must be positive and finite")
         return reconstructed_sigma8, "cosmology_power_spectrum"
     return header_sigma8, "mass_map_COS_S8"
 
@@ -581,6 +599,38 @@ def _write_csv(path: Path, rows: list[dict[str, object]]) -> None:
         writer.writerows(rows)
 
 
+def validate_power_evolution_consistency(
+    linear_theory: LinearTheoryTable,
+    power_evolution: LinearPowerEvolutionTable,
+    *,
+    relative_tolerance: float = 5.0e-3,
+) -> float:
+    """Validate the CAMB ``z=0`` spectrum against ``*.cosmology.out``."""
+
+    reference_k = np.asarray(linear_theory.k_h_mpc, dtype=np.float64)
+    reference_power = np.asarray(linear_theory.power_mpc_h3, dtype=np.float64)
+    evolution_k = np.asarray(power_evolution.k_h_mpc, dtype=np.float64)
+    present_power = np.asarray(power_evolution.power_mpc_h3[-1], dtype=np.float64)
+    overlap = (reference_k >= evolution_k[0]) & (reference_k <= evolution_k[-1])
+    if np.count_nonzero(overlap) < 2:
+        raise ValueError("CAMB and cosmology-table power spectra have no usable k overlap")
+    interpolated = np.exp(
+        np.interp(
+            np.log(reference_k[overlap]),
+            np.log(evolution_k),
+            np.log(present_power),
+        )
+    )
+    relative_error = np.max(np.abs(interpolated / reference_power[overlap] - 1.0))
+    if not np.isfinite(relative_error) or relative_error > relative_tolerance:
+        raise ValueError(
+            "CAMB and cosmology-table z=0 power spectra disagree: "
+            f"maximum_relative_error={relative_error:.6g}, "
+            f"tolerance={relative_tolerance:.6g}"
+        )
+    return float(relative_error)
+
+
 def run_validation(args: argparse.Namespace) -> tuple[Path, Path, Path]:
     """Run the map/theory comparison and return its three output paths."""
 
@@ -596,6 +646,7 @@ def run_validation(args: argparse.Namespace) -> tuple[Path, Path, Path]:
 
     run_metadata = read_pinocchio_parameter_file(args.params)
     linear_theory = read_pinocchio_cosmology_table(args.cosmology_table)
+    power_evolution = read_pinocchio_linear_power_evolution(run_metadata)
     if not np.isclose(run_metadata.cosmology.h, linear_theory.h, rtol=1.0e-6, atol=0.0):
         raise ValueError("parameter-file and cosmology-table Hubble100 values disagree")
     if not np.isclose(
@@ -605,6 +656,25 @@ def run_validation(args: argparse.Namespace) -> tuple[Path, Path, Path]:
         atol=0.0,
     ):
         raise ValueError("parameter-file and cosmology-table Omega0 values disagree")
+    if power_evolution is None:
+        power_evolution_mode = "scalar_growth"
+        power_evolution_closure_error = np.nan
+        print(
+            "[theory] no PINOCCHIO CAMB P(k,z) series; using scalar growth",
+            flush=True,
+        )
+    else:
+        power_evolution_mode = "scale_dependent_camb"
+        power_evolution_closure_error = validate_power_evolution_consistency(
+            linear_theory,
+            power_evolution,
+        )
+        print(
+            "[theory] using scale-dependent PINOCCHIO CAMB P(k,z); "
+            f"z=0 closure maximum_relative_error="
+            f"{power_evolution_closure_error:.3e}",
+            flush=True,
+        )
     reconstructed_sigma8 = float(np.asarray(sigma8_from_linear_power(linear_theory)))
     if not np.isfinite(reconstructed_sigma8) or reconstructed_sigma8 <= 0.0:
         raise ValueError("reconstructed sigma8 must be positive and finite")
@@ -616,6 +686,10 @@ def run_validation(args: argparse.Namespace) -> tuple[Path, Path, Path]:
     table_z_max = 1.0 / float(np.min(np.asarray(linear_theory.scale_factor))) - 1.0
     if float(np.max(z_hi)) > table_z_max:
         raise ValueError("shell redshift exceeds the PINOCCHIO cosmology table")
+    if power_evolution is not None:
+        power_table_z_max = 1.0 / float(np.min(np.asarray(power_evolution.scale_factor))) - 1.0
+        if float(np.max(z_hi)) > power_table_z_max:
+            raise ValueError("shell redshift exceeds the PINOCCHIO CAMB power table")
 
     first_mass_map_path = _resolve_input_path(rows[0]["mass_map_path"], args.manifest)
     first_mass_map = read_pinocchio_mass_map_fits(first_mass_map_path)
@@ -785,6 +859,7 @@ def run_validation(args: argparse.Namespace) -> tuple[Path, Path, Path]:
         z_hi,
         shell_weights,
         linear_theory,
+        power_evolution,
         radial_order=args.exact_radial_order,
         radial_tail_periods=args.exact_radial_tail_periods,
         relative_tolerance=args.exact_relative_tolerance,
@@ -811,6 +886,7 @@ def run_validation(args: argparse.Namespace) -> tuple[Path, Path, Path]:
             z_lo,
             z_hi,
             linear_theory,
+            power_evolution=power_evolution,
             shell_weights=shell_weights,
             radial_order=args.exact_radial_order,
             radial_tail_periods=args.exact_radial_tail_periods,
@@ -848,6 +924,7 @@ def run_validation(args: argparse.Namespace) -> tuple[Path, Path, Path]:
         concentration,
         profiles,
         shell_weights=jnp.asarray(shell_weights),
+        power_evolution=power_evolution,
         pixel_window=jnp.asarray(pixel_window),
         mean_uncollapsed_counts_per_pixel=jnp.asarray(mean_uncollapsed),
         mean_total_counts_per_pixel=jnp.asarray(mean_total),
@@ -904,7 +981,9 @@ def run_validation(args: argparse.Namespace) -> tuple[Path, Path, Path]:
     mass_fraction = np.asarray(
         [resolved_halo_mass_fraction(z, mass_function, cosmology) for z in midpoint_z]
     )
-    diagnostic_k = float(np.asarray(linear_theory.k_h_mpc)[0])
+    diagnostic_k = float(
+        np.asarray(linear_theory.k_h_mpc if power_evolution is None else power_evolution.k_h_mpc)[0]
+    )
     low_k_one_halo = np.asarray(
         [
             one_halo_matter_power(
@@ -920,7 +999,15 @@ def run_validation(args: argparse.Namespace) -> tuple[Path, Path, Path]:
         ]
     )
     low_k_linear = np.asarray(
-        [linear_matter_power(jnp.asarray(diagnostic_k), z, linear_theory) for z in midpoint_z]
+        [
+            linear_matter_power(
+                jnp.asarray(diagnostic_k),
+                z,
+                linear_theory,
+                power_evolution,
+            )
+            for z in midpoint_z
+        ]
     )
 
     theory_path = args.output_dir / "angular_power_theory.npz"
@@ -928,6 +1015,9 @@ def run_validation(args: argparse.Namespace) -> tuple[Path, Path, Path]:
     np.savez_compressed(
         theory_path,
         validation_schema_version=np.asarray(VALIDATION_SCHEMA_VERSION, dtype=np.int64),
+        linear_power_evolution=np.asarray(power_evolution_mode),
+        linear_power_z0_max_relative_error=np.asarray(power_evolution_closure_error),
+        one_halo_compensation=np.asarray("lagrangian_top_hat_difference"),
         observed_shell=observed_shell,
         observed_sum=observed_sum,
         ell=theory_np["ell"],
@@ -941,12 +1031,8 @@ def run_validation(args: argparse.Namespace) -> tuple[Path, Path, Path]:
         shell_ell_high_ell_start=theory_np["shell_ell_high_ell_start"],
         summed_ell_limber_start=theory_np["summed_ell_limber_start"],
         ell_limber_start=theory_np["ell_limber_start"],
-        high_ell_match_shell_relative_error=theory_np[
-            "high_ell_match_shell_relative_error"
-        ],
-        limber_match_summed_relative_error=theory_np[
-            "limber_match_summed_relative_error"
-        ],
+        high_ell_match_shell_relative_error=theory_np["high_ell_match_shell_relative_error"],
+        limber_match_summed_relative_error=theory_np["limber_match_summed_relative_error"],
         shell_linear_high_ell_mode=mode_names,
         reference_sigma8=np.asarray(reference_sigma8),
         reconstructed_sigma8=np.asarray(reconstructed_sigma8),
@@ -960,9 +1046,7 @@ def run_validation(args: argparse.Namespace) -> tuple[Path, Path, Path]:
         exact_workers=np.asarray(args.exact_workers, dtype=np.int64),
         exact_radial_order=np.asarray(args.exact_radial_order, dtype=np.int64),
         exact_radial_tail_periods=np.asarray(args.exact_radial_tail_periods),
-        finite_width_radial_order=np.asarray(
-            args.finite_width_radial_order, dtype=np.int64
-        ),
+        finite_width_radial_order=np.asarray(args.finite_width_radial_order, dtype=np.int64),
         finite_width_los_order=np.asarray(args.finite_width_los_order, dtype=np.int64),
         finite_width_tail_periods=np.asarray(args.finite_width_tail_periods),
         exact_relative_tolerance=np.asarray(args.exact_relative_tolerance),
@@ -1024,6 +1108,9 @@ def run_validation(args: argparse.Namespace) -> tuple[Path, Path, Path]:
                 "one_halo_over_linear_at_diagnostic_k": (
                     low_k_one_halo[index] / low_k_linear[index]
                 ),
+                "linear_power_evolution": power_evolution_mode,
+                "linear_power_z0_max_relative_error": power_evolution_closure_error,
+                "one_halo_compensation": "lagrangian_top_hat_difference",
                 "f_sky": f_sky,
                 "nside": nside,
                 "theta_resolution_rad": theta_resolution,
@@ -1032,9 +1119,7 @@ def run_validation(args: argparse.Namespace) -> tuple[Path, Path, Path]:
                 "sigma8_relative_error": sigma8_relative_error,
                 "sigma8_reference_source": sigma8_source,
                 "ell_limber_start": int(theory_np["summed_ell_limber_start"]),
-                "shell_ell_high_ell_start": int(
-                    theory_np["shell_ell_high_ell_start"][index]
-                ),
+                "shell_ell_high_ell_start": int(theory_np["shell_ell_high_ell_start"][index]),
                 "summed_ell_limber_start": int(theory_np["summed_ell_limber_start"]),
                 "high_ell_match_shell_relative_error": theory_np[
                     "high_ell_match_shell_relative_error"

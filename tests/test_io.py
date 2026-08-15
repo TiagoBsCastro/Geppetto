@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -17,6 +18,7 @@ from geppetto.io import (
     read_pinocchio_hubble_table,
     read_pinocchio_lightcone_catalog,
     read_pinocchio_lightcone_light_catalog,
+    read_pinocchio_linear_power_evolution,
     read_pinocchio_mass_function,
     read_pinocchio_mass_function_series,
     read_pinocchio_mass_map_fits,
@@ -74,6 +76,73 @@ def test_read_pinocchio_cosmology_table_converts_units_and_trims_future(tmp_path
     np.testing.assert_allclose(table.chi_mpc_h, [500.0, 0.0])
     np.testing.assert_allclose(table.k_h_mpc, [0.2, 0.4, 0.6])
     np.testing.assert_allclose(table.power_mpc_h3, [12.5, 25.0, 37.5])
+
+
+def test_read_pinocchio_camb_power_evolution_from_parameter_paths(tmp_path):
+    camb_dir = tmp_path / "CambFiles"
+    camb_dir.mkdir()
+    (camb_dir / "redshifts.dat").write_text("000 1.0\n001 0.0\n", encoding="utf-8")
+    (camb_dir / "pk_cb_000.dat").write_text(
+        "0.01 25.0\n0.1 5.0\n",
+        encoding="utf-8",
+    )
+    (camb_dir / "pk_cb_001.dat").write_text(
+        "0.01 100.0\n0.1 20.0\n",
+        encoding="utf-8",
+    )
+    parameters = tmp_path / "params.txt"
+    parameters.write_text(
+        "\n".join(
+            (
+                "BoxSize 100",
+                "BoxInH100",
+                "GridSize 10",
+                "Omega0 0.3",
+                "Hubble100 0.7",
+                "Sigma8 0.8",
+                "FileWithInputSpectrum CAMBTable",
+                "InputSpectrum_UnitLength_in_cm 0",
+                "CAMBMatterFile CambFiles/pk_cb",
+                "CAMBRedshiftsFile CambFiles/redshifts.dat",
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    metadata = read_pinocchio_parameter_file(parameters)
+    evolution = read_pinocchio_linear_power_evolution(metadata)
+
+    assert evolution is not None
+    np.testing.assert_allclose(evolution.scale_factor, [0.5, 1.0])
+    np.testing.assert_allclose(evolution.k_h_mpc, [0.01, 0.1])
+    np.testing.assert_allclose(evolution.power_mpc_h3, [[25.0, 5.0], [100.0, 20.0]])
+
+    missing_unit = dict(metadata.parameters)
+    missing_unit.pop("InputSpectrum_UnitLength_in_cm")
+    with pytest.raises(PinocchioCatalogError, match="missing InputSpectrum_UnitLength_in_cm"):
+        read_pinocchio_linear_power_evolution(replace(metadata, parameters=missing_unit))
+
+
+def test_single_pinocchio_input_spectrum_has_no_power_evolution(tmp_path):
+    parameters = tmp_path / "params.txt"
+    parameters.write_text(
+        "\n".join(
+            (
+                "BoxSize 100",
+                "BoxInH100",
+                "GridSize 10",
+                "Omega0 0.3",
+                "Hubble100 0.7",
+                "Sigma8 0.8",
+                "FileWithInputSpectrum input_power.dat",
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    evolution = read_pinocchio_linear_power_evolution(read_pinocchio_parameter_file(parameters))
+
+    assert evolution is None
 
 
 def _write_hmf(path: Path, redshift: float, rows: list[tuple[float, float, int]]) -> None:
@@ -234,9 +303,7 @@ def test_validate_tabulated_projected_profile_params_accepts_valid_params():
         ),
     ],
 )
-def test_validate_tabulated_projected_profile_params_rejects_invalid_params(
-    profile_params, match
-):
+def test_validate_tabulated_projected_profile_params_rejects_invalid_params(profile_params, match):
     with pytest.raises(PinocchioCatalogError, match=match):
         validate_tabulated_projected_profile_params(profile_params)
 
@@ -649,9 +716,7 @@ def test_read_pinocchio_parameter_file_converts_physical_box_to_mpc_h(tmp_path):
     metadata = read_pinocchio_parameter_file(path)
 
     expected_box_size = 70.0
-    expected_particle_mass = (
-        rho_mean_comoving(metadata.cosmology) * expected_box_size**3 / 10.0**3
-    )
+    expected_particle_mass = rho_mean_comoving(metadata.cosmology) * expected_box_size**3 / 10.0**3
     assert not metadata.box_in_h100
     assert metadata.sigma8_input == 0.0
     np.testing.assert_allclose(metadata.box_size_mpc_h, expected_box_size)

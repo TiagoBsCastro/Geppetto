@@ -28,6 +28,7 @@ from geppetto.profiles import NFWProfileParams, TabulatedProjectedProfileParams
 from geppetto.theory import (
     AngularPowerSpectra,
     HaloMassFunctionTable,
+    LinearPowerEvolutionTable,
     LinearTheoryTable,
     exact_linear_shell_cls,
     hybrid_angular_power_spectra,
@@ -50,6 +51,7 @@ __all__ = [
     "HaloMassFunctionTable",
     "LightconeHaloCatalog",
     "LightconeSparseStencil",
+    "LinearPowerEvolutionTable",
     "LinearTheoryTable",
     "NFWProfileParams",
     "TabulatedProjectedProfileParams",

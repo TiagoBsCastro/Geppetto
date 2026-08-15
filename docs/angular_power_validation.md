@@ -18,13 +18,40 @@ with
 
 \[
 P_{1h}(k,z)=\int d\ln M\,\frac{dn}{d\ln M}
-\left(\frac{M}{\bar\rho_m}\right)^2 |u(k|M,z)|^2.
+\left(\frac{M}{\bar\rho_m}\right)^2
+\left|u(k|M,z)-W_{\rm TH}(kR_L)\right|^2,
 \]
 
-`P_linear` is read from the PINOCCHIO cosmology table at `z=0` and scaled by
-the tabulated growth factor squared. It serves as the large-scale/two-halo
-approximation. This release does not introduce a halo-bias relation, a smooth
-residual component, or one-halo compensation.
+where
+
+\[
+R_L(M)=\left(\frac{3M}{4\pi\bar\rho_m}\right)^{1/3}
+\]
+
+is the comoving Lagrangian radius and `W_TH` is the spherical top-hat Fourier
+window. The difference represents rearranging each halo's mass from its
+Lagrangian patch into the NFW profile. Both transforms equal one at zero
+wavenumber, so the one-halo contribution is `O(k^4)` rather than an
+unphysical constant on scales where PINOCCHIO already supplies the
+large-scale field.
+
+When `FileWithInputSpectrum CAMBTable` is present in the PINOCCHIO parameter
+file, GEPPETTO resolves `CAMBMatterFile` and `CAMBRedshiftsFile` relative to
+that file and reads the complete tabulated `P(k,z)` evolution. This preserves
+the scale-dependent growth of the spectrum actually used by PINOCCHIO. The
+reader currently requires `InputSpectrum_UnitLength_in_cm=0`, for which CAMB
+tables use `h/Mpc` and `(Mpc/h)^3`. It verifies the `z=0` table against the
+power stored in `*.cosmology.out`. Runs with one input spectrum retain the
+fallback
+
+\[
+P_{\rm lin}(k,z)=D^2(z)P_{\rm lin}(k,0).
+\]
+
+The linear term is the large-scale/two-halo approximation. This release does
+not introduce a halo-bias relation, a nonlinear two-halo correction, or an
+explicit halo-exclusion model; those omissions can matter in the transition
+regime but do not justify a white one-halo floor at low k.
 
 The measured second column of every requested PINOCCHIO `*.mf.out` file is used
 for `dn/dM`. A file is required at every shell-boundary redshift. Measured
@@ -40,6 +67,19 @@ concentration parameters. Halos below the recorded angular NGP threshold use
 `u=1`. Supersampling and native painting approximate the same continuum
 resolved profile and therefore do not define separate theory kernels.
 
+### Large-Scale Closure Test
+
+The change above follows a controlled paired-fixed test, not a fit to the
+validation plot. Four independent phase pairs were compared over the first
+seven full-sky shells (`0.23 < z < 0.49`) using only modes with
+`k=(ell+0.5)/chi < 0.05 h/Mpc`. Against scalar-growth linear theory, the
+pair-mean map amplitude was `0.991997 +/- 0.001584`, a 5.05-sigma deficit.
+Using the tabulated scale-dependent evolution changed it to
+`0.998711 +/- 0.001593`, consistent with unity. Adding the former
+uncompensated one-halo floor lowered the total-theory ratio to
+`0.987577 +/- 0.001572`. Thus the controlled maps do not lose large-scale
+power: the two statistically resolved effects were both in the theory model.
+
 ## Angular Projection
 
 For a shell bounded by `chi_lo` and `chi_hi`, the count-overdensity window is
@@ -52,8 +92,19 @@ The linear term uses the exact spherical-Bessel expression at low multipoles:
 
 \[
 C_\ell^{\rm lin}=\frac{2}{\pi}\int dk\,k^2P_0(k)
-\left|\int d\chi\,W_i(\chi)D(\chi)j_\ell(k\chi)\right|^2.
+\left|\int d\chi\,W_i(\chi)T(k,\chi)j_\ell(k\chi)\right|^2,
 \]
+
+with
+
+\[
+T(k,\chi)=\sqrt{\frac{P_{\rm lin}(k,z(\chi))}{P_0(k)}}.
+\]
+
+For a single input spectrum this reduces exactly to the scalar growth
+`T=D`. For a CAMB series, eight fixed temporal interpolation nodes per shell
+represent the smooth scale-dependent transfer while the configured radial
+quadrature resolves the spherical Bessel kernel.
 
 The integral is restricted to the tabulated PINOCCHIO k range. Exact spectra
 are evaluated in batches through the configured comparison cap. A transition
@@ -96,29 +147,32 @@ projection
 C_{\ell,i}^{\rm fw} =
 \frac{1}{\pi\chi_{i,\rm mid}^2}
 \int_0^\infty dk_\parallel\,
-P_0\!\left(
-\sqrt{k_\parallel^2+
-\left[\frac{\ell+1/2}{\chi_{i,\rm mid}}\right]^2}
-\right)
-\left|\widetilde{W_iD}(k_\parallel)\right|^2,
+\left|\widetilde{W_i\sqrt{P}}(k_\parallel,k_\perp)\right|^2,
 \]
 
 where
 
 \[
-\widetilde{W_iD}(k_\parallel)
+\widetilde{W_i\sqrt{P}}(k_\parallel,k_\perp)
 =
 \int_{\chi_{i,\rm lo}}^{\chi_{i,\rm hi}}
-d\chi\,W_i(\chi)D(\chi)e^{ik_\parallel\chi}.
+d\chi\,W_i(\chi)
+\sqrt{P_{\rm lin}\!\left(\sqrt{k_\parallel^2+k_\perp^2},z(\chi)\right)}
+e^{ik_\parallel\chi},
+\qquad
+k_\perp=\frac{\ell+1/2}{\chi_{i,\rm mid}}.
 \]
 
-This keeps the Fourier width of the radial top hat instead of replacing it by
-a radial delta function. The integration defaults to 256 radial nodes, 512
-line-of-sight nodes, and 40 radial Fourier periods. Each shell selects either
-this finite-width result or standard Limber according to which has the smaller
-maximum error over the final exact-comparison window. The selected branch must
-then satisfy the stable one-percent transition test described above. The mode
-is recorded as `finite_width_flat_sky` or `limber` in the NPZ and diagnostics.
+This keeps both the Fourier width of the radial top hat and scale-dependent
+evolution instead of replacing the shell by a radial delta function. The
+integration defaults to 256 radial nodes, 512 line-of-sight nodes, and 40
+radial Fourier periods. The same eight-node temporal interpolation avoids a
+prohibitive full multipole-by-line-of-sight-by-radial allocation. Each shell
+selects either this finite-width result or standard Limber according to which
+has the smaller maximum error over the final exact-comparison window. The
+selected branch must then satisfy the stable one-percent transition test
+described above. The mode is recorded as `finite_width_flat_sky` or `limber`
+in the NPZ and diagnostics.
 
 For standard Limber, and for the one-halo term at every multipole, the code uses
 
@@ -162,6 +216,9 @@ The cosmology reader performs these PINOCCHIO-to-GEPPETTO conversions:
 - wavenumber: `Mpc^-1 -> h/Mpc` by dividing by `h`;
 - power: `Mpc^3 -> (Mpc/h)^3` by multiplying by `h^3`.
 
+The optional CAMB series is already in `h/Mpc` and `(Mpc/h)^3` when
+`InputSpectrum_UnitLength_in_cm=0`, so no second unit conversion is applied.
+
 For uncollapsed mean count `n_uncollapsed`, total mean count `n_total`, and
 pixel area `Omega_pix`, the particle-count shot-noise level is
 
@@ -187,9 +244,10 @@ deconvolution is performed.
 
 Outputs are:
 
-- `angular_power_theory.npz`: schema-v3 unbinned measured spectra, full-sky
+- `angular_power_theory.npz`: schema-v4 unbinned measured spectra, full-sky
   base components, mask-coupled comparison components, normalization closure,
-  and exact-to-high-ell projection diagnostics, including each shell's mode;
+  exact-to-high-ell projection diagnostics, the linear-evolution source, and
+  the one-halo compensation convention, including each shell's mode;
 - `angular_power_binned.csv`: binned measured, linear, one-halo, shot-noise,
   clustering, and total spectra;
 - `angular_power_diagnostics.csv`: shell weights, map means, resolved HMF mass
@@ -220,7 +278,8 @@ DCGP node memory explicitly because the mask, harmonic coefficients, MASTER
 workspace, and spawned exact-projection runtimes coexist even though the input
 maps use compact pixel rows.
 
-The uncompensated one-halo term approaches a constant at low k. Its diagnostic
-ratio must be inspected before interpreting large-scale agreement. The model
-is deliberately labelled `linear + one_halo`; it is not a formally normalized
-halo-bias calculation of the full two-halo term.
+The compensated one-halo diagnostic ratio should approach zero toward the
+lowest tabulated k. The model remains deliberately labelled
+`linear + one_halo`: compensation restores the required large-scale limit but
+does not turn it into a calibrated nonlinear halo-bias, exclusion, or
+two-halo-transition model.

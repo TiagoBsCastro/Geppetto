@@ -1,9 +1,10 @@
 """Matter-power and angular-spectrum theory for PINOCCHIO map validation.
 
-The differentiable part of this module implements a linear-plus-one-halo
-matter-power model. PINOCCHIO supplies the tabulated linear spectrum and
-measured halo mass functions; GEPPETTO supplies the NFW mass definition and
-concentration relation used by the map painter.
+The differentiable part of this module implements a linear-plus-compensated-
+one-halo matter-power model. PINOCCHIO supplies the tabulated linear spectrum,
+its optional scale-dependent time evolution, and measured halo mass
+functions; GEPPETTO supplies the NFW mass definition and concentration
+relation used by the map painter.
 
 All masses are ``Msun/h``, comoving distances are ``Mpc/h``, wavenumbers are
 ``h/Mpc``, three-dimensional power spectra are ``(Mpc/h)^3``, and angular
@@ -47,6 +48,21 @@ class LinearTheoryTable(NamedTuple):
     chi_mpc_h: Array
     omega_m: Array
     growth: Array
+    k_h_mpc: Array
+    power_mpc_h3: Array
+
+
+class LinearPowerEvolutionTable(NamedTuple):
+    """Scale-dependent PINOCCHIO linear power in GEPPETTO units.
+
+    ``scale_factor`` and ``k_h_mpc`` are increasing. ``power_mpc_h3`` has
+    shape ``(n_scale_factor, n_k)`` and is measured in ``(Mpc/h)^3``. This
+    explicit pytree is optional because PINOCCHIO runs supplied with a single
+    input spectrum only provide the separable growth approximation stored in
+    :class:`LinearTheoryTable`.
+    """
+
+    scale_factor: Array
     k_h_mpc: Array
     power_mpc_h3: Array
 
@@ -102,6 +118,7 @@ class AngularPowerSpectra(NamedTuple):
 
 LINEAR_HIGH_ELL_LIMBER = 0
 LINEAR_HIGH_ELL_FINITE_WIDTH = 1
+LINEAR_EVOLUTION_INTERPOLATION_ORDER = 8
 
 
 def gauss_legendre_rule(order: int) -> QuadratureRule:
@@ -128,6 +145,24 @@ def _linear_interpolate(x: Array, x_grid: Array, values: Array) -> Array:
     expand = (None,) * (values.ndim - 1)
     fraction = fraction[(...,) + expand]
     return value0 + fraction * (value1 - value0)
+
+
+def _lagrange_basis(x: Array, nodes: Array) -> Array:
+    """Evaluate fixed-node Lagrange basis polynomials with JAX primitives."""
+
+    values = jnp.asarray(x)
+    interpolation_nodes = jnp.asarray(nodes)
+    columns = []
+    for index in range(interpolation_nodes.shape[0]):
+        numerator = jnp.ones_like(values)
+        denominator = jnp.asarray(1.0, dtype=values.dtype)
+        for other in range(interpolation_nodes.shape[0]):
+            if other == index:
+                continue
+            numerator = numerator * (values - interpolation_nodes[other])
+            denominator = denominator * (interpolation_nodes[index] - interpolation_nodes[other])
+        columns.append(numerator / denominator)
+    return jnp.stack(columns, axis=-1)
 
 
 def growth_factor(redshift: Array, linear_theory: LinearTheoryTable) -> Array:
@@ -173,15 +208,63 @@ def linear_matter_power(
     k_h_mpc: Array,
     redshift: Array,
     linear_theory: LinearTheoryTable,
+    power_evolution: LinearPowerEvolutionTable | None = None,
 ) -> Array:
     """Return linear matter power in ``(Mpc/h)^3``.
 
     The caller must validate that requested wavenumbers and redshifts lie
     within the PINOCCHIO tables. Values are clipped at table boundaries inside
-    this JAX-compatible kernel to avoid dynamic host-side exceptions.
+    this JAX-compatible kernel to avoid dynamic host-side exceptions. When a
+    scale-dependent table is supplied, interpolation is bilinear in scale
+    factor and log wavenumber for log power. Otherwise the PINOCCHIO ``z=0``
+    spectrum is scaled by its tabulated scalar growth factor squared.
     """
 
     k = jnp.asarray(k_h_mpc)
+    if power_evolution is not None:
+        scale_factor = 1.0 / (1.0 + jnp.asarray(redshift))
+        k, scale_factor = jnp.broadcast_arrays(k, scale_factor)
+        log_k_grid = jnp.log(power_evolution.k_h_mpc)
+        log_k = jnp.clip(jnp.log(k), log_k_grid[0], log_k_grid[-1])
+        scale_factor = jnp.clip(
+            scale_factor,
+            power_evolution.scale_factor[0],
+            power_evolution.scale_factor[-1],
+        )
+
+        k_upper = jnp.clip(
+            jnp.searchsorted(log_k_grid, log_k, side="right"),
+            1,
+            log_k_grid.shape[0] - 1,
+        )
+        k_lower = k_upper - 1
+        scale_upper = jnp.clip(
+            jnp.searchsorted(
+                power_evolution.scale_factor,
+                scale_factor,
+                side="right",
+            ),
+            1,
+            power_evolution.scale_factor.shape[0] - 1,
+        )
+        scale_lower = scale_upper - 1
+        k_fraction = (log_k - log_k_grid[k_lower]) / (log_k_grid[k_upper] - log_k_grid[k_lower])
+        scale_fraction = (scale_factor - power_evolution.scale_factor[scale_lower]) / (
+            power_evolution.scale_factor[scale_upper] - power_evolution.scale_factor[scale_lower]
+        )
+        log_power = jnp.log(power_evolution.power_mpc_h3)
+        lower_scale_power = (
+            log_power[scale_lower, k_lower] * (1.0 - k_fraction)
+            + log_power[scale_lower, k_upper] * k_fraction
+        )
+        upper_scale_power = (
+            log_power[scale_upper, k_lower] * (1.0 - k_fraction)
+            + log_power[scale_upper, k_upper] * k_fraction
+        )
+        return jnp.exp(
+            lower_scale_power * (1.0 - scale_fraction) + upper_scale_power * scale_fraction
+        )
+
     log_power = _linear_interpolate(
         jnp.log(k),
         jnp.log(linear_theory.k_h_mpc),
@@ -202,7 +285,10 @@ def spherical_top_hat_window(x: Array) -> Array:
     series = 1.0 - value_squared / 10.0 + value_squared**2 / 280.0
     safe_value = jnp.where(value == 0.0, 1.0, value)
     direct = 3.0 * (jnp.sin(value) - value * jnp.cos(value)) / safe_value**3
-    return jnp.where(jnp.abs(value) < 1.0e-3, series, direct)
+    # The direct numerator subtracts two nearly equal float32 values well
+    # beyond machine precision for x << 0.1. The fourth-order series is still
+    # accurate to better than 1e-10 at this switch.
+    return jnp.where(jnp.abs(value) < 0.1, series, direct)
 
 
 def linear_sigma_r(radius_mpc_h: Array, linear_theory: LinearTheoryTable) -> Array:
@@ -355,12 +441,20 @@ def one_halo_matter_power(
     theta_resolution_rad: float | None = None,
     profile_quadrature: QuadratureRule | None = None,
 ) -> Array:
-    """Return measured-HMF one-halo power in ``(Mpc/h)^3``.
+    """Return compensated measured-HMF one-halo power in ``(Mpc/h)^3``.
 
     When ``theta_resolution_rad`` is supplied, halos below the map's angular
     NGP threshold use ``u=1``. The branch depends only on mass, redshift,
     distance, and profile support, never concentration. Supersampled and native
     resolved halos share the continuum NFW transform.
+
+    Each halo is treated as a mass rearrangement from its mean-density
+    Lagrangian top-hat patch, so the stochastic contribution is proportional
+    to ``[u_NFW(k|M) - W_TH(k R_L)]^2``. Here
+    ``R_L = [3 M / (4 pi rho_mean)]^(1/3)`` is in comoving ``Mpc/h``. This
+    parameter-free compensation enforces the mass- and momentum-conserving
+    ``P_1h = O(k^4)`` limit instead of adding an unphysical white-noise floor
+    to the PINOCCHIO large-scale map.
     """
 
     mass = jnp.exp(mass_function.log_mass_msun_h)
@@ -388,7 +482,11 @@ def one_halo_matter_power(
         profile = jnp.where(theta[None, :] < theta_resolution_rad, 1.0, profile)
 
     mean_density = rho_mean_comoving(cosmology)
-    integrand = dndlnm[None, :] * (mass[None, :] / mean_density) ** 2 * profile**2
+    lagrangian_radius = (3.0 * mass / (4.0 * jnp.pi * mean_density)) ** (1.0 / 3.0)
+    k_values = jnp.atleast_1d(jnp.asarray(k_h_mpc))
+    lagrangian_window = spherical_top_hat_window(k_values[:, None] * lagrangian_radius[None, :])
+    compensated_profile = profile - lagrangian_window
+    integrand = dndlnm[None, :] * (mass[None, :] / mean_density) ** 2 * compensated_profile**2
     result = _trapezoid_last_axis(integrand, mass_function.log_mass_msun_h)
     return result[0] if scalar_k else result
 
@@ -418,6 +516,7 @@ def limber_shell_cls(
     concentration_params: ConcentrationParams,
     profile_params: NFWProfileParams = DEFAULT_NFW_PROFILE_PARAMS,
     *,
+    power_evolution: LinearPowerEvolutionTable | None = None,
     theta_resolution_rad: float | None = None,
     radial_quadrature: QuadratureRule | None = None,
     profile_quadrature: QuadratureRule | None = None,
@@ -446,9 +545,15 @@ def limber_shell_cls(
     def node_power(inputs: tuple[Array, Array]) -> tuple[Array, Array]:
         chi_node, redshift_node = inputs
         k = (ell_values + 0.5) / chi_node
-        linear = linear_matter_power(k, redshift_node, linear_theory)
+        linear = linear_matter_power(
+            k,
+            redshift_node,
+            linear_theory,
+            power_evolution,
+        )
+        power_k_grid = linear_theory.k_h_mpc if power_evolution is None else power_evolution.k_h_mpc
         linear = jnp.where(
-            (k >= linear_theory.k_h_mpc[0]) & (k <= linear_theory.k_h_mpc[-1]),
+            (k >= power_k_grid[0]) & (k <= power_k_grid[-1]),
             linear,
             0.0,
         )
@@ -477,6 +582,7 @@ def finite_width_flat_sky_linear_shell_cls(
     z_hi: float,
     linear_theory: LinearTheoryTable,
     *,
+    power_evolution: LinearPowerEvolutionTable | None = None,
     radial_quadrature: QuadratureRule | None = None,
     line_of_sight_quadrature: QuadratureRule | None = None,
     line_of_sight_tail_periods: float = 40.0,
@@ -488,7 +594,13 @@ def finite_width_flat_sky_linear_shell_cls(
     ``Mpc/h``. Unlike standard Limber, this approximation retains the Fourier
     transform of the complete top-hat radial window and its growth evolution:
 
-    ``C_ell = integral dk_parallel P0(k) |W_D(k_parallel)|^2 / (pi chi_mid^2)``.
+    ``C_ell = integral dk_parallel |W_sqrtP(k_parallel)|^2 / (pi chi_mid^2)``.
+
+    For scale-dependent evolution, ``sqrt(P(k,z))`` is interpolated across
+    the narrow shell with eight fixed Lagrange nodes before the radial Fourier
+    transform. This keeps the full tabulated k dependence without constructing
+    an ``n_ell * n_los * n_radial`` array. The scalar-growth fallback retains
+    its direct radial quadrature.
 
     It is intended as the high-ell continuation for geometrically thin
     shells. The orchestration layer validates it against the exact full-sky
@@ -516,36 +628,62 @@ def finite_width_flat_sky_linear_shell_cls(
     dchi_weight = half_width * radial_quadrature.weights
     redshift = redshift_at_comoving_distance(chi, linear_theory)
     shell_volume_per_sr = (chi_hi**3 - chi_lo**3) / 3.0
-    transfer_weight = (
-        dchi_weight
-        * chi**2
-        / shell_volume_per_sr
-        * growth_factor(redshift, linear_theory)
-    )
+    radial_weight = dchi_weight * chi**2 / shell_volume_per_sr
 
     u_max = line_of_sight_tail_periods * jnp.pi
     u = 0.5 * u_max * (line_of_sight_quadrature.nodes + 1.0)
     du_weight = 0.5 * u_max * line_of_sight_quadrature.weights
     phase = u[:, None] * radial_quadrature.nodes[None, :]
-    radial_window_power = (
-        jnp.sum(jnp.cos(phase) * transfer_weight[None, :], axis=1) ** 2
-        + jnp.sum(jnp.sin(phase) * transfer_weight[None, :], axis=1) ** 2
-    )
     k_parallel = u / half_width
+    power_k_grid = linear_theory.k_h_mpc if power_evolution is None else power_evolution.k_h_mpc
+
+    if power_evolution is None:
+        transfer_weight = radial_weight * growth_factor(redshift, linear_theory)
+        radial_window_power = (
+            jnp.sum(jnp.cos(phase) * transfer_weight[None, :], axis=1) ** 2
+            + jnp.sum(jnp.sin(phase) * transfer_weight[None, :], axis=1) ** 2
+        )
+    else:
+        evolution_rule = gauss_legendre_rule(LINEAR_EVOLUTION_INTERPOLATION_ORDER)
+        sample_chi = midpoint + half_width * evolution_rule.nodes
+        sample_redshift = redshift_at_comoving_distance(sample_chi, linear_theory)
+        temporal_basis = _lagrange_basis(
+            radial_quadrature.nodes,
+            evolution_rule.nodes,
+        )
+        weighted_basis = radial_weight[:, None] * temporal_basis
+        radial_basis_real = jnp.cos(phase) @ weighted_basis
+        radial_basis_imag = jnp.sin(phase) @ weighted_basis
 
     def project_one_ell(ell_value: Array) -> Array:
         k_transverse = (ell_value + 0.5) / midpoint
         k = jnp.sqrt(k_transverse**2 + k_parallel**2)
-        power = linear_matter_power(k, jnp.zeros_like(k), linear_theory)
-        power = jnp.where(
-            (k >= linear_theory.k_h_mpc[0]) & (k <= linear_theory.k_h_mpc[-1]),
-            power,
-            0.0,
-        )
-        return (
-            jnp.sum(du_weight * power * radial_window_power)
-            / (jnp.pi * midpoint**2 * half_width)
-        )
+        valid_k = (k >= power_k_grid[0]) & (k <= power_k_grid[-1])
+        if power_evolution is None:
+            power = linear_matter_power(k, jnp.zeros_like(k), linear_theory)
+            integrand = jnp.where(valid_k, power * radial_window_power, 0.0)
+        else:
+            sample_power = linear_matter_power(
+                k[:, None],
+                sample_redshift[None, :],
+                linear_theory,
+                power_evolution,
+            )
+            sample_amplitude = jnp.sqrt(sample_power)
+            transformed_real = jnp.sum(
+                radial_basis_real * sample_amplitude,
+                axis=1,
+            )
+            transformed_imag = jnp.sum(
+                radial_basis_imag * sample_amplitude,
+                axis=1,
+            )
+            integrand = jnp.where(
+                valid_k,
+                transformed_real**2 + transformed_imag**2,
+                0.0,
+            )
+        return jnp.sum(du_weight * integrand) / (jnp.pi * midpoint**2 * half_width)
 
     result = lax.map(project_one_ell, ell_vector)
     return result[0] if scalar_ell else result
@@ -556,6 +694,11 @@ class _ExactProjectionState(NamedTuple):
     log_power_table: np.ndarray
     chi_nodes: np.ndarray
     transfer_weight: np.ndarray
+    temporal_basis_weight: np.ndarray
+    log_power_evolution: np.ndarray
+    evolution_scale_lower: np.ndarray
+    evolution_scale_fraction: np.ndarray
+    scale_dependent: bool
     weights: np.ndarray
     shell_midpoint: np.ndarray
     shell_width: np.ndarray
@@ -566,6 +709,38 @@ class _ExactProjectionState(NamedTuple):
 
 
 _EXACT_PROJECTION_STATE: _ExactProjectionState | None = None
+
+
+def _evolution_amplitude_at_log_k(
+    log_k: float,
+    state: _ExactProjectionState,
+    shell_index: int | None = None,
+) -> np.ndarray:
+    """Return ``sqrt(P(k,a) / P(k,a=1))`` at exact temporal nodes."""
+
+    upper_k = int(np.searchsorted(state.log_k_table, log_k, side="right"))
+    upper_k = int(np.clip(upper_k, 1, state.log_k_table.size - 1))
+    lower_k = upper_k - 1
+    k_fraction = (log_k - state.log_k_table[lower_k]) / (
+        state.log_k_table[upper_k] - state.log_k_table[lower_k]
+    )
+    lower_scale = state.evolution_scale_lower
+    scale_fraction = state.evolution_scale_fraction
+    if shell_index is not None:
+        lower_scale = lower_scale[shell_index]
+        scale_fraction = scale_fraction[shell_index]
+    upper_scale = lower_scale + 1
+    lower_log_power = (
+        state.log_power_evolution[lower_scale, lower_k] * (1.0 - k_fraction)
+        + state.log_power_evolution[lower_scale, upper_k] * k_fraction
+    )
+    upper_log_power = (
+        state.log_power_evolution[upper_scale, lower_k] * (1.0 - k_fraction)
+        + state.log_power_evolution[upper_scale, upper_k] * k_fraction
+    )
+    sample_log_power = lower_log_power * (1.0 - scale_fraction) + upper_log_power * scale_fraction
+    reference_log_power = float(np.interp(log_k, state.log_k_table, state.log_power_table))
+    return np.exp(0.5 * (sample_log_power - reference_log_power))
 
 
 def _integrate_exact_multipole(
@@ -594,7 +769,19 @@ def _integrate_exact_multipole(
     def shell_integrand(log_k: float, shell_index: int) -> float:
         k, prefactor = power_at_log_k(log_k)
         bessel = spherical_jn(ell_value, k * state.chi_nodes[shell_index])
-        transfer = np.sum(state.transfer_weight[shell_index] * bessel)
+        if state.scale_dependent:
+            basis_transfer = np.sum(
+                state.temporal_basis_weight[shell_index] * bessel[:, None],
+                axis=0,
+            )
+            evolution_amplitude = _evolution_amplitude_at_log_k(
+                log_k,
+                state,
+                shell_index,
+            )
+            transfer = np.sum(basis_transfer * evolution_amplitude)
+        else:
+            transfer = np.sum(state.transfer_weight[shell_index] * bessel)
         return float(prefactor * transfer**2)
 
     shell_integrated = np.empty(state.chi_nodes.shape[0], dtype=np.float64)
@@ -612,7 +799,15 @@ def _integrate_exact_multipole(
     def summed_integrand(log_k: float) -> float:
         k, prefactor = power_at_log_k(log_k)
         bessel = spherical_jn(ell_value, k * state.chi_nodes)
-        transfer = np.sum(state.transfer_weight * bessel, axis=1)
+        if state.scale_dependent:
+            basis_transfer = np.sum(
+                state.temporal_basis_weight * bessel[:, :, None],
+                axis=1,
+            )
+            evolution_amplitude = _evolution_amplitude_at_log_k(log_k, state)
+            transfer = np.sum(basis_transfer * evolution_amplitude, axis=1)
+        else:
+            transfer = np.sum(state.transfer_weight * bessel, axis=1)
         transfer = np.where(k <= shell_k_max, transfer, 0.0)
         summed_transfer = np.sum(state.weights * transfer)
         return float(prefactor * summed_transfer**2)
@@ -639,12 +834,29 @@ def _integrate_exact_multipole_worker(ell_value: int) -> tuple[np.ndarray, float
     return _integrate_exact_multipole(ell_value, _EXACT_PROJECTION_STATE)
 
 
+def _numpy_lagrange_basis(x: np.ndarray, nodes: np.ndarray) -> np.ndarray:
+    """Evaluate fixed-node Lagrange basis polynomials for SciPy orchestration."""
+
+    values = np.asarray(x, dtype=np.float64)
+    interpolation_nodes = np.asarray(nodes, dtype=np.float64)
+    basis = np.ones((values.size, interpolation_nodes.size), dtype=np.float64)
+    for index in range(interpolation_nodes.size):
+        for other in range(interpolation_nodes.size):
+            if other == index:
+                continue
+            basis[:, index] *= (values - interpolation_nodes[other]) / (
+                interpolation_nodes[index] - interpolation_nodes[other]
+            )
+    return basis
+
+
 def exact_linear_shell_cls(
     ell: np.ndarray,
     z_lo: np.ndarray,
     z_hi: np.ndarray,
     linear_theory: LinearTheoryTable,
     *,
+    power_evolution: LinearPowerEvolutionTable | None = None,
     shell_weights: np.ndarray | None = None,
     radial_order: int = 512,
     radial_tail_periods: float = 256.0,
@@ -661,7 +873,10 @@ def exact_linear_shell_cls(
     ``radial_tail_periods``. Independent multipoles are evaluated in
     ``workers`` spawned processes. Install
     ``geppetto[theory]`` to use it. The differentiable one-halo and Limber
-    kernels do not depend on SciPy.
+    kernels do not depend on SciPy. When ``power_evolution`` is supplied, the
+    transfer uses ``sqrt(P(k,z) / P(k,0))`` rather than a scalar growth
+    factor. Eight temporal interpolation nodes per shell preserve the smooth
+    scale-dependent evolution without expanding the full radial-by-k table.
     """
 
     try:
@@ -698,8 +913,42 @@ def exact_linear_shell_cls(
     scale_factor = np.asarray(linear_theory.scale_factor, dtype=np.float64)
     chi_table = np.asarray(linear_theory.chi_mpc_h, dtype=np.float64)
     growth_table = np.asarray(linear_theory.growth, dtype=np.float64)
-    k_table = np.asarray(linear_theory.k_h_mpc, dtype=np.float64)
-    power_table = np.asarray(linear_theory.power_mpc_h3, dtype=np.float64)
+    if power_evolution is None:
+        k_table = np.asarray(linear_theory.k_h_mpc, dtype=np.float64)
+        power_table = np.asarray(linear_theory.power_mpc_h3, dtype=np.float64)
+        evolution_scale_factor = np.empty(0, dtype=np.float64)
+        log_power_evolution = np.empty((0, 0), dtype=np.float64)
+    else:
+        evolution_scale_factor = np.asarray(
+            power_evolution.scale_factor,
+            dtype=np.float64,
+        )
+        k_table = np.asarray(power_evolution.k_h_mpc, dtype=np.float64)
+        power_evolution_values = np.asarray(
+            power_evolution.power_mpc_h3,
+            dtype=np.float64,
+        )
+        if (
+            evolution_scale_factor.ndim != 1
+            or evolution_scale_factor.size < 2
+            or not np.all(np.isfinite(evolution_scale_factor))
+            or np.any(np.diff(evolution_scale_factor) <= 0.0)
+            or not np.isclose(evolution_scale_factor[-1], 1.0, rtol=0.0, atol=1.0e-8)
+            or k_table.ndim != 1
+            or k_table.size < 2
+            or not np.all(np.isfinite(k_table))
+            or np.any(k_table <= 0.0)
+            or np.any(np.diff(k_table) <= 0.0)
+            or power_evolution_values.shape != (evolution_scale_factor.size, k_table.size)
+            or np.any(power_evolution_values <= 0.0)
+            or not np.all(np.isfinite(power_evolution_values))
+        ):
+            raise ValueError(
+                "power_evolution must contain positive finite P(k,a) on increasing "
+                "scale-factor and wavenumber grids ending at a=1"
+            )
+        power_table = power_evolution_values[-1]
+        log_power_evolution = np.log(power_evolution_values)
     log_k_table = np.log(k_table)
     log_power_table = np.log(power_table)
     nodes, node_weights = np.polynomial.legendre.leggauss(radial_order)
@@ -718,6 +967,44 @@ def exact_linear_shell_cls(
     shell_volume_per_sr = (chi_hi**3 - chi_lo**3) / 3.0
     window = chi_nodes**2 / shell_volume_per_sr[:, None]
     transfer_weight = radial_weights * window * growth_nodes
+    if power_evolution is None:
+        temporal_basis_weight = np.empty((0, 0, 0), dtype=np.float64)
+        evolution_scale_lower = np.empty((0, 0), dtype=np.int64)
+        evolution_scale_fraction = np.empty((0, 0), dtype=np.float64)
+    else:
+        evolution_nodes, _ = np.polynomial.legendre.leggauss(LINEAR_EVOLUTION_INTERPOLATION_ORDER)
+        temporal_basis = _numpy_lagrange_basis(nodes, evolution_nodes)
+        temporal_basis_weight = (
+            radial_weights[:, :, None] * window[:, :, None] * temporal_basis[None, :, :]
+        )
+        temporal_chi = midpoint[:, None] + half_width[:, None] * evolution_nodes
+        temporal_scale = np.interp(
+            temporal_chi,
+            chi_table[::-1],
+            scale_factor[::-1],
+        )
+        if (
+            np.min(temporal_scale) < evolution_scale_factor[0]
+            or np.max(temporal_scale) > evolution_scale_factor[-1]
+        ):
+            raise ValueError("exact shell redshifts exceed the scale-dependent power table")
+        evolution_scale_upper = np.searchsorted(
+            evolution_scale_factor,
+            temporal_scale,
+            side="right",
+        )
+        evolution_scale_upper = np.clip(
+            evolution_scale_upper,
+            1,
+            evolution_scale_factor.size - 1,
+        )
+        evolution_scale_lower = evolution_scale_upper - 1
+        evolution_scale_fraction = (
+            temporal_scale - evolution_scale_factor[evolution_scale_lower]
+        ) / (
+            evolution_scale_factor[evolution_scale_upper]
+            - evolution_scale_factor[evolution_scale_lower]
+        )
 
     shell_result = np.empty((n_shell, ell_values.size), dtype=np.float64)
     summed_result = np.empty(ell_values.size, dtype=np.float64)
@@ -728,6 +1015,11 @@ def exact_linear_shell_cls(
         log_power_table=log_power_table,
         chi_nodes=chi_nodes,
         transfer_weight=transfer_weight,
+        temporal_basis_weight=temporal_basis_weight,
+        log_power_evolution=log_power_evolution,
+        evolution_scale_lower=evolution_scale_lower,
+        evolution_scale_fraction=evolution_scale_fraction,
+        scale_dependent=power_evolution is not None,
         weights=weights,
         shell_midpoint=shell_midpoint,
         shell_width=shell_width,
@@ -741,9 +1033,7 @@ def exact_linear_shell_cls(
         integrated_multipoles = (
             _integrate_exact_multipole(int(ell_value), state) for ell_value in ell_values
         )
-        for ell_index, (shell_integrated, sum_integrated) in enumerate(
-            integrated_multipoles
-        ):
+        for ell_index, (shell_integrated, sum_integrated) in enumerate(integrated_multipoles):
             shell_result[:, ell_index] = shell_integrated
             summed_result[ell_index] = sum_integrated
     else:
@@ -852,9 +1142,7 @@ def select_limber_transition(
     shell_scale = np.maximum(np.abs(exact_shell_values), np.abs(limber_shell_values))
     sum_scale = np.maximum(np.abs(exact_sum_values), np.abs(limber_sum_values))
     tiny = np.finfo(np.float64).tiny
-    shell_error = np.abs(exact_shell_values - limber_shell_values) / np.maximum(
-        shell_scale, tiny
-    )
+    shell_error = np.abs(exact_shell_values - limber_shell_values) / np.maximum(shell_scale, tiny)
     sum_error = np.abs(exact_sum_values - limber_sum_values) / np.maximum(sum_scale, tiny)
     worst_error = np.maximum(np.max(shell_error, axis=0), sum_error)
     start = _stable_match_start(
@@ -917,9 +1205,7 @@ def select_independent_limber_transitions(
         shell_scale, tiny
     )
     sum_scale = np.maximum(np.abs(exact_sum_values), np.abs(limber_sum_values))
-    sum_error_values = np.abs(exact_sum_values - limber_sum_values) / np.maximum(
-        sum_scale, tiny
-    )
+    sum_error_values = np.abs(exact_sum_values - limber_sum_values) / np.maximum(sum_scale, tiny)
     final_start = max(0, ell_values.size - consecutive_multipoles)
 
     shell_transition = np.full(exact_shell_values.shape[0], -1, dtype=np.int64)
@@ -975,9 +1261,7 @@ def select_shell_high_ell_projection(
         or candidate_values.shape[1:] != exact_values.shape
         or modes.shape != (candidate_values.shape[0],)
     ):
-        raise ValueError(
-            "candidate shell spectra must have shape (n_candidate, n_shell, n_ell)"
-        )
+        raise ValueError("candidate shell spectra must have shape (n_candidate, n_shell, n_ell)")
     if comparison_width < 1 or exact_values.shape[1] < comparison_width:
         raise ValueError("projection comparison width exceeds the exact range")
     if not np.all(np.isfinite(candidate_values)):
@@ -1008,6 +1292,7 @@ def hybrid_angular_power_spectra(
     profile_params: Sequence[NFWProfileParams],
     *,
     shell_weights: Array,
+    power_evolution: LinearPowerEvolutionTable | None = None,
     pixel_window: Array | None = None,
     mean_uncollapsed_counts_per_pixel: Array | None = None,
     mean_total_counts_per_pixel: Array | None = None,
@@ -1038,7 +1323,9 @@ def hybrid_angular_power_spectra(
     Each transition must remain within ``limber_match_rtol`` through the
     complete exact range. The search is bounded by ``ell_exact_cap``. A zero
     cap uses a geometric shell-mode fallback without exact validation.
-    One-halo power always uses Limber.
+    One-halo power always uses Limber. ``power_evolution`` carries the
+    optional scale-dependent PINOCCHIO CAMB series through every linear
+    projection branch; omitting it retains scalar growth.
     """
 
     ell_values = jnp.asarray(ell)
@@ -1075,9 +1362,7 @@ def hybrid_angular_power_spectra(
     weights = weights / jnp.sum(weights)
     radial_quadrature = gauss_legendre_rule(radial_order)
     finite_width_radial_quadrature = gauss_legendre_rule(finite_width_radial_order)
-    finite_width_line_of_sight_quadrature = gauss_legendre_rule(
-        finite_width_line_of_sight_order
-    )
+    finite_width_line_of_sight_quadrature = gauss_legendre_rule(finite_width_line_of_sight_order)
     profile_quadrature = gauss_legendre_rule(profile_order)
     limber_results = [
         limber_shell_cls(
@@ -1088,6 +1373,7 @@ def hybrid_angular_power_spectra(
             mass_function,
             concentration_params,
             shell_profile,
+            power_evolution=power_evolution,
             theta_resolution_rad=theta_resolution_rad,
             radial_quadrature=radial_quadrature,
             profile_quadrature=profile_quadrature,
@@ -1103,6 +1389,7 @@ def hybrid_angular_power_spectra(
                 float(lo),
                 float(hi),
                 linear_theory,
+                power_evolution=power_evolution,
                 radial_quadrature=finite_width_radial_quadrature,
                 line_of_sight_quadrature=finite_width_line_of_sight_quadrature,
                 line_of_sight_tail_periods=finite_width_tail_periods,
@@ -1122,23 +1409,16 @@ def hybrid_angular_power_spectra(
     summed_ell_limber_start = int(ell_numpy[0])
     shell_match_error = np.full(z_lo_values.size, np.nan, dtype=np.float64)
     summed_match_error = np.nan
-    chi_lo_values = np.asarray(
-        comoving_distance_mpc_h(jnp.asarray(z_lo_values), linear_theory)
-    )
-    chi_hi_values = np.asarray(
-        comoving_distance_mpc_h(jnp.asarray(z_hi_values), linear_theory)
-    )
-    fractional_width = (chi_hi_values - chi_lo_values) / (
-        0.5 * (chi_hi_values + chi_lo_values)
-    )
+    chi_lo_values = np.asarray(comoving_distance_mpc_h(jnp.asarray(z_lo_values), linear_theory))
+    chi_hi_values = np.asarray(comoving_distance_mpc_h(jnp.asarray(z_hi_values), linear_theory))
+    fractional_width = (chi_hi_values - chi_lo_values) / (0.5 * (chi_hi_values + chi_lo_values))
     shell_high_ell_mode = np.where(
         fractional_width <= 0.3,
         LINEAR_HIGH_ELL_FINITE_WIDTH,
         LINEAR_HIGH_ELL_LIMBER,
     )
     shell_linear = jnp.where(
-        jnp.asarray(shell_high_ell_mode)[:, None]
-        == LINEAR_HIGH_ELL_FINITE_WIDTH,
+        jnp.asarray(shell_high_ell_mode)[:, None] == LINEAR_HIGH_ELL_FINITE_WIDTH,
         shell_finite_width_linear,
         shell_limber_linear,
     )
@@ -1158,6 +1438,7 @@ def hybrid_angular_power_spectra(
                     z_lo_values,
                     z_hi_values,
                     linear_theory,
+                    power_evolution=power_evolution,
                     shell_weights=np.asarray(weights),
                     radial_order=exact_radial_order,
                     radial_tail_periods=exact_radial_tail_periods,
@@ -1165,9 +1446,7 @@ def hybrid_angular_power_spectra(
                     workers=exact_workers,
                 )
             else:
-                exact_shell_batch, exact_sum_batch = exact_batch_evaluator(
-                    ell_numpy[batch_indices]
-                )
+                exact_shell_batch, exact_sum_batch = exact_batch_evaluator(ell_numpy[batch_indices])
             exact_shell_batch = np.asarray(exact_shell_batch, dtype=np.float64)
             exact_sum_batch = np.asarray(exact_sum_batch, dtype=np.float64)
             expected_shell_shape = (z_lo_values.size, batch_indices.size)
@@ -1191,27 +1470,24 @@ def hybrid_angular_power_spectra(
             shell_ell_high_ell_start.fill(int(ell_numpy[-1]) + 1)
             summed_ell_limber_start = int(ell_numpy[-1]) + 1
         else:
-            selected_exact_shell, shell_high_ell_mode = (
-                select_shell_high_ell_projection(
-                    exact_shell,
-                    np.stack(
-                        (
-                            np.asarray(shell_limber_linear)[:, exact_indices],
-                            np.asarray(shell_finite_width_linear)[:, exact_indices],
-                        )
-                    ),
-                    np.asarray(
-                        (
-                            LINEAR_HIGH_ELL_LIMBER,
-                            LINEAR_HIGH_ELL_FINITE_WIDTH,
-                        )
-                    ),
-                    comparison_width=limber_match_width,
-                )
+            selected_exact_shell, shell_high_ell_mode = select_shell_high_ell_projection(
+                exact_shell,
+                np.stack(
+                    (
+                        np.asarray(shell_limber_linear)[:, exact_indices],
+                        np.asarray(shell_finite_width_linear)[:, exact_indices],
+                    )
+                ),
+                np.asarray(
+                    (
+                        LINEAR_HIGH_ELL_LIMBER,
+                        LINEAR_HIGH_ELL_FINITE_WIDTH,
+                    )
+                ),
+                comparison_width=limber_match_width,
             )
             shell_linear = jnp.where(
-                jnp.asarray(shell_high_ell_mode)[:, None]
-                == LINEAR_HIGH_ELL_FINITE_WIDTH,
+                jnp.asarray(shell_high_ell_mode)[:, None] == LINEAR_HIGH_ELL_FINITE_WIDTH,
                 shell_finite_width_linear,
                 shell_limber_linear,
             )
@@ -1259,13 +1535,9 @@ def hybrid_angular_power_spectra(
             if use_exact.size:
                 exact_lookup = np.searchsorted(exact_indices, use_exact)
                 shell_linear = shell_linear.at[shell_index, jnp.asarray(use_exact)].set(
-                    jnp.asarray(
-                        exact_shell[shell_index, exact_lookup], dtype=shell_linear.dtype
-                    )
+                    jnp.asarray(exact_shell[shell_index, exact_lookup], dtype=shell_linear.dtype)
                 )
-        use_exact_sum = exact_indices[
-            ell_numpy[exact_indices] < summed_ell_limber_start
-        ]
+        use_exact_sum = exact_indices[ell_numpy[exact_indices] < summed_ell_limber_start]
         if use_exact_sum.size:
             exact_lookup = np.searchsorted(exact_indices, use_exact_sum)
             summed_linear = summed_linear.at[jnp.asarray(use_exact_sum)].set(
@@ -1290,9 +1562,7 @@ def hybrid_angular_power_spectra(
     else:
         mean_uncollapsed = jnp.asarray(mean_uncollapsed_counts_per_pixel)
         mean_total = jnp.asarray(mean_total_counts_per_pixel)
-        if mean_uncollapsed.shape != (z_lo_values.size,) or mean_total.shape != (
-            z_lo_values.size,
-        ):
+        if mean_uncollapsed.shape != (z_lo_values.size,) or mean_total.shape != (z_lo_values.size,):
             raise ValueError("mean count arrays must have shape (n_shell,)")
         shell_shot_level = particle_count_shot_noise(
             mean_uncollapsed,

@@ -26,7 +26,11 @@ from geppetto.catalog import (
 )
 from geppetto.cosmology import Cosmology, rho_mean_comoving
 from geppetto.profiles import TabulatedProjectedProfileParams
-from geppetto.theory import HaloMassFunctionTable, LinearTheoryTable
+from geppetto.theory import (
+    HaloMassFunctionTable,
+    LinearPowerEvolutionTable,
+    LinearTheoryTable,
+)
 
 
 class PinocchioCatalogError(ValueError):
@@ -502,9 +506,7 @@ def read_pinocchio_binary_snapshot_catalog(path: PathLike) -> PinocchioSnapshotC
 
     masses = np.asarray(data["Mass"], dtype=np.float64)
     _require_positive(masses, source, "snapshot masses")
-    n_particles = (
-        np.asarray(data["npart"], dtype=np.int64) if "npart" in data.dtype.names else None
-    )
+    n_particles = np.asarray(data["npart"], dtype=np.int64) if "npart" in data.dtype.names else None
     initial_positions = (
         np.asarray(data["posin"], dtype=np.float64) if "posin" in data.dtype.names else None
     )
@@ -686,7 +688,9 @@ def read_pinocchio_hubble_table(
     redshift = np.asarray(data[:, 0], dtype=np.float64)
     e_z = np.asarray(data[:, 1], dtype=np.float64)
     if np.any(redshift < 0.0):
-        raise PinocchioCatalogError(f"PINOCCHIO Hubble table redshifts must be non-negative: {source}")
+        raise PinocchioCatalogError(
+            f"PINOCCHIO Hubble table redshifts must be non-negative: {source}"
+        )
     _require_positive(e_z, source, "Hubble table E(z)")
 
     z0 = np.isclose(redshift, 0.0, rtol=0.0, atol=1.0e-12)
@@ -719,8 +723,7 @@ def read_pinocchio_hubble_table(
     chi_grid_mpc_h = np.concatenate(
         [
             np.array([0.0]),
-            (_C_LIGHT_KM_S / 100.0)
-            * np.cumsum(0.5 * (integrand[1:] + integrand[:-1]) * dz),
+            (_C_LIGHT_KM_S / 100.0) * np.cumsum(0.5 * (integrand[1:] + integrand[:-1]) * dz),
         ]
     )
 
@@ -767,9 +770,7 @@ def read_pinocchio_parameter_file(path: PathLike) -> PinocchioRunMetadata:
     box_in_h100 = "BoxInH100" in parameters
     box_size_mpc_h = box_size if box_in_h100 else box_size * h
     cosmology = Cosmology(omega_m=omega_m, h=h)
-    particle_mass_msun_h = (
-        rho_mean_comoving(cosmology) * box_size_mpc_h**3 / float(grid_size) ** 3
-    )
+    particle_mass_msun_h = rho_mean_comoving(cosmology) * box_size_mpc_h**3 / float(grid_size) ** 3
     run_flag_values = parameters.get("RunFlag", ())
     run_flag = run_flag_values[0] if run_flag_values else None
 
@@ -878,9 +879,7 @@ def validate_lightcone_sparse_stencil(
     if pair_weight is not None and (
         not np.all(np.isfinite(pair_weight)) or np.any(pair_weight < 0.0)
     ):
-        raise PinocchioCatalogError(
-            "stencil.pair_weight values must be finite and non-negative"
-        )
+        raise PinocchioCatalogError("stencil.pair_weight values must be finite and non-negative")
 
     if catalog is not None:
         mass = np.asarray(catalog.mass)
@@ -1082,9 +1081,7 @@ def read_pinocchio_cosmology_table(path: PathLike) -> LinearTheoryTable:
         )
     h = _parse_cosmology_h(source)
     if h <= 0.0:
-        raise PinocchioCatalogError(
-            f"PINOCCHIO cosmology-table h must be positive: {source}"
-        )
+        raise PinocchioCatalogError(f"PINOCCHIO cosmology-table h must be positive: {source}")
 
     scale_factor = np.asarray(data[:, 0], dtype=np.float64)
     order = np.argsort(scale_factor)
@@ -1095,9 +1092,7 @@ def read_pinocchio_cosmology_table(path: PathLike) -> LinearTheoryTable:
         )
     present_index = np.flatnonzero(np.isclose(scale_factor, 1.0, rtol=0.0, atol=1.0e-6))
     if present_index.size != 1:
-        raise PinocchioCatalogError(
-            f"PINOCCHIO cosmology table must include one a=1 row: {source}"
-        )
+        raise PinocchioCatalogError(f"PINOCCHIO cosmology table must include one a=1 row: {source}")
     present_stop = int(present_index[0]) + 1
     order = order[:present_stop]
     scale_factor = scale_factor[:present_stop]
@@ -1122,11 +1117,7 @@ def read_pinocchio_cosmology_table(path: PathLike) -> LinearTheoryTable:
     k_order = np.argsort(k_h_mpc)
     k_h_mpc = k_h_mpc[k_order]
     power_mpc_h3 = power_mpc_h3[k_order]
-    if (
-        np.any(k_h_mpc <= 0.0)
-        or np.any(np.diff(k_h_mpc) <= 0.0)
-        or np.any(power_mpc_h3 <= 0.0)
-    ):
+    if np.any(k_h_mpc <= 0.0) or np.any(np.diff(k_h_mpc) <= 0.0) or np.any(power_mpc_h3 <= 0.0):
         raise PinocchioCatalogError(
             f"PINOCCHIO power-spectrum k and P(k) must be positive with unique k: {source}"
         )
@@ -1140,6 +1131,127 @@ def read_pinocchio_cosmology_table(path: PathLike) -> LinearTheoryTable:
         growth=jnp.asarray(growth),
         k_h_mpc=jnp.asarray(k_h_mpc),
         power_mpc_h3=jnp.asarray(power_mpc_h3),
+    )
+
+
+def read_pinocchio_linear_power_evolution(
+    metadata: PinocchioRunMetadata,
+) -> LinearPowerEvolutionTable | None:
+    """Read PINOCCHIO's optional CAMB ``P(k,z)`` series.
+
+    The parameter file must select ``FileWithInputSpectrum CAMBTable`` and
+    provide ``CAMBMatterFile`` plus ``CAMBRedshiftsFile``. Relative paths are
+    resolved from the parameter-file directory. PINOCCHIO's zero value for
+    ``InputSpectrum_UnitLength_in_cm`` denotes the native CAMB convention used
+    here: ``k`` in ``h/Mpc`` and ``P`` in ``(Mpc/h)^3``. Runs with a single
+    input spectrum return ``None`` and retain scalar-growth evolution.
+    """
+
+    spectrum_values = metadata.parameters.get("FileWithInputSpectrum", ())
+    if not spectrum_values or spectrum_values[0].strip().lower() != "cambtable":
+        return None
+    source = metadata.source
+    matter_values = _required_parameter_values(
+        metadata.parameters,
+        "CAMBMatterFile",
+        source,
+    )
+    redshift_values = _required_parameter_values(
+        metadata.parameters,
+        "CAMBRedshiftsFile",
+        source,
+    )
+    unit_values = _required_parameter_values(
+        metadata.parameters,
+        "InputSpectrum_UnitLength_in_cm",
+        source,
+    )
+    try:
+        input_length_unit_cm = float(unit_values[0])
+    except ValueError as exc:
+        raise PinocchioCatalogError(
+            f"PINOCCHIO InputSpectrum_UnitLength_in_cm must be numeric: {source}"
+        ) from exc
+    if input_length_unit_cm != 0.0:
+        raise PinocchioCatalogError(
+            "scale-dependent CAMB power currently requires "
+            f"InputSpectrum_UnitLength_in_cm=0: {source}"
+        )
+
+    def resolve(value: str) -> Path:
+        path = Path(value).expanduser()
+        return path if path.is_absolute() else source.parent / path
+
+    redshift_path = resolve(redshift_values[0])
+    redshift_table = _load_numeric_table(
+        redshift_path,
+        expected_columns=2,
+        label="CAMB redshift table",
+    )
+    if redshift_table.shape[0] < 2:
+        raise PinocchioCatalogError(
+            f"PINOCCHIO CAMB redshift table must contain at least two rows: {redshift_path}"
+        )
+    raw_indices = redshift_table[:, 0]
+    indices = np.rint(raw_indices).astype(np.int64)
+    redshift = np.asarray(redshift_table[:, 1], dtype=np.float64)
+    if (
+        np.any(raw_indices != indices)
+        or np.any(indices < 0)
+        or np.unique(indices).size != indices.size
+        or np.any(redshift < 0.0)
+        or np.unique(redshift).size != redshift.size
+    ):
+        raise PinocchioCatalogError(
+            f"PINOCCHIO CAMB indices and redshifts must be non-negative and unique: {redshift_path}"
+        )
+
+    matter_prefix = resolve(matter_values[0])
+    k_reference: np.ndarray | None = None
+    power_rows: list[np.ndarray] = []
+    for index in indices:
+        power_path = Path(f"{matter_prefix}_{index:03d}.dat")
+        power_table = _load_numeric_table(
+            power_path,
+            expected_columns=2,
+            label="CAMB matter-power table",
+        )
+        k_values = np.asarray(power_table[:, 0], dtype=np.float64)
+        power_values = np.asarray(power_table[:, 1], dtype=np.float64)
+        if (
+            k_values.size < 2
+            or np.any(k_values <= 0.0)
+            or np.any(np.diff(k_values) <= 0.0)
+            or np.any(power_values <= 0.0)
+        ):
+            raise PinocchioCatalogError(
+                f"PINOCCHIO CAMB k and P(k) must be positive on an increasing grid: {power_path}"
+            )
+        if k_reference is None:
+            k_reference = k_values
+        elif not np.array_equal(k_values, k_reference):
+            raise PinocchioCatalogError(
+                f"PINOCCHIO CAMB power files do not share an identical k grid: {power_path}"
+            )
+        power_rows.append(power_values)
+
+    assert k_reference is not None
+    scale_factor = 1.0 / (1.0 + redshift)
+    order = np.argsort(scale_factor)
+    scale_factor = scale_factor[order]
+    if np.any(np.diff(scale_factor) <= 0.0) or not np.isclose(
+        scale_factor[-1],
+        1.0,
+        rtol=0.0,
+        atol=1.0e-10,
+    ):
+        raise PinocchioCatalogError(
+            f"PINOCCHIO CAMB redshift table must include one z=0 row: {redshift_path}"
+        )
+    return LinearPowerEvolutionTable(
+        scale_factor=jnp.asarray(scale_factor),
+        k_h_mpc=jnp.asarray(k_reference),
+        power_mpc_h3=jnp.asarray(np.stack(power_rows)[order]),
     )
 
 
@@ -1167,8 +1279,7 @@ def read_pinocchio_mass_function_series(
     if any(table.redshift is None for table in tables):
         missing = [str(table.source) for table in tables if table.redshift is None]
         raise PinocchioCatalogError(
-            "cannot parse redshift from PINOCCHIO mass-function header: "
-            + ", ".join(missing)
+            "cannot parse redshift from PINOCCHIO mass-function header: " + ", ".join(missing)
         )
     redshifts = np.asarray([float(table.redshift) for table in tables], dtype=np.float64)
     if np.any(redshifts < 0.0):
@@ -1329,13 +1440,17 @@ def _read_binary_snapshot_catalog_file(path: Path) -> np.ndarray:
     try:
         bindata = path.read_bytes()
     except OSError as exc:
-        raise PinocchioCatalogError(f"Cannot read binary PINOCCHIO snapshot catalog: {path}") from exc
+        raise PinocchioCatalogError(
+            f"Cannot read binary PINOCCHIO snapshot catalog: {path}"
+        ) from exc
     if len(bindata) < 16:
         raise PinocchioCatalogError(f"Binary PINOCCHIO snapshot catalog is truncated: {path}")
 
     header = np.frombuffer(bindata, dtype=np.int32, count=min(10, len(bindata) // 4))
     if header.size < 4:
-        raise PinocchioCatalogError(f"Binary PINOCCHIO snapshot catalog header is truncated: {path}")
+        raise PinocchioCatalogError(
+            f"Binary PINOCCHIO snapshot catalog header is truncated: {path}"
+        )
 
     new_run = bool(header[2] > 10)
     if new_run:
@@ -1350,7 +1465,9 @@ def _read_binary_snapshot_catalog_file(path: Path) -> np.ndarray:
         record_length = int(header[7])
 
     cat_dtype, stored_dtype = _binary_snapshot_catalog_dtype(record_length, new_run=new_run)
-    expected_record_size = record_length if new_run else record_length + 2 * np.dtype(np.int32).itemsize
+    expected_record_size = (
+        record_length if new_run else record_length + 2 * np.dtype(np.int32).itemsize
+    )
     if stored_dtype.itemsize != expected_record_size:
         raise PinocchioCatalogError(
             f"Unsupported binary PINOCCHIO snapshot record layout "
@@ -1424,7 +1541,9 @@ def _read_binary_lightcone_file(path: Path, *, dtype_factory) -> np.ndarray:
         offset = 0
 
     cat_dtype, stored_dtype = dtype_factory(record_length, new_run=new_run)
-    expected_record_size = record_length if new_run else record_length + 2 * np.dtype(np.int32).itemsize
+    expected_record_size = (
+        record_length if new_run else record_length + 2 * np.dtype(np.int32).itemsize
+    )
     if stored_dtype.itemsize != expected_record_size:
         raise PinocchioCatalogError(
             f"Unsupported binary PINOCCHIO PLC record layout "
@@ -1433,7 +1552,9 @@ def _read_binary_lightcone_file(path: Path, *, dtype_factory) -> np.ndarray:
 
     if not new_run:
         if len(bindata) % stored_dtype.itemsize != 0:
-            raise PinocchioCatalogError(f"Classic binary PINOCCHIO PLC size is inconsistent: {path}")
+            raise PinocchioCatalogError(
+                f"Classic binary PINOCCHIO PLC size is inconsistent: {path}"
+            )
         stored = np.frombuffer(bindata, dtype=stored_dtype)
         return _copy_structured_fields(stored, cat_dtype)
 
@@ -1577,7 +1698,9 @@ def _binary_lightcone_catalog_dtype(
             "PinocchioDistanceInterpolator"
         )
     else:
-        raise PinocchioCatalogError(f"Unsupported PINOCCHIO binary PLC record length: {record_length}")
+        raise PinocchioCatalogError(
+            f"Unsupported PINOCCHIO binary PLC record length: {record_length}"
+        )
     return np.dtype(fields), np.dtype(stored_fields)
 
 
@@ -1627,9 +1750,7 @@ def _read_int32(data: bytes, offset: int, path: Path, label: str) -> tuple[int, 
     return int(np.frombuffer(raw, dtype=np.int32, count=1)[0]), offset + np.dtype(np.int32).itemsize
 
 
-def _read_int32_triplet(
-    data: bytes, offset: int, path: Path, label: str
-) -> tuple[np.ndarray, int]:
+def _read_int32_triplet(data: bytes, offset: int, path: Path, label: str) -> tuple[np.ndarray, int]:
     nbytes = 3 * np.dtype(np.int32).itemsize
     raw = _read_bytes(data, offset, nbytes, path, label)
     return np.frombuffer(raw, dtype=np.int32, count=3), offset + nbytes
@@ -1707,9 +1828,7 @@ def _required_parameter_float(
     return value
 
 
-def _required_parameter_int(
-    parameters: Mapping[str, tuple[str, ...]], key: str, path: Path
-) -> int:
+def _required_parameter_int(parameters: Mapping[str, tuple[str, ...]], key: str, path: Path) -> int:
     value = _required_parameter_float(parameters, key, path)
     rounded = round(value)
     if not math.isclose(value, rounded, rel_tol=0.0, abs_tol=1.0e-8):
@@ -1782,9 +1901,7 @@ def _parse_cosmology_h(path: Path) -> float:
         )
         if match:
             return float(match.group(1))
-    raise PinocchioCatalogError(
-        f"PINOCCHIO cosmology-table header is missing h=<value>: {path}"
-    )
+    raise PinocchioCatalogError(f"PINOCCHIO cosmology-table header is missing h=<value>: {path}")
 
 
 def _parse_snapshot_redshift(path: Path) -> float | None:

@@ -8,11 +8,7 @@ import pytest
 
 
 def _load_example_module():
-    path = (
-        Path(__file__).parents[1]
-        / "examples"
-        / "plot_angular_power_validation.py"
-    )
+    path = Path(__file__).parents[1] / "examples" / "plot_angular_power_validation.py"
     spec = importlib.util.spec_from_file_location("plot_angular_power_validation", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -41,7 +37,9 @@ def _write_validation_products(path):
     summed_total = summed_linear + summed_one_halo + summed_shot
     np.savez_compressed(
         path / "angular_power_theory.npz",
-        validation_schema_version=np.asarray(3),
+        validation_schema_version=np.asarray(4),
+        linear_power_evolution=np.asarray("scale_dependent_camb"),
+        one_halo_compensation=np.asarray("lagrangian_top_hat_difference"),
         observed_shell=shell_total * np.array([[0.9], [0.95], [1.05], [1.1]]),
         observed_sum=summed_total,
         ell=ell,
@@ -109,14 +107,12 @@ def _write_validation_products(path):
                 "sigma8_relative_error": abs(0.809 / 0.81 - 1.0),
                 "ell_limber_start": 6,
                 "shell_ell_high_ell_start": 5 if index < 2 else 6,
-                "shell_linear_high_ell_mode": (
-                    "finite_width_flat_sky" if index < 2 else "limber"
-                ),
+                "shell_linear_high_ell_mode": ("finite_width_flat_sky" if index < 2 else "limber"),
+                "linear_power_evolution": "scale_dependent_camb",
+                "one_halo_compensation": "lagrangian_top_hat_difference",
                 "theory_convention": "constant_deprojected_pseudo_cl_over_f_sky",
             }
-            for index, (z_lo, z_hi) in enumerate(
-                ((1.5, 2.0), (1.0, 1.5), (0.5, 1.0), (0.0, 0.5))
-            )
+            for index, (z_lo, z_hi) in enumerate(((1.5, 2.0), (1.0, 1.5), (0.5, 1.0), (0.0, 0.5)))
         ],
     )
 
@@ -142,9 +138,7 @@ def test_validation_loader_orders_shells_by_redshift(tmp_path):
 
 def test_gaussian_mode_counting_fraction():
     module = _load_example_module()
-    result = module.gaussian_mode_counting_fraction(
-        np.array([2, 6]), np.array([5, 9]), f_sky=0.5
-    )
+    result = module.gaussian_mode_counting_fraction(np.array([2, 6]), np.array([5, 9]), f_sky=0.5)
     expected_modes = 0.5 * np.array([6**2 - 2**2, 10**2 - 6**2])
     np.testing.assert_allclose(result, np.sqrt(2.0 / expected_modes))
 

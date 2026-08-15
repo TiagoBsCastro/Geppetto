@@ -9,11 +9,7 @@ import pytest
 
 
 def _load_example_module():
-    path = (
-        Path(__file__).parents[1]
-        / "examples"
-        / "validate_pinocchio_angular_power.py"
-    )
+    path = Path(__file__).parents[1] / "examples" / "validate_pinocchio_angular_power.py"
     spec = importlib.util.spec_from_file_location("validate_pinocchio_angular_power", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -53,12 +49,14 @@ def test_sigma8_reference_uses_parameter_or_consistent_headers():
     module = _load_example_module()
     headers = [{"COS_S8": 0.81} for _ in range(2)]
 
-    assert module.sigma8_reference(
-        0.81, headers, reconstructed_sigma8=0.81
-    ) == (0.81, "parameter_file")
-    assert module.sigma8_reference(
-        0.0, headers, reconstructed_sigma8=0.81
-    ) == (0.81, "mass_map_COS_S8")
+    assert module.sigma8_reference(0.81, headers, reconstructed_sigma8=0.81) == (
+        0.81,
+        "parameter_file",
+    )
+    assert module.sigma8_reference(0.0, headers, reconstructed_sigma8=0.81) == (
+        0.81,
+        "mass_map_COS_S8",
+    )
 
 
 def test_sigma8_reference_falls_back_to_cosmology_power_spectrum():
@@ -128,6 +126,48 @@ def test_exact_projection_checkpoint_computes_only_missing_multipoles(tmp_path):
     assert first[2] is False
     assert second[2] is False
     assert third[2] is True
+
+
+def test_exact_checkpoint_fingerprint_includes_power_evolution():
+    module = _load_example_module()
+    linear_theory = module.LinearTheoryTable(
+        h=0.7,
+        omega_m0=0.3,
+        scale_factor=module.jnp.asarray([0.5, 1.0]),
+        chi_mpc_h=module.jnp.asarray([1000.0, 0.0]),
+        omega_m=module.jnp.asarray([0.7, 0.3]),
+        growth=module.jnp.asarray([0.5, 1.0]),
+        k_h_mpc=module.jnp.asarray([0.01, 0.1]),
+        power_mpc_h3=module.jnp.asarray([100.0, 10.0]),
+    )
+    evolution = module.LinearPowerEvolutionTable(
+        scale_factor=module.jnp.asarray([0.5, 1.0]),
+        k_h_mpc=module.jnp.asarray([0.01, 0.1]),
+        power_mpc_h3=module.jnp.asarray([[25.0, 2.5], [100.0, 10.0]]),
+    )
+    common = {
+        "radial_order": 16,
+        "radial_tail_periods": 40.0,
+        "relative_tolerance": 1.0e-3,
+    }
+
+    scalar = module.exact_checkpoint_fingerprint(
+        np.asarray([0.1]),
+        np.asarray([0.2]),
+        np.asarray([1.0]),
+        linear_theory,
+        **common,
+    )
+    scale_dependent = module.exact_checkpoint_fingerprint(
+        np.asarray([0.1]),
+        np.asarray([0.2]),
+        np.asarray([1.0]),
+        linear_theory,
+        evolution,
+        **common,
+    )
+
+    assert scalar != scale_dependent
 
 
 def test_theory_component_coupling_includes_deprojection_and_fsky():
@@ -321,7 +361,9 @@ def test_angular_power_validation_end_to_end(tmp_path, monkeypatch):
         assert result["observed_shell"].shape == (2, 6)
         assert result["shell_linear_pseudo_over_fsky"].shape == (2, 6)
         assert result["summed_linear_pseudo_over_fsky"].shape == (6,)
-        assert int(result["validation_schema_version"]) == 3
+        assert int(result["validation_schema_version"]) == 4
+        assert result["linear_power_evolution"].item() == "scalar_growth"
+        assert result["one_halo_compensation"].item() == ("lagrangian_top_hat_difference")
         assert result["shell_linear_high_ell_mode"].shape == (2,)
         assert result["sigma8_reference_source"].item() == "cosmology_power_spectrum"
         assert float(result["sigma8_relative_error"]) == pytest.approx(0.0)

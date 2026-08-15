@@ -39,10 +39,14 @@ the combined PINOCCHIO uncollapsed-particle and painted-halo count maps:
 P_mm(k,z) = P_linear(k,z) + P_1h(k,z)
 ```
 
-The linear spectrum, growth, distances, and background density are read from
-PINOCCHIO's `*.cosmology.out`. The one-halo term uses measured `*.mf.out` mass
-functions and the same concentration relation and mass definition recorded in
-`painted_nfw_manifest.csv`. Exact spherical-Bessel projection validates each
+Distances and background quantities are read from PINOCCHIO's
+`*.cosmology.out`. When the parameter file selects `CAMBTable`, the complete
+PINOCCHIO CAMB `P(k,z)` series is loaded automatically so massive-neutrino
+scale-dependent growth is retained; other runs use the scalar growth table.
+The compensated one-halo term uses measured `*.mf.out` mass functions, the
+same concentration relation and mass definition recorded in
+`painted_nfw_manifest.csv`, and the mass-conserving kernel
+`u_NFW(k|M)-W_TH(k R_L)`. Exact spherical-Bessel projection validates each
 shell's high-multipole continuation, selected between standard Limber and a
 finite-width flat-sky projection that retains the hard radial shell window.
 The selected branch must stay within one percent through the exact comparison
@@ -61,8 +65,9 @@ python examples/validate_pinocchio_angular_power.py \
 ```
 
 The command writes lean NPZ and CSV products containing measured and predicted
-spectra, particle shot noise, shell weights, resolved HMF mass fractions, and
-the low-k one-halo/linear ratio. It does not write another copy of any map.
+spectra, particle shot noise, shell weights, resolved HMF mass fractions, the
+linear-evolution mode, compensation convention, and low-k one-halo/linear
+ratio. It does not write another copy of any map.
 Generate the paper figures from those products with:
 
 ```bash
