@@ -46,7 +46,8 @@ python examples/paint_halo_particles_for_pinocchio_segment.py \\
 
 The default mode paints the NFW map. Use ``--mode derivatives`` to also save
 map-level derivatives, ``--mode profile`` to print timings, or
-``--mode derivatives-profile`` to do both.
+``--mode derivatives-profile`` to do both. Validation modes compare JAX JVPs
+with two-step central finite differences and retain only compact diagnostics.
 
 Paint only:
 
@@ -114,7 +115,11 @@ import jax.numpy as jnp
 import numpy as np
 
 from geppetto._sparse_jit import (
+    DERIVATIVE_COMPARISON_MAX_STAT_NAMES,
+    DERIVATIVE_COMPARISON_SUM_STAT_NAMES,
+    derivative_comparison_statistics_jit,
     paint_nfw_particle_count_map_and_concentration_jvps_jit,
+    paint_nfw_particle_count_map_concentration_central_difference_jit,
     paint_nfw_particle_count_map_sparse_jit,
 )
 from geppetto import (
@@ -141,6 +146,16 @@ from geppetto.profiles import nfw_halo_overdensity
 _BRUTE_FORCE_STENCIL_BUILDER_REGRESSION_SENTINEL = build_lightcone_sparse_stencil_bruteforce
 _SEGMENT_RE = re.compile(r"seg(\d+)")
 _PIXEL_INDEX_DENSE_MAX_BYTES = 256 * 1024 * 1024
+_DERIVATIVE_PARAMETER_NAMES = (
+    "concentration_amplitude",
+    "concentration_mass_slope",
+    "concentration_redshift_slope",
+)
+_DERIVATIVE_STEP_LABELS = ("h", "h_over_2")
+_DERIVATIVE_VALIDATION_MODES = (
+    "derivatives-validate",
+    "derivatives-validate-profile",
+)
 
 
 @dataclass(frozen=True)
@@ -374,6 +389,12 @@ def timed_stage(name: str, enabled: bool = True):
         print(f"[profile] {name:<40s} {dt:9.4f} s")
 
 
+def derivative_validation_requested(mode: str) -> bool:
+    """Return whether ``mode`` performs finite-difference validation."""
+
+    return mode in _DERIVATIVE_VALIDATION_MODES
+
+
 def parse_args() -> argparse.Namespace:
     """Parse command-line arguments."""
 
@@ -440,13 +461,21 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--mode",
-        choices=("paint", "derivatives", "profile", "derivatives-profile"),
+        choices=(
+            "paint",
+            "derivatives",
+            "profile",
+            "derivatives-profile",
+            *_DERIVATIVE_VALIDATION_MODES,
+        ),
         default="paint",
         help=(
             "Pipeline mode. 'paint' saves the NFW painted map. "
             "'derivatives' also saves map-level derivatives with respect to "
             "concentration--mass parameters. 'profile' prints timings. "
-            "'derivatives-profile' computes derivatives and prints timings."
+            "'derivatives-profile' computes derivatives and prints timings. "
+            "Validation modes compare derivatives with finite differences and "
+            "write diagnostics without map files."
         ),
     )
     parser.add_argument(
@@ -472,6 +501,27 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=2.0e12,
         help="Mass pivot in Msun/h for the concentration--mass relation.",
+    )
+    parser.add_argument(
+        "--derivative-fd-relative-step",
+        type=float,
+        default=1.0e-4,
+        help=(
+            "Base central finite-difference step relative to max(abs(parameter), 1) "
+            "in derivative-validation modes."
+        ),
+    )
+    parser.add_argument(
+        "--derivative-validation-global-rtol",
+        type=float,
+        default=1.0e-4,
+        help="Maximum aggregate fine-step relative L2 derivative error.",
+    )
+    parser.add_argument(
+        "--derivative-validation-shell-rtol",
+        type=float,
+        default=1.0e-3,
+        help="Maximum fine-step relative L2 error for an active shell.",
     )
     mass_definition_group = parser.add_mutually_exclusive_group(required=True)
     mass_definition_group.add_argument(
@@ -743,6 +793,34 @@ def validate_mpi_workflow_args(
     if mpi_context.enabled:
         parts = discover_plc_catalog_parts(Path(args.plc_catalog))
         validate_mpi_plc_part_count(parts, mpi_context.size)
+
+
+def validate_derivative_validation_args(args: argparse.Namespace) -> None:
+    """Validate numerical controls for finite-difference derivative checks."""
+
+    if not derivative_validation_requested(str(args.mode)):
+        return
+    if str(args.jax_precision) != "float64":
+        raise ValueError("derivative validation requires --jax-precision float64")
+    if int(args.segment_workers) != 1:
+        raise ValueError("derivative validation requires --segment-workers 1")
+    relative_step = float(args.derivative_fd_relative_step)
+    if not np.isfinite(relative_step) or relative_step <= 0.0:
+        raise ValueError("--derivative-fd-relative-step must be finite and positive")
+    for name in (
+        "derivative_validation_global_rtol",
+        "derivative_validation_shell_rtol",
+    ):
+        value = float(getattr(args, name))
+        option = "--" + name.replace("_", "-")
+        if not np.isfinite(value) or value <= 0.0:
+            raise ValueError(f"{option} must be finite and positive")
+    amplitude_step = relative_step * max(abs(float(args.concentration_amplitude)), 1.0)
+    if float(args.concentration_amplitude) - amplitude_step <= 0.0:
+        raise ValueError(
+            "--derivative-fd-relative-step makes the negative amplitude "
+            "perturbation non-positive"
+        )
 
 
 def warn_if_float32_precision(args: argparse.Namespace, mpi_context: MpiContext) -> None:
@@ -1535,6 +1613,8 @@ def paint_bucketed_nfw_sparse_map(
     mass_definition: ResolvedHaloMassDefinition | None = None,
     *,
     compute_map_derivatives: bool,
+    validate_map_derivatives: bool = False,
+    derivative_fd_relative_step: float = 1.0e-4,
     profile: bool,
 ) -> tuple[jax.Array, dict[str, float | int | str | np.ndarray]]:
     """Paint one adaptive bucket and optional concentration JVP maps."""
@@ -1559,6 +1639,8 @@ def paint_bucketed_nfw_sparse_map(
     )
     if sample_chunk_size <= 0:
         raise ValueError("sample_chunk_size must be positive")
+    if validate_map_derivatives and not compute_map_derivatives:
+        raise ValueError("finite-difference validation requires map derivatives")
 
     if compute_map_derivatives:
         with timed_stage("NFW particle map + concentration JVPs", profile):
@@ -1631,6 +1713,93 @@ def paint_bucketed_nfw_sparse_map(
             f"concentration={concentration:.12g}, normalization={normalization:.12g}"
         )
 
+    validation_diagnostics: dict[str, float | str | np.ndarray] = {}
+    if validate_map_derivatives:
+        parameter_values = np.asarray(theta, dtype=np.float64)
+        steps = derivative_fd_relative_step * np.maximum(np.abs(parameter_values), 1.0)
+        steps = np.stack((steps, 0.5 * steps), axis=1)
+        sum_statistics = np.zeros(
+            (len(_DERIVATIVE_PARAMETER_NAMES), len(_DERIVATIVE_STEP_LABELS), 6),
+            dtype=np.float64,
+        )
+        max_statistics = np.zeros(
+            (len(_DERIVATIVE_PARAMETER_NAMES), len(_DERIVATIVE_STEP_LABELS), 3),
+            dtype=np.float64,
+        )
+        rank_relative_l2 = np.zeros(
+            (len(_DERIVATIVE_PARAMETER_NAMES), len(_DERIVATIVE_STEP_LABELS)),
+            dtype=np.float64,
+        )
+        global_finite_difference_sums = np.zeros_like(rank_relative_l2)
+        basis = jnp.eye(theta.shape[0], dtype=theta.dtype)
+        with timed_stage("finite-difference derivative validation", profile):
+            for parameter_index in range(len(_DERIVATIVE_PARAMETER_NAMES)):
+                for step_index in range(len(_DERIVATIVE_STEP_LABELS)):
+                    step = jnp.asarray(steps[parameter_index, step_index], dtype=theta.dtype)
+                    finite_difference, global_sum, perturbed_invalid_counts = (
+                        paint_nfw_particle_count_map_concentration_central_difference_jit(
+                            stencil,
+                            rank_catalog,
+                            theta,
+                            basis[parameter_index],
+                            step,
+                            particle_mass,
+                            metadata.cosmology,
+                            mass_pivot,
+                            overdensity,
+                            overdensity_mode=mass_definition.profile_mode,
+                            reference_density=mass_definition.reference_density,
+                            sample_chunk_size=sample_chunk_size,
+                        )
+                    )
+                    additive, maximum = derivative_comparison_statistics_jit(
+                        derivative_maps[parameter_index],
+                        finite_difference,
+                    )
+                    jax.block_until_ready(
+                        (finite_difference, global_sum, perturbed_invalid_counts, additive, maximum)
+                    )
+                    invalid_counts_np = np.asarray(perturbed_invalid_counts, dtype=np.int64)
+                    if np.any(invalid_counts_np):
+                        parameter_name = _DERIVATIVE_PARAMETER_NAMES[parameter_index]
+                        step_label = _DERIVATIVE_STEP_LABELS[step_index]
+                        raise ValueError(
+                            "invalid adaptive NFW normalization in finite-difference "
+                            f"painting: parameter={parameter_name}, step={step_label}, "
+                            f"plus/minus invalid counts={invalid_counts_np.tolist()}"
+                        )
+                    additive_np = np.asarray(additive, dtype=np.float64)
+                    sum_statistics[parameter_index, step_index] = additive_np
+                    max_statistics[parameter_index, step_index] = np.asarray(
+                        maximum,
+                        dtype=np.float64,
+                    )
+                    autodiff_squared_norm = additive_np[0]
+                    residual_squared_norm = additive_np[2]
+                    rank_relative_l2[parameter_index, step_index] = (
+                        np.sqrt(residual_squared_norm / autodiff_squared_norm)
+                        if autodiff_squared_norm > 0.0
+                        else (0.0 if residual_squared_norm == 0.0 else np.inf)
+                    )
+                    global_finite_difference_sums[parameter_index, step_index] = float(
+                        global_sum
+                    )
+                    del finite_difference
+
+        validation_diagnostics = {
+            "nfw_derivative_validation": "central_difference_two_step",
+            "nfw_derivative_validation_relative_step": float(
+                derivative_fd_relative_step
+            ),
+            "nfw_derivative_validation_steps": steps,
+            "nfw_derivative_validation_sum_statistics": sum_statistics,
+            "nfw_derivative_validation_max_statistics": max_statistics,
+            "nfw_derivative_validation_rank_relative_l2": rank_relative_l2,
+            "nfw_derivative_validation_global_finite_difference_sums": (
+                global_finite_difference_sums
+            ),
+        }
+
     particle_counts = result.particle_counts
     diagnostics: dict[str, float | int | str | np.ndarray] = {
         "nfw_map_derivatives": "none",
@@ -1661,6 +1830,7 @@ def paint_bucketed_nfw_sparse_map(
             ),
         }
     )
+    diagnostics.update(validation_diagnostics)
     return particle_counts, diagnostics
 
 
@@ -1680,6 +1850,8 @@ def run_nfw_calibration_pipeline(
     n_resolution: int = 4,
     sample_chunk_size: int = 65536,
     compute_map_derivatives: bool = False,
+    validate_map_derivatives: bool = False,
+    derivative_fd_relative_step: float = 1.0e-4,
     profile: bool = False,
     verbose: bool = True,
     pixel_index: MassMapPixelIndex | None = None,
@@ -1702,6 +1874,10 @@ def run_nfw_calibration_pipeline(
         raise ValueError("concentration_mass_pivot must be positive")
     if sample_chunk_size <= 0:
         raise ValueError("sample_chunk_size must be positive")
+    if validate_map_derivatives and not compute_map_derivatives:
+        raise ValueError("finite-difference validation requires map derivatives")
+    if not np.isfinite(derivative_fd_relative_step) or derivative_fd_relative_step <= 0.0:
+        raise ValueError("derivative_fd_relative_step must be finite and positive")
     if profile and stencil_profile_recorder is None:
         stencil_profile_recorder = StencilProfileRecorder()
     if mass_definition is None:
@@ -1759,6 +1935,8 @@ def run_nfw_calibration_pipeline(
         mass_map.nside,
         mass_definition,
         compute_map_derivatives=compute_map_derivatives,
+        validate_map_derivatives=validate_map_derivatives,
+        derivative_fd_relative_step=derivative_fd_relative_step,
         profile=profile,
     )
 
@@ -1887,6 +2065,346 @@ def save_npz(
             payload[key] = derivative
 
     np.savez_compressed(Path(output), **payload)
+
+
+def derivative_comparison_metrics(
+    sum_statistics: np.ndarray,
+    max_statistics: np.ndarray,
+) -> dict[str, float]:
+    """Return scale-safe comparison metrics from reducible statistics."""
+
+    additive = np.asarray(sum_statistics, dtype=np.float64)
+    maximum = np.asarray(max_statistics, dtype=np.float64)
+    if additive.shape != (len(DERIVATIVE_COMPARISON_SUM_STAT_NAMES),):
+        raise ValueError("derivative additive statistics have an invalid shape")
+    if maximum.shape != (len(DERIVATIVE_COMPARISON_MAX_STAT_NAMES),):
+        raise ValueError("derivative maximum statistics have an invalid shape")
+
+    autodiff_squared_norm = max(0.0, float(additive[0]))
+    finite_difference_squared_norm = max(0.0, float(additive[1]))
+    residual_squared_norm = max(0.0, float(additive[2]))
+    autodiff_norm = np.sqrt(autodiff_squared_norm)
+    finite_difference_norm = np.sqrt(finite_difference_squared_norm)
+    residual_norm = np.sqrt(residual_squared_norm)
+    if autodiff_norm > 0.0:
+        relative_l2 = residual_norm / autodiff_norm
+        best_fit_slope = float(additive[3]) / autodiff_squared_norm
+    else:
+        relative_l2 = 0.0 if residual_norm == 0.0 else np.inf
+        best_fit_slope = 1.0 if finite_difference_norm == 0.0 else np.nan
+    norm_sum = autodiff_norm + finite_difference_norm
+    symmetric_relative_l2 = residual_norm / norm_sum if norm_sum > 0.0 else 0.0
+    norm_product = autodiff_norm * finite_difference_norm
+    cosine_similarity = (
+        float(additive[3]) / norm_product
+        if norm_product > 0.0
+        else (1.0 if norm_sum == 0.0 else 0.0)
+    )
+    maximum_scale = max(float(maximum[0]), float(maximum[1]))
+    maximum_normalized_error = (
+        float(maximum[2]) / maximum_scale
+        if maximum_scale > 0.0
+        else (0.0 if float(maximum[2]) == 0.0 else np.inf)
+    )
+    return {
+        "autodiff_norm": autodiff_norm,
+        "finite_difference_norm": finite_difference_norm,
+        "residual_norm": residual_norm,
+        "relative_l2_error": relative_l2,
+        "symmetric_relative_l2_error": symmetric_relative_l2,
+        "cosine_similarity": cosine_similarity,
+        "best_fit_slope": best_fit_slope,
+        "maximum_normalized_error": maximum_normalized_error,
+    }
+
+
+def calibration_derivative_validation_rows(
+    result: CalibrationSegmentResult,
+    args: argparse.Namespace,
+    provenance: ExecutionProvenance,
+) -> list[dict[str, object]]:
+    """Return normalized finite-difference validation rows for one segment."""
+
+    diagnostics = result.nfw_diagnostics
+    if diagnostics.get("nfw_derivative_validation") != "central_difference_two_step":
+        return []
+    steps = np.asarray(diagnostics["nfw_derivative_validation_steps"], dtype=np.float64)
+    additive = np.asarray(
+        diagnostics["nfw_derivative_validation_sum_statistics"],
+        dtype=np.float64,
+    )
+    maximum = np.asarray(
+        diagnostics["nfw_derivative_validation_max_statistics"],
+        dtype=np.float64,
+    )
+    worst_rank = np.asarray(
+        diagnostics["nfw_derivative_validation_rank_relative_l2"],
+        dtype=np.float64,
+    )
+    global_fd_sums = np.asarray(
+        diagnostics["nfw_derivative_validation_global_finite_difference_sums"],
+        dtype=np.float64,
+    )
+    expected_shape = (len(_DERIVATIVE_PARAMETER_NAMES), len(_DERIVATIVE_STEP_LABELS))
+    if steps.shape != expected_shape or worst_rank.shape != expected_shape:
+        raise ValueError("derivative validation step diagnostics have an invalid shape")
+    if global_fd_sums.shape != expected_shape:
+        raise ValueError("global finite-difference sums have an invalid shape")
+    if additive.shape != expected_shape + (len(DERIVATIVE_COMPARISON_SUM_STAT_NAMES),):
+        raise ValueError("derivative additive diagnostics have an invalid shape")
+    if maximum.shape != expected_shape + (len(DERIVATIVE_COMPARISON_MAX_STAT_NAMES),):
+        raise ValueError("derivative maximum diagnostics have an invalid shape")
+
+    parameter_values = (
+        float(args.concentration_amplitude),
+        float(args.concentration_mass_slope),
+        float(args.concentration_redshift_slope),
+    )
+    global_autodiff_sums = np.asarray(
+        diagnostics["nfw_global_derivative_sums"],
+        dtype=np.float64,
+    )
+    rows: list[dict[str, object]] = []
+    for parameter_index, parameter_name in enumerate(_DERIVATIVE_PARAMETER_NAMES):
+        for step_index, step_label in enumerate(_DERIVATIVE_STEP_LABELS):
+            metrics = derivative_comparison_metrics(
+                additive[parameter_index, step_index],
+                maximum[parameter_index, step_index],
+            )
+            row: dict[str, object] = {
+                "segment_index": int(result.segment_index),
+                "z_lo": float(result.bounds["z_lo"]),
+                "z_hi": float(result.bounds["z_hi"]),
+                "parameter_file": str(args.params),
+                "sheets_file": str(args.sheets),
+                "plc_catalog": str(args.plc_catalog),
+                "mass_map_path": str(result.mass_map_path),
+                "parameter": parameter_name,
+                "parameter_value": parameter_values[parameter_index],
+                "step_label": step_label,
+                "step_size": float(steps[parameter_index, step_index]),
+                "relative_step": float(
+                    diagnostics["nfw_derivative_validation_relative_step"]
+                ),
+                "comparison_domain": "rank_local_maps_before_mpi_sum",
+                "worst_rank_relative_l2_error": float(
+                    worst_rank[parameter_index, step_index]
+                ),
+                "compact_autodiff_sum": float(additive[parameter_index, step_index, 4]),
+                "compact_finite_difference_sum": float(
+                    additive[parameter_index, step_index, 5]
+                ),
+                "global_autodiff_sum": float(global_autodiff_sums[parameter_index]),
+                "global_finite_difference_sum": float(
+                    global_fd_sums[parameter_index, step_index]
+                ),
+                "selected_halo_count": int(diagnostics["nfw_selected_halo_count"]),
+                "nfw_mass_definition": str(diagnostics["nfw_mass_definition"]),
+                "concentration_mass_pivot_msun_h": float(
+                    diagnostics["nfw_concentration_mass_pivot"]
+                ),
+                "theta_resolution_rad": float(
+                    diagnostics["nfw_theta_resolution_rad"]
+                ),
+                "n_resolution": int(diagnostics["nfw_n_resolution"]),
+                "jax_precision": str(args.jax_precision),
+                "mpi_rank_count": provenance.mpi_rank_count,
+                "git_commit": provenance.git_commit,
+            }
+            row.update(
+                {
+                    name: float(additive[parameter_index, step_index, index])
+                    for index, name in enumerate(DERIVATIVE_COMPARISON_SUM_STAT_NAMES)
+                }
+            )
+            row.update(
+                {
+                    name: float(maximum[parameter_index, step_index, index])
+                    for index, name in enumerate(DERIVATIVE_COMPARISON_MAX_STAT_NAMES)
+                }
+            )
+            row.update(metrics)
+            rows.append(row)
+    return rows
+
+
+_DERIVATIVE_VALIDATION_COLUMNS = (
+    "segment_index",
+    "z_lo",
+    "z_hi",
+    "parameter_file",
+    "sheets_file",
+    "plc_catalog",
+    "mass_map_path",
+    "parameter",
+    "parameter_value",
+    "step_label",
+    "step_size",
+    "relative_step",
+    "comparison_domain",
+    *DERIVATIVE_COMPARISON_SUM_STAT_NAMES,
+    *DERIVATIVE_COMPARISON_MAX_STAT_NAMES,
+    "autodiff_norm",
+    "finite_difference_norm",
+    "residual_norm",
+    "relative_l2_error",
+    "symmetric_relative_l2_error",
+    "cosine_similarity",
+    "best_fit_slope",
+    "maximum_normalized_error",
+    "worst_rank_relative_l2_error",
+    "compact_autodiff_sum",
+    "compact_finite_difference_sum",
+    "global_autodiff_sum",
+    "global_finite_difference_sum",
+    "selected_halo_count",
+    "nfw_mass_definition",
+    "concentration_mass_pivot_msun_h",
+    "theta_resolution_rad",
+    "n_resolution",
+    "jax_precision",
+    "mpi_rank_count",
+    "git_commit",
+)
+
+
+def write_derivative_validation_csv(
+    path: Path,
+    rows: list[dict[str, object]],
+) -> None:
+    """Write per-shell finite-difference diagnostics."""
+
+    if not rows:
+        raise ValueError("derivative validation produced no diagnostic rows")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=_DERIVATIVE_VALIDATION_COLUMNS)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def derivative_validation_summary_rows(
+    rows: list[dict[str, object]],
+    *,
+    global_rtol: float,
+    shell_rtol: float,
+) -> tuple[list[dict[str, object]], bool]:
+    """Aggregate all shells and evaluate finite-difference acceptance criteria."""
+
+    summary_rows: list[dict[str, object]] = []
+    overall_passed = True
+    for parameter_name in _DERIVATIVE_PARAMETER_NAMES:
+        parameter_rows = [row for row in rows if row["parameter"] == parameter_name]
+        step_metrics: dict[str, dict[str, float]] = {}
+        for step_label in _DERIVATIVE_STEP_LABELS:
+            selected = [row for row in parameter_rows if row["step_label"] == step_label]
+            if not selected:
+                raise ValueError(
+                    f"missing {step_label} validation rows for {parameter_name}"
+                )
+            additive = np.asarray(
+                [
+                    sum(float(row[name]) for row in selected)
+                    for name in DERIVATIVE_COMPARISON_SUM_STAT_NAMES
+                ],
+                dtype=np.float64,
+            )
+            maximum = np.asarray(
+                [
+                    max(float(row[name]) for row in selected)
+                    for name in DERIVATIVE_COMPARISON_MAX_STAT_NAMES
+                ],
+                dtype=np.float64,
+            )
+            step_metrics[step_label] = derivative_comparison_metrics(additive, maximum)
+
+        coarse = step_metrics["h"]
+        fine = step_metrics["h_over_2"]
+        active_fine_rows = [
+            row
+            for row in parameter_rows
+            if row["step_label"] == "h_over_2"
+            and (
+                float(row["autodiff_squared_norm"]) > 0.0
+                or float(row["finite_difference_squared_norm"]) > 0.0
+            )
+        ]
+        maximum_shell_relative_l2 = max(
+            (float(row["relative_l2_error"]) for row in active_fine_rows),
+            default=0.0,
+        )
+        coarse_error = coarse["relative_l2_error"]
+        fine_error = fine["relative_l2_error"]
+        convergence_ratio = (
+            fine_error / coarse_error
+            if coarse_error > 0.0
+            else (0.0 if fine_error == 0.0 else np.inf)
+        )
+        convergence_passed = (
+            fine_error <= 1.05 * coarse_error
+            or max(fine_error, coarse_error) <= 1.0e-6
+        )
+        parameter_passed = bool(
+            np.isfinite(fine_error)
+            and fine_error <= global_rtol
+            and maximum_shell_relative_l2 <= shell_rtol
+            and fine["cosine_similarity"] >= 0.999999
+            and convergence_passed
+        )
+        overall_passed = overall_passed and parameter_passed
+        summary_rows.append(
+            {
+                "parameter": parameter_name,
+                "parameter_value": float(parameter_rows[0]["parameter_value"]),
+                "coarse_relative_l2_error": coarse_error,
+                "fine_relative_l2_error": fine_error,
+                "maximum_shell_fine_relative_l2_error": maximum_shell_relative_l2,
+                "coarse_cosine_similarity": coarse["cosine_similarity"],
+                "fine_cosine_similarity": fine["cosine_similarity"],
+                "fine_best_fit_slope": fine["best_fit_slope"],
+                "fine_maximum_normalized_error": fine["maximum_normalized_error"],
+                "coarse_to_fine_error_ratio": convergence_ratio,
+                "global_rtol": global_rtol,
+                "shell_rtol": shell_rtol,
+                "convergence_passed": convergence_passed,
+                "passed": parameter_passed,
+            }
+        )
+    return summary_rows, overall_passed
+
+
+_DERIVATIVE_VALIDATION_SUMMARY_COLUMNS = (
+    "parameter",
+    "parameter_value",
+    "coarse_relative_l2_error",
+    "fine_relative_l2_error",
+    "maximum_shell_fine_relative_l2_error",
+    "coarse_cosine_similarity",
+    "fine_cosine_similarity",
+    "fine_best_fit_slope",
+    "fine_maximum_normalized_error",
+    "coarse_to_fine_error_ratio",
+    "global_rtol",
+    "shell_rtol",
+    "convergence_passed",
+    "passed",
+)
+
+
+def write_derivative_validation_summary_csv(
+    path: Path,
+    rows: list[dict[str, object]],
+) -> None:
+    """Write aggregate derivative-validation acceptance results."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=_DERIVATIVE_VALIDATION_SUMMARY_COLUMNS,
+        )
+        writer.writeheader()
+        writer.writerows(rows)
 
 
 def write_manifest(path: Path, rows: list[dict[str, object]]) -> None:
@@ -2086,6 +2604,10 @@ def compute_calibration_for_segment(
             n_resolution=args.n_resolution,
             sample_chunk_size=args.nfw_sample_chunk_size,
             compute_map_derivatives=compute_map_derivatives,
+            validate_map_derivatives=derivative_validation_requested(args.mode),
+            derivative_fd_relative_step=float(
+                getattr(args, "derivative_fd_relative_step", 1.0e-4)
+            ),
             profile=stage_profile,
             verbose=verbose,
             pixel_index=pixel_index,
@@ -2209,6 +2731,12 @@ def calibration_manifest_row(
         "segment_worker_count": provenance.segment_worker_count,
         "git_commit": provenance.git_commit,
     }
+    if derivative_validation_requested(str(args.mode)):
+        row["_derivative_validation_rows"] = calibration_derivative_validation_rows(
+            result,
+            args,
+            provenance,
+        )
     return row
 
 
@@ -2223,12 +2751,17 @@ def write_calibration_segment_outputs(
 ) -> dict[str, object]:
     """Write one computed segment payload and return its manifest row."""
 
-    with timed_stage("save compressed NPZ", profile):
-        save_npz(result.output_npz, result.nfw_diagnostics)
+    validation_only = derivative_validation_requested(str(args.mode))
+    if not validation_only:
+        with timed_stage("save compressed NPZ", profile):
+            save_npz(result.output_npz, result.nfw_diagnostics)
 
     if verbose:
         print_nfw_calibration_summary(result.nfw_diagnostics)
-        print(f"Wrote NPZ: {result.output_npz}")
+        if validation_only:
+            print("  Perturbed maps: transient validation-only arrays")
+        else:
+            print(f"Wrote NPZ: {result.output_npz}")
 
     return calibration_manifest_row(result, args, metadata, provenance)
 
@@ -2400,9 +2933,17 @@ def reduce_calibration_segment_result(
     if not mpi_context.enabled:
         return local_result
 
-    reduced_nfw_counts = _mpi_reduce_array(
-        np.asarray(local_result.nfw_diagnostics["nfw_particle_counts"]),
-        mpi_context,
+    validation_only = (
+        local_result.nfw_diagnostics.get("nfw_derivative_validation")
+        == "central_difference_two_step"
+    )
+    reduced_nfw_counts = (
+        None
+        if validation_only
+        else _mpi_reduce_array(
+            np.asarray(local_result.nfw_diagnostics["nfw_particle_counts"]),
+            mpi_context,
+        )
     )
 
     derivative_array_keys = (
@@ -2410,14 +2951,18 @@ def reduce_calibration_segment_result(
         "d_nfw_particle_counts_d_concentration_mass_slope",
         "d_nfw_particle_counts_d_concentration_redshift_slope",
     )
-    reduced_derivative_arrays = {
-        key: _mpi_reduce_array(
-            np.asarray(local_result.nfw_diagnostics[key]),
-            mpi_context,
-        )
-        for key in derivative_array_keys
-        if key in local_result.nfw_diagnostics
-    }
+    reduced_derivative_arrays = (
+        {}
+        if validation_only
+        else {
+            key: _mpi_reduce_array(
+                np.asarray(local_result.nfw_diagnostics[key]),
+                mpi_context,
+            )
+            for key in derivative_array_keys
+            if key in local_result.nfw_diagnostics
+        }
+    )
     reduced_global_derivative_sums = (
         _mpi_reduce_array(
             np.asarray(local_result.nfw_diagnostics["nfw_global_derivative_sums"]),
@@ -2432,6 +2977,54 @@ def reduce_calibration_segment_result(
             mpi_context,
         )
         if "nfw_compact_derivative_sums" in local_result.nfw_diagnostics
+        else None
+    )
+    reduced_validation_sum_statistics = (
+        _mpi_reduce_array(
+            np.asarray(
+                local_result.nfw_diagnostics[
+                    "nfw_derivative_validation_sum_statistics"
+                ]
+            ),
+            mpi_context,
+        )
+        if validation_only
+        else None
+    )
+    reduced_validation_max_statistics = (
+        _mpi_reduce_max_array(
+            np.asarray(
+                local_result.nfw_diagnostics[
+                    "nfw_derivative_validation_max_statistics"
+                ]
+            ),
+            mpi_context,
+        )
+        if validation_only
+        else None
+    )
+    reduced_validation_rank_relative_l2 = (
+        _mpi_reduce_max_array(
+            np.asarray(
+                local_result.nfw_diagnostics[
+                    "nfw_derivative_validation_rank_relative_l2"
+                ]
+            ),
+            mpi_context,
+        )
+        if validation_only
+        else None
+    )
+    reduced_validation_global_fd_sums = (
+        _mpi_reduce_array(
+            np.asarray(
+                local_result.nfw_diagnostics[
+                    "nfw_derivative_validation_global_finite_difference_sums"
+                ]
+            ),
+            mpi_context,
+        )
+        if validation_only
         else None
     )
 
@@ -2482,13 +3075,22 @@ def reduce_calibration_segment_result(
     if not mpi_context.is_root:
         return None
 
-    assert reduced_nfw_counts is not None
+    if not validation_only:
+        assert reduced_nfw_counts is not None
     assert reduced_integer_diagnostics is not None
     assert reduced_float_diagnostics is not None
     assert reduced_max_diagnostics is not None
 
     nfw_diagnostics = dict(local_result.nfw_diagnostics)
-    nfw_diagnostics["nfw_particle_counts"] = np.asarray(reduced_nfw_counts)
+    if validation_only:
+        nfw_diagnostics["nfw_particle_counts"] = np.empty(
+            (0,),
+            dtype=np.asarray(local_result.nfw_diagnostics["nfw_particle_counts"]).dtype,
+        )
+        for key in derivative_array_keys:
+            nfw_diagnostics.pop(key, None)
+    else:
+        nfw_diagnostics["nfw_particle_counts"] = np.asarray(reduced_nfw_counts)
     for key, value in reduced_derivative_arrays.items():
         assert value is not None
         nfw_diagnostics[key] = np.asarray(value)
@@ -2500,6 +3102,22 @@ def reduce_calibration_segment_result(
         nfw_diagnostics["nfw_compact_derivative_sums"] = np.asarray(
             reduced_compact_derivative_sums
         )
+    if reduced_validation_sum_statistics is not None:
+        nfw_diagnostics["nfw_derivative_validation_sum_statistics"] = np.asarray(
+            reduced_validation_sum_statistics
+        )
+    if reduced_validation_max_statistics is not None:
+        nfw_diagnostics["nfw_derivative_validation_max_statistics"] = np.asarray(
+            reduced_validation_max_statistics
+        )
+    if reduced_validation_rank_relative_l2 is not None:
+        nfw_diagnostics["nfw_derivative_validation_rank_relative_l2"] = np.asarray(
+            reduced_validation_rank_relative_l2
+        )
+    if reduced_validation_global_fd_sums is not None:
+        nfw_diagnostics[
+            "nfw_derivative_validation_global_finite_difference_sums"
+        ] = np.asarray(reduced_validation_global_fd_sums)
     for key, value in zip(
         present_nfw_keys,
         reduced_integer_diagnostics,
@@ -2514,11 +3132,16 @@ def reduce_calibration_segment_result(
         nfw_diagnostics[key] = float(value)
     for key, value in zip(max_keys, reduced_max_diagnostics, strict=True):
         nfw_diagnostics[key] = int(value)
-    retained_particle_count = float(
-        np.sum(nfw_diagnostics["nfw_particle_counts"], dtype=np.float64)
-    )
+    if validation_only:
+        retained_particle_count = float(
+            nfw_diagnostics["nfw_retained_compact_particle_count"]
+        )
+    else:
+        retained_particle_count = float(
+            np.sum(nfw_diagnostics["nfw_particle_counts"], dtype=np.float64)
+        )
+        nfw_diagnostics["nfw_retained_compact_particle_count"] = retained_particle_count
     nfw_diagnostics["nfw_sum_particle_counts"] = retained_particle_count
-    nfw_diagnostics["nfw_retained_compact_particle_count"] = retained_particle_count
     expected_particle_count = float(
         nfw_diagnostics["nfw_expected_global_particle_count"]
     )
@@ -2596,13 +3219,22 @@ def run_segment_workflow(
         )
     )
 
-    manifest_rows = []
+    manifest_rows: list[dict[str, object]] = []
+    derivative_validation_rows: list[dict[str, object]] = []
     profile_rank_timings: list[np.ndarray] = []
+
+    def record_output_row(row: dict[str, object]) -> None:
+        private_rows = row.pop("_derivative_validation_rows", [])
+        if not isinstance(private_rows, list):
+            raise TypeError("derivative validation rows must be stored as a list")
+        derivative_validation_rows.extend(private_rows)
+        manifest_rows.append(row)
+
     if not mpi_context.enabled and segment_workers == 1:
         for (segment_index, mass_map_path), output_npz, inclusive_upper in (
             segment_specs
         ):
-            manifest_rows.append(
+            record_output_row(
                 run_calibration_for_segment(
                     segment_index=segment_index,
                     mass_map_path=mass_map_path,
@@ -2714,7 +3346,7 @@ def run_segment_workflow(
                         result_wait_seconds=result_wait_seconds,
                     )
                     if row is not None:
-                        manifest_rows.append(row)
+                        record_output_row(row)
             else:
                 spec_iter = iter(segment_specs)
                 pending = deque()
@@ -2739,7 +3371,7 @@ def run_segment_workflow(
                             result_wait_seconds=result_wait_seconds,
                         )
                         if row is not None:
-                            manifest_rows.append(row)
+                            record_output_row(row)
                         try:
                             pending.append(executor.submit(compute_one, next(spec_iter)))
                         except StopIteration:
@@ -2755,7 +3387,7 @@ def run_segment_workflow(
                 local_results,
                 key=lambda item: item.result.segment_index,
             ):
-                manifest_rows.append(
+                record_output_row(
                     write_calibration_segment_outputs(
                         computed.result,
                         args,
@@ -2770,7 +3402,37 @@ def run_segment_workflow(
         rank_totals = np.sum(np.stack(profile_rank_timings, axis=0), axis=0)
         print_rank_timing_summary("all-segment totals", rank_totals)
 
-    if workflow == "all" and mpi_context.is_root:
+    validation_requested = derivative_validation_requested(str(args.mode))
+    if validation_requested and mpi_context.is_root:
+        if workflow == "all":
+            validation_dir = Path(args.output_dir)
+            detail_path = validation_dir / "painted_nfw_derivative_validation.csv"
+            summary_path = (
+                validation_dir / "painted_nfw_derivative_validation_summary.csv"
+            )
+        else:
+            output = Path(args.output)
+            detail_path = output.with_name(
+                f"{output.stem}.derivative_validation.csv"
+            )
+            summary_path = output.with_name(
+                f"{output.stem}.derivative_validation_summary.csv"
+            )
+        write_derivative_validation_csv(detail_path, derivative_validation_rows)
+        summary_rows, validation_passed = derivative_validation_summary_rows(
+            derivative_validation_rows,
+            global_rtol=float(args.derivative_validation_global_rtol),
+            shell_rtol=float(args.derivative_validation_shell_rtol),
+        )
+        write_derivative_validation_summary_csv(summary_path, summary_rows)
+        print(f"Wrote derivative validation: {detail_path}")
+        print(f"Wrote derivative validation summary: {summary_path}")
+        if not validation_passed:
+            raise RuntimeError(
+                "finite-difference concentration-derivative validation failed; "
+                f"inspect {summary_path}"
+            )
+    elif workflow == "all" and mpi_context.is_root:
         manifest_path = Path(args.output_dir) / "painted_nfw_manifest.csv"
         with timed_stage("write manifest", profile):
             write_manifest(manifest_path, manifest_rows)
@@ -2787,8 +3449,17 @@ def main() -> None:
     try:
         warn_if_float32_precision(args, mpi_context)
         validate_mpi_workflow_args(args, workflow=workflow, mpi_context=mpi_context)
-        profile = args.mode in ("profile", "derivatives-profile")
-        compute_map_derivatives = args.mode in ("derivatives", "derivatives-profile")
+        validate_derivative_validation_args(args)
+        profile = args.mode in (
+            "profile",
+            "derivatives-profile",
+            "derivatives-validate-profile",
+        )
+        compute_map_derivatives = args.mode in (
+            "derivatives",
+            "derivatives-profile",
+            *_DERIVATIVE_VALIDATION_MODES,
+        )
 
         with timed_stage("read parameter file", profile):
             metadata = read_pinocchio_parameter_file(args.params)

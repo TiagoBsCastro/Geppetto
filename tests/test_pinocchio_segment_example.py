@@ -166,6 +166,9 @@ def _workflow_args(**overrides) -> SimpleNamespace:
         "concentration_mass_slope": -0.084,
         "concentration_redshift_slope": -0.47,
         "concentration_mass_pivot": 2.0e12,
+        "derivative_fd_relative_step": 1.0e-4,
+        "derivative_validation_global_rtol": 1.0e-4,
+        "derivative_validation_shell_rtol": 1.0e-3,
         "nfw_overdensity": 200.0,
         "nfw_virial_overdensity": False,
         "nfw_overdensity_by_segment": None,
@@ -578,6 +581,25 @@ def test_validate_mpi_workflow_args_rejects_missing_flag(tmp_path):
             args,
             workflow="single",
             mpi_context=module.MpiContext(enabled=False, size=2),
+        )
+
+
+def test_derivative_validation_requires_float64_one_worker_and_valid_steps():
+    module = _load_example_module()
+    valid = _workflow_args(mode="derivatives-validate")
+    module.validate_derivative_validation_args(valid)
+
+    with pytest.raises(ValueError, match="requires --jax-precision float64"):
+        module.validate_derivative_validation_args(
+            _workflow_args(mode="derivatives-validate", jax_precision="float32")
+        )
+    with pytest.raises(ValueError, match="requires --segment-workers 1"):
+        module.validate_derivative_validation_args(
+            _workflow_args(mode="derivatives-validate", segment_workers=2)
+        )
+    with pytest.raises(ValueError, match="must be finite and positive"):
+        module.validate_derivative_validation_args(
+            _workflow_args(mode="derivatives-validate", derivative_fd_relative_step=0.0)
         )
 
 def test_timed_stage_disabled_does_not_print(capsys):
@@ -1044,6 +1066,47 @@ def test_run_calibration_for_segment_writes_npz_with_derivative_arrays(
     assert row["assigned_to_expected_ratio"] == pytest.approx(1.0)
 
 
+def test_derivative_validation_workflow_writes_metrics_without_maps(
+    tmp_path,
+    monkeypatch,
+):
+    module = _load_example_module()
+    catalog, _, mass_map, _ = _single_pixel_pipeline_case()
+    metadata = SimpleNamespace(particle_mass_msun_h=1.0e10, cosmology=Cosmology())
+    output_npz = tmp_path / "validation.npz"
+    monkeypatch.setattr(module, "read_pinocchio_mass_map_fits", lambda path: mass_map)
+    args = _workflow_args(
+        mode="derivatives-validate",
+        output=output_npz,
+        mass_map=tmp_path / "pinocchio.example.massmap.seg000.fits",
+    )
+
+    rows = module.run_segment_workflow(
+        args,
+        workflow="single",
+        catalog=catalog,
+        sheets=_sheets(),
+        metadata=metadata,
+        particle_mass=metadata.particle_mass_msun_h,
+        profile=False,
+        compute_map_derivatives=True,
+    )
+
+    assert len(rows) == 1
+    assert not output_npz.exists()
+    detail_path = tmp_path / "validation.derivative_validation.csv"
+    summary_path = tmp_path / "validation.derivative_validation_summary.csv"
+    assert detail_path.exists()
+    assert summary_path.exists()
+    with detail_path.open(newline="") as handle:
+        detail_rows = list(csv.DictReader(handle))
+    with summary_path.open(newline="") as handle:
+        summary_rows = list(csv.DictReader(handle))
+    assert len(detail_rows) == 6
+    assert len(summary_rows) == 3
+    assert all(row["passed"] == "True" for row in summary_rows)
+
+
 def test_adaptive_pair_bucket_size_and_compilation_shape_reuse():
     module = _load_example_module()
     assert module.sparse_pair_bucket_size(0) == 0
@@ -1111,6 +1174,59 @@ def test_bucketed_adaptive_jit_matches_public_painter_and_conserves_mass(dtype):
         derivative_diagnostics["nfw_global_derivative_sums"],
         0.0,
         atol=1.0e-4 if dtype == jnp.float32 else 1.0e-9,
+    )
+
+
+def test_bucketed_adaptive_jvps_match_two_step_central_differences():
+    module = _load_example_module()
+    catalog = LightconeHaloCatalog(
+        unit_vector=jnp.asarray([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]),
+        chi=jnp.asarray([1000.0, 1200.0]),
+        mass=jnp.asarray([1.0e13, 2.0e13]),
+        redshift=jnp.asarray([0.2, 0.3]),
+    )
+    stencil = _adaptive_test_stencil()
+    _, diagnostics = module.paint_bucketed_nfw_sparse_map(
+        stencil,
+        catalog,
+        SimpleNamespace(cosmology=Cosmology()),
+        1.0e10,
+        5.71,
+        -0.084,
+        -0.47,
+        2.0e12,
+        2,
+        np.array([1.0, 1.0]),
+        8,
+        compute_map_derivatives=True,
+        validate_map_derivatives=True,
+        derivative_fd_relative_step=1.0e-4,
+        profile=False,
+    )
+
+    additive = diagnostics["nfw_derivative_validation_sum_statistics"]
+    maximum = diagnostics["nfw_derivative_validation_max_statistics"]
+    assert additive.shape == (3, 2, 6)
+    assert maximum.shape == (3, 2, 3)
+    for parameter_index in range(3):
+        coarse = module.derivative_comparison_metrics(
+            additive[parameter_index, 0],
+            maximum[parameter_index, 0],
+        )
+        fine = module.derivative_comparison_metrics(
+            additive[parameter_index, 1],
+            maximum[parameter_index, 1],
+        )
+        assert fine["relative_l2_error"] < 1.0e-6
+        assert fine["cosine_similarity"] > 1.0 - 1.0e-10
+        assert (
+            fine["relative_l2_error"] <= 1.05 * coarse["relative_l2_error"]
+            or fine["relative_l2_error"] <= 1.0e-6
+        )
+    np.testing.assert_allclose(
+        diagnostics["nfw_derivative_validation_global_finite_difference_sums"],
+        0.0,
+        atol=1.0e-7,
     )
 
 
@@ -1326,6 +1442,74 @@ def test_mpi_reduce_array_preserves_float32_and_uses_receive_buffer():
     np.testing.assert_allclose(reduced, [2.0, 4.0])
 
 
+def test_derivative_validation_reduces_statistics_without_map_arrays():
+    module = _load_example_module()
+    local = _fake_segment_result(
+        module,
+        segment_index=0,
+        mass_map_path=Path("massmap.seg000.fits"),
+        output_npz=Path("painted.seg000.npz"),
+        inclusive_upper=False,
+    )
+    local.nfw_diagnostics.update(
+        {
+            "nfw_particle_counts": np.arange(7.0),
+            "nfw_map_derivatives": "concentration",
+            "d_nfw_particle_counts_d_concentration_amplitude": np.ones(7),
+            "d_nfw_particle_counts_d_concentration_mass_slope": np.ones(7),
+            "d_nfw_particle_counts_d_concentration_redshift_slope": np.ones(7),
+            "nfw_global_derivative_sums": np.zeros(3),
+            "nfw_compact_derivative_sums": np.ones(3),
+            "nfw_derivative_validation": "central_difference_two_step",
+            "nfw_derivative_validation_steps": np.ones((3, 2)),
+            "nfw_derivative_validation_sum_statistics": np.ones((3, 2, 6)),
+            "nfw_derivative_validation_max_statistics": np.full((3, 2, 3), 2.0),
+            "nfw_derivative_validation_rank_relative_l2": np.full((3, 2), 0.1),
+            "nfw_derivative_validation_global_finite_difference_sums": np.zeros(
+                (3, 2)
+            ),
+        }
+    )
+
+    class RecordingComm:
+        def __init__(self):
+            self.shapes = []
+
+        def Reduce(self, send_buffer, receive_buffer, op=None, root=0):
+            assert root == 0
+            self.shapes.append(np.asarray(send_buffer).shape)
+            factor = 1.0 if op == "max" else 2.0
+            receive_buffer[...] = factor * send_buffer
+
+    comm = RecordingComm()
+    reduced = module.reduce_calibration_segment_result(
+        local,
+        module.MpiContext(
+            enabled=True,
+            comm=comm,
+            rank=0,
+            size=2,
+            sum_op="sum",
+            max_op="max",
+        ),
+    )
+
+    assert reduced is not None
+    assert (7,) not in comm.shapes
+    assert reduced.nfw_diagnostics["nfw_particle_counts"].size == 0
+    assert "d_nfw_particle_counts_d_concentration_amplitude" not in (
+        reduced.nfw_diagnostics
+    )
+    np.testing.assert_allclose(
+        reduced.nfw_diagnostics["nfw_derivative_validation_sum_statistics"],
+        2.0,
+    )
+    np.testing.assert_allclose(
+        reduced.nfw_diagnostics["nfw_derivative_validation_max_statistics"],
+        2.0,
+    )
+
+
 def test_reduce_calibration_segment_result_non_root_uses_no_receive_buffers():
     module = _load_example_module()
     local = _fake_segment_result(
@@ -1485,14 +1669,14 @@ def test_real_mpi_workflow_matches_serial_for_worker_counts_and_derivatives(
     monkeypatch.setattr(module, "read_pinocchio_mass_map_fits", fake_read_mass_map)
     metadata = SimpleNamespace(particle_mass_msun_h=1.0e10, cosmology=Cosmology())
 
-    def workflow_args(output_dir, workers, *, mpi_enabled):
+    def workflow_args(output_dir, workers, *, mpi_enabled, mode="derivatives"):
         return _workflow_args(
             mass_map=None,
             sheet_index=None,
             output=None,
             mass_map_glob=str(rank_path / "run.massmap.seg*.fits"),
             output_dir=output_dir,
-            mode="derivatives",
+            mode=mode,
             segment_workers=workers,
             mpi_plc_parts=mpi_enabled,
         )
@@ -1563,6 +1747,92 @@ def test_real_mpi_workflow_matches_serial_for_worker_counts_and_derivatives(
                         rtol=1.0e-12,
                         atol=1.0e-12,
                     )
+
+    serial_validation_dir = rank_path / "serial_validation"
+    module.run_segment_workflow(
+        workflow_args(
+            serial_validation_dir,
+            1,
+            mpi_enabled=False,
+            mode="derivatives-validate",
+        ),
+        workflow="all",
+        catalog=full_catalog,
+        sheets=sheets,
+        metadata=metadata,
+        particle_mass=metadata.particle_mass_msun_h,
+        profile=False,
+        compute_map_derivatives=True,
+    )
+    mpi_validation_dir = rank_path / "mpi_validation"
+    mpi_validation_rows = module.run_segment_workflow(
+        workflow_args(
+            mpi_validation_dir,
+            1,
+            mpi_enabled=True,
+            mode="derivatives-validate",
+        ),
+        workflow="all",
+        catalog=rank_catalog,
+        sheets=sheets,
+        metadata=metadata,
+        particle_mass=metadata.particle_mass_msun_h,
+        profile=False,
+        compute_map_derivatives=True,
+        mpi_context=module.MpiContext(
+            enabled=True,
+            comm=comm,
+            rank=comm.Get_rank(),
+            size=comm.Get_size(),
+            sum_op=mpi.SUM,
+            max_op=mpi.MAX,
+        ),
+    )
+    comm.Barrier()
+    if comm.Get_rank() != 0:
+        assert mpi_validation_rows == []
+        return
+
+    def read_validation_rows(path):
+        with path.open(newline="") as handle:
+            return sorted(
+                csv.DictReader(handle),
+                key=lambda row: (
+                    int(row["segment_index"]),
+                    row["parameter"],
+                    row["step_label"],
+                ),
+            )
+
+    serial_validation = read_validation_rows(
+        serial_validation_dir / "painted_nfw_derivative_validation.csv"
+    )
+    mpi_validation = read_validation_rows(
+        mpi_validation_dir / "painted_nfw_derivative_validation.csv"
+    )
+    assert len(serial_validation) == len(mpi_validation) == 12
+    for serial_row, mpi_row in zip(serial_validation, mpi_validation, strict=True):
+        assert (
+            serial_row["segment_index"],
+            serial_row["parameter"],
+            serial_row["step_label"],
+        ) == (
+            mpi_row["segment_index"],
+            mpi_row["parameter"],
+            mpi_row["step_label"],
+        )
+        for key in (
+            "compact_autodiff_sum",
+            "compact_finite_difference_sum",
+            "global_autodiff_sum",
+            "global_finite_difference_sum",
+        ):
+            assert float(mpi_row[key]) == pytest.approx(
+                float(serial_row[key]),
+                rel=1.0e-8,
+                abs=1.0e-8,
+            )
+        assert float(mpi_row["relative_l2_error"]) < 1.0e-4
 
 
 def test_real_mpi_segment_timing_gather():

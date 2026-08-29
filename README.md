@@ -220,8 +220,8 @@ The command-line entrypoint is:
 examples/paint_halo_particles_for_pinocchio_segment.py
 ```
 
-It always writes an NFW painted map in particle-count-equivalent units. In
-derivative modes it also saves:
+Normal painting modes write an NFW map in particle-count-equivalent units. In
+derivative modes they also save:
 
 ```text
 d_nfw_particle_counts_d_concentration_amplitude
@@ -417,6 +417,13 @@ the lean NPZ arrays.
 
 --mode derivatives-profile
     Compute derivatives and print timing information.
+
+--mode derivatives-validate
+    Compare all three derivative maps with two-step central finite differences.
+    Write validation tables without retaining map arrays.
+
+--mode derivatives-validate-profile
+    Run finite-difference validation and print timing information.
 ```
 
 Calibration parameters exposed by the CLI:
@@ -431,6 +438,40 @@ Calibration parameters exposed by the CLI:
 ```
 
 The mass pivot is fixed when derivative maps are computed.
+
+### Finite-Difference Derivative Validation
+
+The validation modes independently repaint every segment at positive and
+negative perturbations of concentration amplitude, mass slope, and redshift
+slope. They compare the central finite differences at steps `h` and `h/2` with
+the JAX JVP maps. Stencil geometry, adaptive branches, and compact pixel rows
+remain fixed because they are independent of concentration.
+
+Validation requires float64 and one segment worker per MPI rank. Perturbed maps
+are reduced to scalar norms, dot products, extrema, compact sums, and global
+mass-derivative sums before being discarded. The output directory contains only
+the detailed and aggregate CSV tables:
+
+Map norms are accumulated over rank-local maps before the MPI sum. Agreement on
+every rank implies agreement after the linear map reduction, while the compact
+and global derivative sums are themselves reduced across ranks. A real MPI test
+also checks the final reduced JVP maps against the serial full catalogue.
+
+```text
+painted_nfw_derivative_validation.csv
+painted_nfw_derivative_validation_summary.csv
+```
+
+Render the comparison figures with:
+
+```bash
+python examples/plot_concentration_derivative_validation.py \
+  --input-dir /path/to/derivative_validation \
+  --output-dir /path/to/derivative_validation
+```
+
+The Leonardo one-node, 30-rank production configuration is provided in
+`scripts/leonardo/submit_derivative_validation.sh`.
 
 ## Python API Overview
 

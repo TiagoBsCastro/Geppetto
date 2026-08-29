@@ -15,6 +15,20 @@ from geppetto.painters import (
 from geppetto.profiles import NFWProfileParams
 from geppetto.types import Array
 
+DERIVATIVE_COMPARISON_SUM_STAT_NAMES = (
+    "autodiff_squared_norm",
+    "finite_difference_squared_norm",
+    "residual_squared_norm",
+    "autodiff_finite_difference_dot",
+    "autodiff_sum",
+    "finite_difference_sum",
+)
+DERIVATIVE_COMPARISON_MAX_STAT_NAMES = (
+    "maximum_absolute_autodiff",
+    "maximum_absolute_finite_difference",
+    "maximum_absolute_residual",
+)
+
 
 def _particle_count_map_from_concentration(
     stencil: AdaptiveLightconeStencil,
@@ -88,6 +102,93 @@ def _particle_count_map_and_concentration_jvps(
     )
 
 
+def _particle_count_map_concentration_central_difference(
+    stencil: AdaptiveLightconeStencil,
+    catalog: LightconeHaloCatalog,
+    theta: Array,
+    direction: Array,
+    step: Array,
+    particle_mass_msun_h: Array,
+    cosmology: Cosmology,
+    concentration_mass_pivot: Array,
+    overdensity: Array,
+    *,
+    overdensity_mode: str,
+    reference_density: str,
+    sample_chunk_size: int,
+) -> tuple[Array, Array, Array]:
+    """Return a central-difference map, global sum, and invalid counts."""
+
+    offset = step * direction
+    plus = _particle_count_map_from_concentration(
+        stencil,
+        catalog,
+        theta + offset,
+        particle_mass_msun_h,
+        cosmology,
+        concentration_mass_pivot,
+        overdensity,
+        overdensity_mode=overdensity_mode,
+        reference_density=reference_density,
+        sample_chunk_size=sample_chunk_size,
+    )
+    minus = _particle_count_map_from_concentration(
+        stencil,
+        catalog,
+        theta - offset,
+        particle_mass_msun_h,
+        cosmology,
+        concentration_mass_pivot,
+        overdensity,
+        overdensity_mode=overdensity_mode,
+        reference_density=reference_density,
+        sample_chunk_size=sample_chunk_size,
+    )
+    denominator = 2.0 * step
+    invalid_counts = jnp.stack(
+        (
+            jnp.sum(plus.invalid_normalization, dtype=jnp.int32),
+            jnp.sum(minus.invalid_normalization, dtype=jnp.int32),
+        )
+    )
+    return (
+        (plus.particle_counts - minus.particle_counts) / denominator,
+        (
+            plus.assigned_global_particle_count
+            - minus.assigned_global_particle_count
+        )
+        / denominator,
+        invalid_counts,
+    )
+
+
+def _derivative_comparison_statistics(
+    autodiff: Array,
+    finite_difference: Array,
+) -> tuple[Array, Array]:
+    """Return additive and maximum statistics for two derivative maps."""
+
+    residual = finite_difference - autodiff
+    sum_statistics = jnp.stack(
+        (
+            jnp.sum(autodiff * autodiff),
+            jnp.sum(finite_difference * finite_difference),
+            jnp.sum(residual * residual),
+            jnp.sum(autodiff * finite_difference),
+            jnp.sum(autodiff),
+            jnp.sum(finite_difference),
+        )
+    )
+    max_statistics = jnp.stack(
+        (
+            jnp.max(jnp.abs(autodiff)),
+            jnp.max(jnp.abs(finite_difference)),
+            jnp.max(jnp.abs(residual)),
+        )
+    )
+    return sum_statistics, max_statistics
+
+
 paint_nfw_particle_count_map_sparse_jit = jax.jit(
     _particle_count_map_from_concentration,
     static_argnames=("overdensity_mode", "reference_density", "sample_chunk_size"),
@@ -95,4 +196,11 @@ paint_nfw_particle_count_map_sparse_jit = jax.jit(
 paint_nfw_particle_count_map_and_concentration_jvps_jit = jax.jit(
     _particle_count_map_and_concentration_jvps,
     static_argnames=("overdensity_mode", "reference_density", "sample_chunk_size"),
+)
+paint_nfw_particle_count_map_concentration_central_difference_jit = jax.jit(
+    _particle_count_map_concentration_central_difference,
+    static_argnames=("overdensity_mode", "reference_density", "sample_chunk_size"),
+)
+derivative_comparison_statistics_jit = jax.jit(
+    _derivative_comparison_statistics,
 )
