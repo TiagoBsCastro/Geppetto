@@ -1,9 +1,10 @@
 #!/bin/bash
 #SBATCH --job-name=geppetto_derivative_validation
 #SBATCH --partition=dcgp_usr_prod
-#SBATCH --nodes=1
-#SBATCH --ntasks-per-node=30
-#SBATCH --cpus-per-task=1
+#SBATCH --nodes=4
+#SBATCH --ntasks=30
+#SBATCH --ntasks-per-node=8
+#SBATCH --cpus-per-task=8
 #SBATCH --time=12:00:00
 #SBATCH --account=CMPNS_inafts
 #SBATCH --output=logs/geppetto_derivative_validation_%j.out
@@ -62,7 +63,7 @@ srun --cpu-bind=cores python examples/paint_halo_particles_for_pinocchio_segment
 validation_status=$?
 set -e
 
-if [[ -f "${OUTDIR}/painted_nfw_derivative_validation.csv" ]]; then
+if [[ "${validation_status}" -eq 0 && -f "${OUTDIR}/painted_nfw_derivative_validation.csv" ]]; then
     python examples/plot_concentration_derivative_validation.py \
         --input-dir "${OUTDIR}" \
         --output-dir "${OUTDIR}"
