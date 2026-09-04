@@ -26,6 +26,7 @@ export MKL_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
 export NUMEXPR_NUM_THREADS=1
 export SRUN_CPUS_PER_TASK=$SLURM_CPUS_PER_TASK
+export OMPI_MCA_btl_tcp_if_include=ib0
 export MPLCONFIGDIR="${TMPDIR:-/tmp}/geppetto-matplotlib-${SLURM_JOB_ID}"
 
 PARAMS="/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/params.txt"
