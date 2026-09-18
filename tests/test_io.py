@@ -792,12 +792,20 @@ def test_read_pinocchio_auxiliary_ascii_tables(tmp_path):
         encoding="utf-8",
     )
 
-    sheets = read_pinocchio_mass_sheets(sheets_path)
+    sheets = read_pinocchio_mass_sheets(sheets_path, h=.7)
     nz = read_pinocchio_nz(nz_path)
     mass_function = read_pinocchio_mass_function(mf_path)
 
     assert sheets.sheet_ids.tolist() == [0, 1]
-    np.testing.assert_allclose(sheets.delta_chi_mpc_h, [213.5, 219.0])
+    np.testing.assert_allclose(sheets.delta_chi_mpc_h, np.array([213.5, 219.0])*.7)
+    np.testing.assert_allclose(sheets.chi_hi_mpc_h, np.array([432.5, 219.0])*.7)
+    np.testing.assert_allclose(sheets.chi_lo_mpc_h, np.array([219.0, 0.0])*.7)
+    np.testing.assert_allclose(sheets.inv_delta_chi_h_mpc, np.array([.00468, .00456])/.7)
+    np.testing.assert_allclose(sheets.da_hi_mpc_h, np.array([393.3, 208.3])*.7)
+    np.testing.assert_allclose(sheets.da_lo_mpc_h, np.array([208.3, 0.0])*.7)
+    np.testing.assert_allclose(sheets.chi3_diff_mpc_h3, np.array([7.e7, 1.e7])*.7**3)
+    with pytest.raises(PinocchioCatalogError, match="h must"):
+        read_pinocchio_mass_sheets(sheets_path, h=0.)
     assert nz.counts.tolist() == [8109]
     np.testing.assert_allclose(nz.predicted_counts, [4814.04])
     assert mass_function.redshift == 0.0

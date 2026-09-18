@@ -7,6 +7,8 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from geppetto.theory import HaloBiasTable
+
 
 def _load_example_module():
     path = Path(__file__).parents[1] / "examples" / "validate_pinocchio_angular_power.py"
@@ -94,7 +96,7 @@ def test_exact_projection_checkpoint_computes_only_missing_multipoles(tmp_path):
         ell_values = np.asarray(ell, dtype=np.int64)
         computed.append(ell_values.copy())
         shell = np.stack((ell_values, 2 * ell_values)).astype(np.float64)
-        return shell, 3.0 * ell_values
+        return shell, 3.0 * ell_values, 1.1 * shell, 3.3 * ell_values
 
     first = module.exact_batch_with_checkpoint(
         checkpoint,
@@ -123,9 +125,11 @@ def test_exact_projection_checkpoint_computes_only_missing_multipoles(tmp_path):
     np.testing.assert_allclose(first[0], [[2, 3], [4, 6]])
     np.testing.assert_allclose(second[0], [[3, 4], [6, 8]])
     np.testing.assert_allclose(third[0], [[4, 2], [8, 4]])
-    assert first[2] is False
-    assert second[2] is False
-    assert third[2] is True
+    np.testing.assert_allclose(first[2], 1.1 * first[0])
+    np.testing.assert_allclose(second[3], 1.1 * second[1])
+    assert first[4] is False
+    assert second[4] is False
+    assert third[4] is True
 
 
 def test_exact_checkpoint_fingerprint_includes_power_evolution():
@@ -170,6 +174,49 @@ def test_exact_checkpoint_fingerprint_includes_power_evolution():
     assert scalar != scale_dependent
 
 
+def test_exact_checkpoint_fingerprint_includes_two_halo_response():
+    module = _load_example_module()
+    linear_theory = module.LinearTheoryTable(
+        h=0.7,
+        omega_m0=0.3,
+        scale_factor=module.jnp.asarray([0.5, 1.0]),
+        chi_mpc_h=module.jnp.asarray([1000.0, 0.0]),
+        omega_m=module.jnp.asarray([0.7, 0.3]),
+        growth=module.jnp.asarray([0.5, 1.0]),
+        k_h_mpc=module.jnp.asarray([0.01, 0.1]),
+        power_mpc_h3=module.jnp.asarray([100.0, 10.0]),
+    )
+    response = module.TwoHaloResponseTable(
+        scale_factor=module.jnp.asarray([0.8, 0.95]),
+        k_h_mpc=linear_theory.k_h_mpc,
+        response=module.jnp.ones((2, 2)),
+    )
+    common = {
+        "radial_order": 16,
+        "radial_tail_periods": 40.0,
+        "relative_tolerance": 1.0e-3,
+    }
+
+    baseline = module.exact_checkpoint_fingerprint(
+        np.asarray([0.1]),
+        np.asarray([0.2]),
+        np.asarray([1.0]),
+        linear_theory,
+        response_tables=(response,),
+        **common,
+    )
+    changed = module.exact_checkpoint_fingerprint(
+        np.asarray([0.1]),
+        np.asarray([0.2]),
+        np.asarray([1.0]),
+        linear_theory,
+        response_tables=(response._replace(response=1.01 * response.response),),
+        **common,
+    )
+
+    assert baseline != changed
+
+
 def test_theory_component_coupling_includes_deprojection_and_fsky():
     module = _load_example_module()
 
@@ -200,6 +247,43 @@ def test_theory_component_coupling_includes_deprojection_and_fsky():
     )
 
     np.testing.assert_allclose(result, [[2.4, 4.8], [1.2, 3.6]])
+
+
+def test_mask_reference_includes_a_map_to_initialize_deprojection(monkeypatch):
+    module = _load_example_module()
+    calls = []
+
+    def field(mask, maps, **kwargs):
+        calls.append((mask, maps, kwargs))
+        return SimpleNamespace(n_temp=0 if maps is None else len(kwargs["templates"]))
+
+    monkeypatch.setitem(sys.modules, "pymaster", SimpleNamespace(
+        NmtField=field,
+        NmtBin=SimpleNamespace(from_lmax_linear=lambda *args, **kwargs: object()),
+        NmtWorkspace=SimpleNamespace(from_fields=lambda *args: object()),
+    ))
+    module.build_mask_coupling(np.arange(6), 1, 2, bin_width=1, n_iter=0)
+    _, maps, kwargs = calls[0]
+    np.testing.assert_array_equal(maps, np.zeros((1, 12)))
+    assert kwargs["templates"].shape == (1, 1, 12)
+    assert not kwargs.get("lite", False)
+
+
+def test_namaster_reference_removes_constant_power():
+    nmt = pytest.importorskip("pymaster")
+    module = _load_example_module()
+    coupling = module.build_mask_coupling(
+        np.arange(384), 8, 15, bin_width=2, n_iter=3,
+    )
+    assert coupling.reference_field.n_temp == 1
+    monopole = np.zeros((1, 16))
+    monopole[0, 0] = 1.0
+    ordinary = coupling.workspace.couple_cell(monopole)[0]
+    bias = nmt.deprojection_bias(
+        coupling.reference_field, coupling.reference_field, monopole, n_iter=3,
+    )[0]
+    assert np.max(np.abs(bias)) > 0.1
+    np.testing.assert_allclose(ordinary + bias, 0, atol=2e-5)
 
 
 def test_memory_reduced_namaster_estimator_matches_standard_field():
@@ -251,6 +335,44 @@ def test_angular_power_validation_end_to_end(tmp_path, monkeypatch):
         lambda nside, lmax: np.ones(lmax + 1, dtype=">f8"),
     )
     module = _load_example_module()
+
+    def fake_bias_fit(tables, mass_function, linear_theory, **kwargs):
+        del linear_theory, kwargs
+        shape = (
+            mass_function.scale_factor.shape[0],
+            mass_function.log_mass_msun_h.shape[0],
+        )
+        unit_bias = module.jnp.ones(shape)
+        bias = HaloBiasTable(
+            scale_factor=mass_function.scale_factor,
+            log_mass_msun_h=mass_function.log_mass_msun_h,
+            pbs_bias=unit_bias,
+            correction=unit_bias,
+            linear_bias=unit_bias,
+        )
+        diagnostics = tuple(
+            SimpleNamespace(
+                source=table.source,
+                redshift=table.redshift,
+                populated_bins=len(table.mass_msun_h),
+                log_amplitude=0.0,
+                a=1.0,
+                p=0.0,
+                q=1.0,
+                weighted_log_residual=0.0,
+                reduced_weighted_residual=0.0,
+                minimum_pbs_bias=1.0,
+                maximum_pbs_bias=1.0,
+                minimum_correction=1.0,
+                maximum_correction=1.0,
+                minimum_linear_bias=1.0,
+                maximum_linear_bias=1.0,
+            )
+            for table in tables
+        )
+        return bias, diagnostics
+
+    monkeypatch.setattr(module, "fit_pinocchio_numerical_halo_bias", fake_bias_fit)
     nside = 4
     pixels = np.arange(hp.nside2npix(nside), dtype=np.int64)
     manifest_rows = []
@@ -348,6 +470,8 @@ def test_angular_power_validation_end_to_end(tmp_path, monkeypatch):
             finite_width_los_order=8,
             finite_width_tail_periods=8.0,
             profile_order=6,
+            pbs_fit_min_populated_bins=8,
+            pbs_fit_max_weighted_log_residual=0.05,
             exact_relative_tolerance=1.0e-3,
             sigma8_rtol=0.01,
             mask_sht_iterations=0,
@@ -360,8 +484,13 @@ def test_angular_power_validation_end_to_end(tmp_path, monkeypatch):
         assert result["ell"].shape == (6,)
         assert result["observed_shell"].shape == (2, 6)
         assert result["shell_linear_pseudo_over_fsky"].shape == (2, 6)
+        assert result["shell_two_halo_pseudo_over_fsky"].shape == (2, 6)
         assert result["summed_linear_pseudo_over_fsky"].shape == (6,)
-        assert int(result["validation_schema_version"]) == 4
+        assert result["summed_two_halo_pseudo_over_fsky"].shape == (6,)
+        assert int(result["validation_schema_version"]) == 5
+        assert result["two_halo_model"].item() == (
+            "castro_corrected_numerical_pbs_compensated_response"
+        )
         assert result["linear_power_evolution"].item() == "scalar_growth"
         assert result["one_halo_compensation"].item() == ("lagrangian_top_hat_difference")
         assert result["shell_linear_high_ell_mode"].shape == (2,)
@@ -369,3 +498,4 @@ def test_angular_power_validation_end_to_end(tmp_path, monkeypatch):
         assert float(result["sigma8_relative_error"]) == pytest.approx(0.0)
     assert len(outputs[1].read_text(encoding="utf-8").splitlines()) > 2
     assert len(outputs[2].read_text(encoding="utf-8").splitlines()) == 3
+    assert len(outputs[3].read_text(encoding="utf-8").splitlines()) == 4

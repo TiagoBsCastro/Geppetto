@@ -9,11 +9,11 @@ from __future__ import annotations
 
 import math
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from io import StringIO
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import jax.numpy as jnp
 import numpy as np
@@ -25,12 +25,17 @@ from geppetto.catalog import (
     unit_vectors_from_angles,
 )
 from geppetto.cosmology import Cosmology, rho_mean_comoving
+from geppetto.painting_theory import HistogramAngularGeometry
 from geppetto.profiles import TabulatedProjectedProfileParams
 from geppetto.theory import (
+    HaloCountQuadrature,
     HaloMassFunctionTable,
     LinearPowerEvolutionTable,
     LinearTheoryTable,
 )
+
+if TYPE_CHECKING:
+    from geppetto.lpt_backbone import LPTGrowthRatios
 
 
 class PinocchioCatalogError(ValueError):
@@ -312,7 +317,11 @@ class PinocchioLightconeLightCatalog:
 
 @dataclass(frozen=True)
 class PinocchioMassSheetTable:
-    """PINOCCHIO mass-sheet table from ``*.sheets.out``."""
+    """PINOCCHIO mass sheets converted from Mpc to comoving Mpc/h units.
+
+    Unlike halo catalogues, the PINOCCHIO sheet writer does not apply
+    ``OutputInH100``. The reader therefore requires the run's little h.
+    """
 
     sheet_ids: np.ndarray
     z_hi: np.ndarray
@@ -1010,23 +1019,30 @@ def build_lightcone_sparse_stencil(
     )
 
 
-def read_pinocchio_mass_sheets(path: PathLike) -> PinocchioMassSheetTable:
-    """Read a PINOCCHIO mass-sheet table from ``*.sheets.out``."""
+def read_pinocchio_mass_sheets(path: PathLike, *, h: float) -> PinocchioMassSheetTable:
+    """Read ``*.sheets.out``, converting its Mpc distances with explicit h.
+
+    PINOCCHIO writes these distances in Mpc regardless of ``OutputInH100``.
+    Lengths multiply by h, inverse lengths divide by h, and the cubic radial
+    volume factor multiplies by h^3. Redshifts and sheet IDs are unchanged.
+    """
 
     source = Path(path)
+    if not np.isfinite(h) or h <= 0:
+        raise PinocchioCatalogError("mass-sheet h must be finite and positive")
     data = _load_numeric_table(source, expected_columns=11, label="mass-sheet table")
     return PinocchioMassSheetTable(
         sheet_ids=_integer_column(data[:, 0], source, "sheet IDs"),
         z_hi=data[:, 1],
         z_lo=data[:, 2],
         delta_z=data[:, 3],
-        chi_hi_mpc_h=data[:, 4],
-        chi_lo_mpc_h=data[:, 5],
-        delta_chi_mpc_h=data[:, 6],
-        inv_delta_chi_h_mpc=data[:, 7],
-        da_hi_mpc_h=data[:, 8],
-        da_lo_mpc_h=data[:, 9],
-        chi3_diff_mpc_h3=data[:, 10],
+        chi_hi_mpc_h=data[:, 4] * h,
+        chi_lo_mpc_h=data[:, 5] * h,
+        delta_chi_mpc_h=data[:, 6] * h,
+        inv_delta_chi_h_mpc=data[:, 7] / h,
+        da_hi_mpc_h=data[:, 8] * h,
+        da_lo_mpc_h=data[:, 9] * h,
+        chi3_diff_mpc_h3=data[:, 10] * h**3,
         source=source,
     )
 
@@ -1132,6 +1148,42 @@ def read_pinocchio_cosmology_table(path: PathLike) -> LinearTheoryTable:
         k_h_mpc=jnp.asarray(k_h_mpc),
         power_mpc_h3=jnp.asarray(power_mpc_h3),
     )
+
+
+def read_pinocchio_lpt_growth_ratios(path: PathLike, redshift: float) -> LPTGrowthRatios:
+    """Read the dimensionless higher-order growth ratios used by PINOCCHIO.
+
+    Columns 7, 8 and 10 of ``*.cosmology.out`` hold D1, D2 and D3b, in
+    PINOCCHIO's positive-amplitude convention. Return D2/[(3/7)D1^2] and
+    D3b/[(5/42)D1^3], interpolating the ratios in scale factor. Forming the
+    ratios BEFORE interpolation avoids spurious growth-power interpolation
+    errors. The linear amplitude itself must still come from the complete
+    P(k,z) series when PINOCCHIO uses scale-dependent CAMB growth.
+
+    This host reader is not differentiable. No distance or mass conversion
+    is involved. It rejects extrapolation outside the supplied time range.
+    """
+
+    from geppetto.lpt_backbone import LPTGrowthRatios
+
+    source = Path(path)
+    data = _load_numeric_table(source, expected_columns=20, label="LPT growth table")
+    if not np.isfinite(redshift) or redshift < 0:
+        raise PinocchioCatalogError("LPT growth redshift must be finite and nonnegative")
+    order = np.argsort(data[:, 0])
+    scale = data[order, 0]
+    d1, d2, d3b = data[order, 6], data[order, 7], data[order, 9]
+    if (scale.size < 2 or np.any(scale <= 0) or np.any(np.diff(scale) <= 0)
+            or np.any(d1 <= 0) or np.any(d2 <= 0) or np.any(d3b <= 0)):
+        raise PinocchioCatalogError(f"invalid positive/unique time and growth entries: {source}")
+    value = 1/(1+redshift)
+    if not scale[0] <= value <= scale[-1]:
+        raise PinocchioCatalogError(f"requested LPT growth redshift is outside the table: {source}")
+    second = (7/3)*d2/d1**2
+    third = (42/5)*d3b/d1**3
+    if not np.all(np.isfinite(second+third)):
+        raise PinocchioCatalogError(f"non-finite LPT growth ratios: {source}")
+    return LPTGrowthRatios(float(np.interp(value, scale, second)), float(np.interp(value, scale, third)))
 
 
 def read_pinocchio_linear_power_evolution(
@@ -1270,12 +1322,33 @@ def read_pinocchio_mass_function_series(
     measured mass range are also zero.
     """
 
-    if not paths:
-        raise PinocchioCatalogError("at least one PINOCCHIO mass-function file is required")
+    tables = [read_pinocchio_mass_function(path) for path in paths]
+    return pinocchio_mass_function_series_from_tables(
+        tables,
+        required_redshifts=required_redshifts,
+        redshift_tolerance=redshift_tolerance,
+    )
+
+
+def pinocchio_mass_function_series_from_tables(
+    tables: Sequence[PinocchioMassFunction],
+    *,
+    required_redshifts: np.ndarray | None = None,
+    redshift_tolerance: float = 1.0e-6,
+) -> HaloMassFunctionTable:
+    """Combine parsed PINOCCHIO HMF snapshots on a common mass grid.
+
+    This is the in-memory counterpart of
+    :func:`read_pinocchio_mass_function_series`. It allows theory
+    orchestration to reuse the native halo counts and peak heights for bias
+    fitting without reading the same files twice.
+    """
+
+    if not tables:
+        raise PinocchioCatalogError("at least one PINOCCHIO mass-function table is required")
     if redshift_tolerance <= 0.0:
         raise PinocchioCatalogError("redshift_tolerance must be positive")
 
-    tables = [read_pinocchio_mass_function(path) for path in paths]
     if any(table.redshift is None for table in tables):
         missing = [str(table.source) for table in tables if table.redshift is None]
         raise PinocchioCatalogError(
@@ -1337,6 +1410,223 @@ def read_pinocchio_mass_function_series(
         scale_factor=jnp.asarray(scale_factor[order]),
         log_mass_msun_h=jnp.asarray(common_log_mass),
         dndlnm_mpc_h3=jnp.asarray(resampled[order]),
+    )
+
+
+def read_pinocchio_halo_count_quadrature(
+    paths: Sequence[PathLike],
+    *,
+    box_size_mpc_h: float,
+) -> HaloCountQuadrature:
+    """Read resolved halo-count quadrature from native ``*.mf.out`` files.
+
+    Masses must be in ``Msun/h`` and the box side in comoving ``Mpc/h``.
+    See :func:`pinocchio_halo_count_quadrature_from_tables` for the distinction
+    between these integration weights and the tabulated differential HMF.
+    """
+
+    return pinocchio_halo_count_quadrature_from_tables(
+        [read_pinocchio_mass_function(path) for path in paths],
+        box_size_mpc_h=box_size_mpc_h,
+    )
+
+
+def pinocchio_halo_count_quadrature_from_tables(
+    tables: Sequence[PinocchioMassFunction],
+    *,
+    box_size_mpc_h: float,
+) -> HaloCountQuadrature:
+    """Place native halo counts on their representative masses, without a fit.
+
+    The weight at each native mass is ``halo_counts / box_size_mpc_h**3``,
+    in ``(Mpc/h)^-3``. No mass interpolation, bin-width factor, extrapolated
+    low-mass population, or abundance normalization is applied. The union
+    of native mass nodes gives a common grid with zero weights elsewhere.
+
+    PINOCCHIO's density column uses particle-rounded mass-bin widths and
+    must not be trapezoid-integrated at its irregular mean-mass locations
+    to recover the counts. Its representative mass is the bin mean for
+    counts greater than one, otherwise the nominal bin centre. Consequently
+    count closure is exact, mass closure is subject to that singleton-bin
+    convention and printed precision, and the within-bin second mass moment
+    is unavailable. Inputs must already use ``Msun/h`` and comoving ``Mpc/h``.
+    """
+
+    if not tables:
+        raise PinocchioCatalogError("at least one PINOCCHIO mass-function table is required")
+    if not np.isfinite(box_size_mpc_h) or box_size_mpc_h <= 0.0:
+        raise PinocchioCatalogError("box_size_mpc_h must be finite and positive")
+    with np.errstate(over="ignore", under="ignore"):
+        volume = np.float64(box_size_mpc_h) ** 3
+    if not np.isfinite(volume) or volume == 0.0:
+        raise PinocchioCatalogError("box volume must be finite and positive")
+    if any(table.redshift is None for table in tables):
+        raise PinocchioCatalogError("halo-count quadrature requires a redshift in every HMF header")
+    redshifts = np.asarray([table.redshift for table in tables], dtype=np.float64)
+    if np.any(~np.isfinite(redshifts)) or np.any(redshifts < 0.0):
+        raise PinocchioCatalogError("PINOCCHIO mass-function redshifts must be finite and non-negative")
+    if np.unique(redshifts).size != redshifts.size:
+        raise PinocchioCatalogError("PINOCCHIO mass-function redshifts must be unique")
+
+    native_log_mass = []
+    native_counts = []
+    for table in tables:
+        mass = np.asarray(table.mass_msun_h, dtype=np.float64)
+        counts = np.asarray(table.halo_counts)
+        if (
+            mass.ndim != 1
+            or mass.size == 0
+            or np.any(~np.isfinite(mass))
+            or np.any(mass <= 0.0)
+            or np.unique(mass).size != mass.size
+        ):
+            raise PinocchioCatalogError(
+                f"PINOCCHIO HMF masses must be a finite positive unique 1D grid: {table.source}"
+            )
+        if (
+            counts.shape != mass.shape
+            or np.any(~np.isfinite(counts))
+            or np.any(counts < 0)
+            or np.any(counts != np.floor(counts))
+        ):
+            raise PinocchioCatalogError(
+                f"PINOCCHIO halo counts must be matching non-negative integers: {table.source}"
+            )
+        native_log_mass.append(np.log(mass))
+        native_counts.append(counts.astype(np.float64))
+
+    common_log_mass = np.unique(np.concatenate(native_log_mass))
+    weights = np.zeros((len(tables), common_log_mass.size), dtype=np.float64)
+    with np.errstate(over="ignore"):
+        for row, (log_mass, counts) in enumerate(zip(native_log_mass, native_counts, strict=True)):
+            # Coincident log nodes are possible at machine precision; conserve counts.
+            np.add.at(weights[row], np.searchsorted(common_log_mass, log_mass), counts / volume)
+    if not np.all(np.isfinite(weights)):
+        raise PinocchioCatalogError("halo-count number-density weights must be finite")
+    scale_factor = 1.0 / (1.0 + redshifts)
+    order = np.argsort(scale_factor)
+    return HaloCountQuadrature(
+        scale_factor=jnp.asarray(scale_factor[order]),
+        log_mass_msun_h=jnp.asarray(common_log_mass),
+        number_density_weight_mpc_h3=jnp.asarray(weights[order]),
+    )
+
+
+def build_angular_histogram_geometry(
+    native_pixel_unit_vectors: np.ndarray,
+    halo_row_offsets: np.ndarray,
+    halo_reference_unit_vectors: np.ndarray,
+    halo_group_indices: np.ndarray,
+    halo_average_weights: np.ndarray,
+    analytic_ngp_weights: np.ndarray,
+    angle_grid_rad: np.ndarray,
+    *,
+    pair_chunk_size: int = 256,
+) -> HistogramAngularGeometry:
+    """Build concentration-independent geometry for population A/D moments.
+
+    All vectors are dimensionless unit vectors. Native rows for halo h are
+    ``offsets[h]:offsets[h+1]`` and must cover its complete global assignment,
+    before compact filtering. Use geometry-selected rows, never a selection
+    based on nonzero painted weights. Supersampled children must already have
+    been assigned native parent rows. Each halo belongs to one integer group;
+    ``halo_average_weights`` are dimensionless orientation averaging weights.
+
+    ``analytic_ngp_weights`` defines the number of groups and their additional
+    NGP contribution, relative to native host centres. ``angle_grid_rad`` is
+    strictly increasing from zero and must enclose every pair/reference angle.
+    Linear interpolation in angle is used by the differentiable histogram
+    kernel. Geometry contains no profile weights or concentration parameters.
+
+    Pair construction is chunked over rows, with O(chunk*n_row_per_halo)
+    temporary storage, but the returned fixed sparse geometry retains all
+    same-halo ordered pairs, including diagonals, in O(sum_h n_row_h**2).
+    Process independent mass groups separately if that geometry is too large.
+    """
+
+    vectors = np.asarray(native_pixel_unit_vectors, dtype=np.float64)
+    offsets = np.asarray(halo_row_offsets)
+    references = np.asarray(halo_reference_unit_vectors, dtype=np.float64)
+    groups = np.asarray(halo_group_indices)
+    averages = np.asarray(halo_average_weights, dtype=np.float64)
+    ngp = np.asarray(analytic_ngp_weights, dtype=np.float64)
+    angles = np.asarray(angle_grid_rad, dtype=np.float64)
+    if pair_chunk_size < 1:
+        raise ValueError("pair_chunk_size must be positive")
+    if vectors.ndim != 2 or vectors.shape[1] != 3:
+        raise ValueError("native_pixel_unit_vectors must have shape (n_row,3)")
+    if references.ndim != 2 or references.shape[1] != 3:
+        raise ValueError("halo_reference_unit_vectors must have shape (n_halo,3)")
+    n_halo = len(references)
+    if (
+        offsets.shape != (n_halo+1,)
+        or not np.issubdtype(offsets.dtype, np.integer)
+        or offsets[0] != 0
+        or offsets[-1] != len(vectors)
+        or np.any(np.diff(offsets) <= 0)
+    ):
+        raise ValueError("halo_row_offsets must partition native rows into nonempty halo ranges")
+    if ngp.ndim != 1 or np.any(~np.isfinite(ngp)) or np.any(ngp < 0):
+        raise ValueError("analytic_ngp_weights must be a finite non-negative group vector")
+    if (
+        groups.shape != (n_halo,)
+        or not np.issubdtype(groups.dtype, np.integer)
+        or np.any(groups < 0)
+        or np.any(groups >= len(ngp))
+    ):
+        raise ValueError("halo_group_indices must be valid integer group indices")
+    if averages.shape != (n_halo,) or np.any(~np.isfinite(averages)) or np.any(averages < 0):
+        raise ValueError("halo_average_weights must be finite non-negative halo weights")
+    if (
+        angles.ndim != 1 or len(angles) < 2 or not np.all(np.isfinite(angles))
+        or angles[0] != 0. or angles[-1] > np.pi or np.any(np.diff(angles) <= 0)
+    ):
+        raise ValueError("angle_grid_rad must increase strictly from zero within [0,pi]")
+    for array in (vectors, references):
+        if not np.all(np.isfinite(array)) or not np.allclose(
+            np.linalg.norm(array, axis=1), 1., rtol=0., atol=1.e-10,
+        ):
+            raise ValueError("native and reference vectors must be finite unit vectors")
+
+    def brackets(sample_angles: np.ndarray, group: int):
+        if np.any(sample_angles > angles[-1]):
+            raise ValueError("angle grid does not cover native pair/reference angles")
+        lower = np.searchsorted(angles, sample_angles, side="right")-1
+        lower = np.clip(lower, 0, len(angles)-2)
+        fraction = (sample_angles-angles[lower])/(angles[lower+1]-angles[lower])
+        return lower+group*len(angles), fraction
+
+    response_lower = np.empty(len(vectors), dtype=np.int64)
+    response_fraction = np.empty(len(vectors))
+    response_average = np.empty(len(vectors))
+    pair_a, pair_b, pair_lower, pair_fraction, pair_average = [], [], [], [], []
+    for halo, (group, average) in enumerate(zip(groups, averages, strict=True)):
+        start, stop = offsets[halo:halo+2]
+        halo_vectors = vectors[start:stop]
+        reference_angle = np.arccos(np.clip(halo_vectors @ references[halo], -1., 1.))
+        reference_angle[np.all(halo_vectors == references[halo], axis=1)] = 0.
+        response_lower[start:stop], response_fraction[start:stop] = brackets(reference_angle, group)
+        response_average[start:stop] = average
+        for first in range(start, stop, pair_chunk_size):
+            last = min(first+pair_chunk_size, stop)
+            row_a, row_b = np.broadcast_arrays(np.arange(first, last)[:, None], np.arange(start, stop))
+            pair_angle = np.arccos(np.clip(vectors[first:last] @ halo_vectors.T, -1., 1.))
+            pair_angle[row_a == row_b] = 0.
+            lower, fraction = brackets(pair_angle.ravel(), group)
+            pair_a.append(row_a.ravel())
+            pair_b.append(row_b.ravel())
+            pair_lower.append(lower)
+            pair_fraction.append(fraction)
+            pair_average.append(np.full(lower.size, average))
+
+    def combine(parts, dtype):
+        return jnp.asarray(np.concatenate(parts) if parts else np.empty(0, dtype=dtype))
+
+    return HistogramAngularGeometry(
+        jnp.asarray(np.cos(angles)), jnp.asarray(ngp), jnp.asarray(response_lower),
+        jnp.asarray(response_fraction), jnp.asarray(response_average),
+        combine(pair_a, np.int64), combine(pair_b, np.int64), combine(pair_lower, np.int64),
+        combine(pair_fraction, np.float64), combine(pair_average, np.float64),
     )
 
 

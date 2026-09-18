@@ -17,13 +17,19 @@ from geppetto.profiles import NFWProfileParams, nfw_projected_surface_density
 from geppetto.theory import (
     LINEAR_HIGH_ELL_FINITE_WIDTH,
     LINEAR_HIGH_ELL_LIMBER,
+    HaloBiasTable,
     HaloMassFunctionTable,
     LinearPowerEvolutionTable,
     LinearTheoryTable,
+    TwoHaloResponseTable,
+    compensated_two_halo_response,
+    exact_halo_model_shell_cls,
     exact_linear_shell_cls,
     finite_width_flat_sky_linear_shell_cls,
+    finite_width_flat_sky_two_halo_shell_cls,
     gauss_legendre_rule,
     hybrid_angular_power_spectra,
+    limber_halo_model_shell_cls,
     limber_shell_cls,
     linear_matter_power,
     linear_sigma_r,
@@ -36,6 +42,8 @@ from geppetto.theory import (
     select_shell_high_ell_projection,
     sigma8_from_linear_power,
     spherical_top_hat_window,
+    tabulate_shell_two_halo_response,
+    two_halo_matter_power,
 )
 
 
@@ -69,6 +77,24 @@ def _separable_power_evolution() -> LinearPowerEvolutionTable:
         scale_factor=scale_factor,
         k_h_mpc=theory.k_h_mpc,
         power_mpc_h3=scale_factor[:, None] ** 2 * theory.power_mpc_h3[None, :],
+    )
+
+
+def _halo_bias() -> HaloBiasTable:
+    hmf = _mass_function()
+    pbs = jnp.asarray(
+        [
+            [0.9, 1.0, 1.15, 1.35, 1.7],
+            [0.8, 0.95, 1.1, 1.3, 1.6],
+        ]
+    )
+    correction = jnp.full_like(pbs, 1.05)
+    return HaloBiasTable(
+        scale_factor=hmf.scale_factor,
+        log_mass_msun_h=hmf.log_mass_msun_h,
+        pbs_bias=pbs,
+        correction=correction,
+        linear_bias=pbs * correction,
     )
 
 
@@ -227,6 +253,90 @@ def test_compensated_one_halo_power_vanishes_as_k_to_fourth():
     assert logarithmic_slope == pytest.approx(4.0, abs=0.08)
 
 
+def test_compensated_two_halo_response_closes_at_low_k_and_has_finite_gradient():
+    k = jnp.asarray([0.0, 0.2])
+
+    def response_sum(amplitude):
+        return jnp.sum(
+            compensated_two_halo_response(
+                k,
+                0.2,
+                _linear_theory(),
+                _mass_function(),
+                _halo_bias(),
+                ConcentrationParams(amplitude=amplitude),
+                profile_quadrature=gauss_legendre_rule(16),
+            )
+        )
+
+    response = compensated_two_halo_response(
+        k,
+        0.2,
+        _linear_theory(),
+        _mass_function(),
+        _halo_bias(),
+        ConcentrationParams(),
+        profile_quadrature=gauss_legendre_rule(16),
+    )
+    power = two_halo_matter_power(
+        jnp.asarray([0.01, 0.2]),
+        0.2,
+        _linear_theory(),
+        _mass_function(),
+        _halo_bias(),
+        ConcentrationParams(),
+        profile_quadrature=gauss_legendre_rule(16),
+    )
+
+    assert response.shape == (2,)
+    assert response[0] == pytest.approx(1.0, abs=1.0e-7)
+    assert np.all(np.isfinite(power))
+    assert jnp.isfinite(jax.grad(response_sum)(5.71))
+
+
+def test_two_halo_response_table_and_limber_projection_shapes_and_gradient():
+    ell = jnp.asarray([20, 40])
+
+    def projected_sum(amplitude):
+        response = tabulate_shell_two_halo_response(
+            0.1,
+            0.2,
+            _linear_theory(),
+            _mass_function(),
+            _halo_bias(),
+            ConcentrationParams(amplitude=amplitude),
+            temporal_order=4,
+            profile_quadrature=gauss_legendre_rule(8),
+        )
+        _, two_halo, _ = limber_halo_model_shell_cls(
+            ell,
+            0.1,
+            0.2,
+            _linear_theory(),
+            _mass_function(),
+            ConcentrationParams(amplitude=amplitude),
+            response,
+            radial_quadrature=gauss_legendre_rule(4),
+            profile_quadrature=gauss_legendre_rule(8),
+        )
+        return jnp.sum(two_halo)
+
+    response = tabulate_shell_two_halo_response(
+        0.1,
+        0.2,
+        _linear_theory(),
+        _mass_function(),
+        _halo_bias(),
+        ConcentrationParams(),
+        temporal_order=4,
+        profile_quadrature=gauss_legendre_rule(8),
+    )
+
+    assert response.response.shape == (4, 5)
+    assert jnp.all(jnp.diff(response.scale_factor) > 0.0)
+    assert jnp.isfinite(jax.grad(projected_sum)(5.71))
+
+
 def test_resolved_mass_fraction_uses_only_measured_hmf_support():
     fraction = resolved_halo_mass_fraction(0.0, _mass_function(), Cosmology(omega_m=0.3))
     assert jnp.isfinite(fraction)
@@ -313,6 +423,8 @@ def test_hybrid_spectra_shapes_weighted_one_halo_and_shot_noise():
 
     assert result.shell_total.shape == (2, 2)
     assert result.summed_total.shape == (2,)
+    np.testing.assert_allclose(result.shell_two_halo, result.shell_linear)
+    np.testing.assert_allclose(result.summed_two_halo, result.summed_linear)
     np.testing.assert_allclose(
         result.summed_one_halo,
         np.sum(np.asarray(shell_weights)[:, None] ** 2 * result.shell_one_halo, axis=0),
@@ -320,6 +432,35 @@ def test_hybrid_spectra_shapes_weighted_one_halo_and_shot_noise():
     np.testing.assert_allclose(result.shell_particle_shot_noise[:, 0], [0.005, 0.0025])
     np.testing.assert_allclose(result.summed_particle_shot_noise, 0.1 * 15.0 / 30.0**2)
     assert result.ell_limber_start == 20
+
+
+def test_hybrid_uses_corrected_two_halo_in_clustering_total():
+    result = hybrid_angular_power_spectra(
+        jnp.asarray([20, 40]),
+        [0.1],
+        [0.2],
+        _linear_theory(),
+        _mass_function(),
+        ConcentrationParams(),
+        [NFWProfileParams()],
+        shell_weights=jnp.ones(1),
+        halo_bias=_halo_bias(),
+        ell_exact_cap=0,
+        radial_order=4,
+        finite_width_radial_order=8,
+        finite_width_line_of_sight_order=8,
+        profile_order=8,
+    )
+
+    assert result.shell_two_halo.shape == (1, 2)
+    np.testing.assert_allclose(
+        result.shell_clustering,
+        result.shell_two_halo + result.shell_one_halo,
+    )
+    np.testing.assert_allclose(
+        result.summed_clustering,
+        result.summed_two_halo + result.summed_one_halo,
+    )
 
 
 def test_select_limber_transition_rejects_a_transient_match():
@@ -603,6 +744,37 @@ def test_scale_dependent_finite_width_reduces_to_separable_growth():
     np.testing.assert_allclose(scale_dependent, scalar, rtol=8.0e-4)
 
 
+def test_finite_width_two_halo_applies_response_inside_radial_transfer():
+    theory = _linear_theory()
+    response = TwoHaloResponseTable(
+        scale_factor=jnp.asarray([0.5, 1.0]),
+        k_h_mpc=theory.k_h_mpc,
+        response=jnp.full((2, theory.k_h_mpc.size), 2.0),
+    )
+    common = {
+        "radial_quadrature": gauss_legendre_rule(32),
+        "line_of_sight_quadrature": gauss_legendre_rule(64),
+        "line_of_sight_tail_periods": 20,
+    }
+    linear = finite_width_flat_sky_linear_shell_cls(
+        jnp.asarray([40, 80]),
+        0.1,
+        0.2,
+        theory,
+        **common,
+    )
+    two_halo = finite_width_flat_sky_two_halo_shell_cls(
+        jnp.asarray([40, 80]),
+        0.1,
+        0.2,
+        theory,
+        response,
+        **common,
+    )
+
+    np.testing.assert_allclose(two_halo, 4.0 * linear, rtol=8.0e-4)
+
+
 def test_scale_dependent_exact_projection_reduces_to_separable_growth():
     pytest.importorskip("scipy")
     arguments = (
@@ -627,6 +799,29 @@ def test_scale_dependent_exact_projection_reduces_to_separable_growth():
 
     np.testing.assert_allclose(scale_dependent[0], scalar[0], rtol=1.0e-3)
     np.testing.assert_allclose(scale_dependent[1], scalar[1], rtol=1.0e-3)
+
+
+def test_exact_two_halo_applies_constant_response_to_shell_and_cross_spectra():
+    pytest.importorskip("scipy")
+    theory = _linear_theory()
+    response = TwoHaloResponseTable(
+        scale_factor=jnp.asarray([0.5, 1.0]),
+        k_h_mpc=theory.k_h_mpc,
+        response=jnp.full((2, theory.k_h_mpc.size), 2.0),
+    )
+    linear_shell, linear_sum, two_halo_shell, two_halo_sum = exact_halo_model_shell_cls(
+        np.asarray([20]),
+        np.asarray([0.1]),
+        np.asarray([0.2]),
+        theory,
+        (response,),
+        radial_order=32,
+        radial_tail_periods=40,
+        relative_tolerance=1.0e-3,
+    )
+
+    np.testing.assert_allclose(two_halo_shell, 4.0 * linear_shell, rtol=1.0e-3)
+    np.testing.assert_allclose(two_halo_sum, 4.0 * linear_sum, rtol=1.0e-3)
 
 
 def test_exact_near_observer_shell_requires_converged_radial_order():

@@ -3476,7 +3476,7 @@ def main() -> None:
             raise ValueError("--nfw-sample-chunk-size must be positive")
 
         with timed_stage("read sheets", profile):
-            sheets = read_pinocchio_mass_sheets(args.sheets)
+            sheets = read_pinocchio_mass_sheets(args.sheets, h=float(metadata.cosmology.h))
         mass_definition = load_halo_mass_definition(args, sheets)
         with timed_stage("load PLC catalogue", profile):
             catalog = load_rank_local_lightcone_catalog(args, mpi_context)

@@ -24,20 +24,34 @@ def _write_csv(path, rows):
         writer.writerows(rows)
 
 
-def _write_validation_products(path):
+def _write_validation_products(path, *, schema_version=5):
     ell = np.arange(2, 10, dtype=np.int64)
     shell_linear = np.vstack([(2.0 + index) / ell for index in range(4)])
+    shell_two_halo = 1.05 * shell_linear if schema_version == 5 else shell_linear
     shell_one_halo = np.full((4, ell.size), 0.02)
     shell_shot = np.full((4, ell.size), 0.01)
-    shell_total = shell_linear + shell_one_halo + shell_shot
+    shell_total = shell_two_halo + shell_one_halo + shell_shot
     shell_weights = np.array([0.1, 0.2, 0.3, 0.4])
     summed_linear = np.sum(shell_weights[:, None] * shell_linear, axis=0)
+    summed_two_halo = np.sum(shell_weights[:, None] * shell_two_halo, axis=0)
     summed_one_halo = np.full(ell.size, 0.02)
     summed_shot = np.full(ell.size, 0.01)
-    summed_total = summed_linear + summed_one_halo + summed_shot
+    summed_total = summed_two_halo + summed_one_halo + summed_shot
+    schema5_arrays = (
+        {
+            "two_halo_model": np.asarray(
+                "castro_corrected_numerical_pbs_compensated_response"
+            ),
+            "cctoolkit_revision": np.asarray("test-revision"),
+            "shell_two_halo_pseudo_over_fsky": shell_two_halo,
+            "summed_two_halo_pseudo_over_fsky": summed_two_halo,
+        }
+        if schema_version == 5
+        else {}
+    )
     np.savez_compressed(
         path / "angular_power_theory.npz",
-        validation_schema_version=np.asarray(4),
+        validation_schema_version=np.asarray(schema_version),
         linear_power_evolution=np.asarray("scale_dependent_camb"),
         one_halo_compensation=np.asarray("lagrangian_top_hat_difference"),
         observed_shell=shell_total * np.array([[0.9], [0.95], [1.05], [1.1]]),
@@ -58,6 +72,7 @@ def _write_validation_products(path):
         shell_linear_high_ell_mode=np.asarray(
             ["finite_width_flat_sky", "finite_width_flat_sky", "limber", "limber"]
         ),
+        **schema5_arrays,
     )
 
     rows = []
@@ -70,11 +85,11 @@ def _write_validation_products(path):
     ):
         for index, (lower, upper, effective) in enumerate(((2, 5, 3.5), (6, 9, 7.5))):
             linear = float(np.mean(summed_linear[lower - 2 : upper - 1]))
+            two_halo = 1.05 * linear if schema_version == 5 else linear
             one_halo = 0.02
             shot = 0.01
-            total = linear + one_halo + shot
-            rows.append(
-                {
+            total = two_halo + one_halo + shot
+            output_row = {
                     "map": label,
                     "ell_min": lower,
                     "ell_max": upper,
@@ -83,14 +98,16 @@ def _write_validation_products(path):
                     "linear": linear,
                     "one_halo": one_halo,
                     "particle_shot_noise": shot,
-                    "clustering": linear + one_halo,
+                    "clustering": two_halo + one_halo,
                     "total": total,
                     "measured_over_total": ratios[index],
                     "f_sky": 0.5,
                     "shell_weight": 1.0 if label == "summed" else 0.5,
                     "theory_convention": "constant_deprojected_pseudo_cl_over_f_sky",
                 }
-            )
+            if schema_version == 5:
+                output_row["two_halo"] = two_halo
+            rows.append(output_row)
     _write_csv(path / "angular_power_binned.csv", rows)
     # Segment numbering is deliberately reversed relative to redshift order.
     _write_csv(
@@ -129,11 +146,45 @@ def test_validation_loader_orders_shells_by_redshift(tmp_path):
     np.testing.assert_allclose(data.shell_ratios[-1], [0.9, 0.95])
     assert data.nside == 8
     assert data.f_sky == pytest.approx(0.5)
+    np.testing.assert_allclose(data.shell_two_halo, 1.05 * data.shell_linear)
+    np.testing.assert_allclose(data.summed_two_halo, 1.05 * data.summed_linear)
 
     np.testing.assert_array_equal(
         module.representative_shell_indices(data, [0.2, 0.8, 1.3, 1.9]),
         [0, 1, 2, 3],
     )
+
+
+def test_validation_loader_maps_schema4_linear_to_two_halo(tmp_path):
+    module = _load_example_module()
+    _write_validation_products(tmp_path, schema_version=4)
+
+    data = module.load_validation_data(tmp_path)
+
+    np.testing.assert_allclose(data.shell_two_halo, data.shell_linear)
+    np.testing.assert_allclose(data.summed_two_halo, data.summed_linear)
+
+
+def test_schema6_loader_keeps_both_one_halo_conventions(tmp_path):
+    module = _load_example_module()
+    _write_validation_products(tmp_path)
+    archive = tmp_path / "angular_power_theory.npz"
+    with np.load(archive) as source:
+        arrays = {key: source[key].copy() for key in source.files}
+    arrays["validation_schema_version"] = np.asarray(6)
+    arrays["two_halo_model"] = np.asarray("standard_normalized_hmf_castro_bias")
+    for scope in ("shell", "summed"):
+        one = arrays.pop(f"{scope}_one_halo_pseudo_over_fsky")
+        arrays[f"{scope}_one_halo_compensated_pseudo_over_fsky"] = one
+        arrays[f"{scope}_one_halo_standard_pseudo_over_fsky"] = 2*one
+    np.savez_compressed(archive, **arrays)
+    data = module.load_validation_data(tmp_path)
+    np.testing.assert_allclose(data.summed_one_halo_standard, 2*data.summed_one_halo)
+    np.testing.assert_allclose(data.shell_one_halo_standard, 2*data.shell_one_halo)
+    arrays["shell_one_halo_standard_pseudo_over_fsky"] = np.zeros((3, 8))
+    np.savez_compressed(archive, **arrays)
+    with pytest.raises(ValueError, match="standard one-halo arrays"):
+        module.load_validation_data(tmp_path)
 
 
 def test_gaussian_mode_counting_fraction():

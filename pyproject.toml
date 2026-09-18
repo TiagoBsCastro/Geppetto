@@ -45,7 +45,15 @@ mpi = [
   "mpi4py>=4.0"
 ]
 theory = [
-  "scipy>=1.10"
+  "scipy>=1.10",
+  "cctoolkit @ git+https://github.com/TiagoBsCastro/CCToolkit.git@ac16ab613eb93f795f562f928ad145597d981b2f"
+]
+lpt = [
+  "scipy>=1.10",
+  "velocileptors==3.1"
+]
+harmonics = [
+  "ducc0==0.41.0"
 ]
 plot = [
   "matplotlib>=3.8"
@@ -54,7 +62,8 @@ validation = [
   "astropy>=6.0",
   "healpy>=1.16",
   "pymaster>=2.0",
-  "scipy>=1.10"
+  "scipy>=1.10",
+  "cctoolkit @ git+https://github.com/TiagoBsCastro/CCToolkit.git@ac16ab613eb93f795f562f928ad145597d981b2f"
 ]
 
 [project.urls]
@@ -62,6 +71,9 @@ Repository = "https://github.com/TiagoBsCastro/GEPPETTO"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/geppetto"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.pytest.ini_options]
 addopts = "-q"

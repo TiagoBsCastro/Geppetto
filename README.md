@@ -32,23 +32,43 @@ one-halo maps with PINOCCHIO's two-halo maps automatically.
 
 ## Angular-Power Scientific Validation
 
-GEPPETTO includes a linear-plus-one-halo prediction for the angular spectra of
-the combined PINOCCHIO uncollapsed-particle and painted-halo count maps:
+The schema-6 benchmark fits each PINOCCHIO HMF with analytic mass
+normalization and uses a normalized Castro-corrected bias in the standard
+two-halo integral. Both standard and compensated one-halo predictions are
+kept explicit. See [the model, convergence checks, and Leonardo commands](docs/normalized_halo_model.md).
+The earlier schema-5 comparison remains available through the workflow below.
+
+An experimental [painting-matched model](docs/painting_matched_halo_model.md)
+starts from the actual discrete assignment and explicit particle/halo
+covariances. Its assignment operator is tested; its analytical backbone closure
+is not yet accepted as a replacement for either benchmark. The
+[`predict_painting_matched_power.py`](examples/predict_painting_matched_power.py)
+example constructs that experimental prediction from native HMF counts,
+PINOCCHIO growth/power tables, and the production painter, without reading
+measured spectra. Its optional particle-pair calculation requires `.[lpt]`.
+
+GEPPETTO includes a corrected two-halo plus compensated one-halo prediction
+for the angular spectra of the combined PINOCCHIO uncollapsed-particle and
+painted-halo count maps:
 
 ```text
-P_mm(k,z) = P_linear(k,z) + P_1h(k,z)
+P_mm(k,z) = P_2h(k,z) + P_1h(k,z)
 ```
 
 Distances and background quantities are read from PINOCCHIO's
 `*.cosmology.out`. When the parameter file selects `CAMBTable`, the complete
 PINOCCHIO CAMB `P(k,z)` series is loaded automatically so massive-neutrino
 scale-dependent growth is retained; other runs use the scalar growth table.
-The compensated one-halo term uses measured `*.mf.out` mass functions, the
-same concentration relation and mass definition recorded in
-`painted_nfw_manifest.csv`, and the mass-conserving kernel
+The numerical PINOCCHIO HMF and peak heights define a fitted
+peak-background-split halo bias. GEPPETTO applies the Castro et al. correction
+from CCToolkit pinned at revision
+`ac16ab613eb93f795f562f928ad145597d981b2f`. Both halo terms use the measured
+`*.mf.out` mass functions, the same concentration relation and mass definition
+recorded in `painted_nfw_manifest.csv`, and the mass-conserving kernel
 `u_NFW(k|M)-W_TH(k R_L)`. Exact spherical-Bessel projection validates each
-shell's high-multipole continuation, selected between standard Limber and a
-finite-width flat-sky projection that retains the hard radial shell window.
+corrected two-halo high-multipole continuation, selected between standard
+Limber and a finite-width flat-sky projection that retains the hard radial
+shell window.
 The selected branch must stay within one percent through the exact comparison
 range; the default exact search cap is `ell=512`. The broad summed window and
 the one-halo term use Limber at high multipoles.
@@ -66,8 +86,9 @@ python examples/validate_pinocchio_angular_power.py \
 
 The command writes lean NPZ and CSV products containing measured and predicted
 spectra, particle shot noise, shell weights, resolved HMF mass fractions, the
-linear-evolution mode, compensation convention, and low-k one-halo/linear
-ratio. It does not write another copy of any map.
+linear-evolution mode, fitted PBS/Castro bias diagnostics, compensation
+convention, and low-k closure ratios. It does not write another copy of any
+map.
 Generate the paper figures from those products with:
 
 ```bash
@@ -102,11 +123,12 @@ Installation extras:
 - `python -m pip install -e '.[io]'` adds `astropy`, `healpy`, and `h5py` for
   FITS, HEALPix, HDF5, and PINOCCHIO reader workflows.
 - `python -m pip install -e '.[dev]'` adds `pytest`, `ruff`, and `mypy`.
-- `python -m pip install -e '.[theory]'` adds SciPy for exact low-multipole
-  spherical-Bessel projection.
+- `python -m pip install -e '.[theory]'` adds SciPy, the pinned CCToolkit bias
+  correction, and exact low-multipole spherical-Bessel projection.
 - `python -m pip install -e '.[plot]'` adds Matplotlib for validation figures.
-- `python -m pip install -e '.[validation]'` adds the FITS, HEALPix, SciPy, and
-  NaMaster dependencies for mask-coupled angular validation. On HPC systems,
+- `python -m pip install -e '.[validation]'` adds the FITS, HEALPix, SciPy,
+  pinned CCToolkit, and NaMaster dependencies for mask-coupled angular
+  validation. On HPC systems,
   installing `namaster` from conda-forge before the editable install avoids a
   local C-library build.
 - `python -m pip install -e '.[io,theory,validation,plot,dev]'` is recommended
@@ -526,6 +548,13 @@ Current reader support includes:
 - parameter files, including particle-mass metadata;
 - mass-sheet, `nz`, and mass-function ASCII outputs;
 - compact HEALPix mass-map FITS tables.
+
+`read_pinocchio_mass_sheets(path, h=metadata.cosmology.h)` requires the run's
+Hubble parameter. PINOCCHIO writes sheet lengths in Mpc even with
+`OutputInH100`; the reader converts lengths, inverse distances, and volumes
+to the documented Mpc/h convention. Older manifests may contain unconverted
+sheet distances mislabeled as Mpc/h. Redshift-selected painting is unaffected;
+do not reuse those legacy distance fields for theory or distance selection.
 
 Example:
 

@@ -1,10 +1,11 @@
 """Matter-power and angular-spectrum theory for PINOCCHIO map validation.
 
-The differentiable part of this module implements a linear-plus-compensated-
-one-halo matter-power model. PINOCCHIO supplies the tabulated linear spectrum,
-its optional scale-dependent time evolution, and measured halo mass
-functions; GEPPETTO supplies the NFW mass definition and concentration
-relation used by the map painter.
+The differentiable part of this module includes the standard, normalized-HMF
+halo model and the legacy compensated-response model. PINOCCHIO supplies the
+tabulated linear spectrum, its optional scale-dependent time evolution,
+measured halo mass functions, and a host-fitted halo-bias table; GEPPETTO
+supplies the NFW mass definition and concentration relation used by the map
+painter.
 
 All masses are ``Msun/h``, comoving distances are ``Mpc/h``, wavenumbers are
 ``h/Mpc``, three-dimensional power spectra are ``(Mpc/h)^3``, and angular
@@ -17,12 +18,13 @@ from __future__ import annotations
 import os
 from collections.abc import Callable, Sequence
 from concurrent.futures import ProcessPoolExecutor
+from functools import partial
 from multiprocessing import get_context
 from typing import NamedTuple
 
 import jax.numpy as jnp
 import numpy as np
-from jax import lax
+from jax import jit, lax
 
 from geppetto.concentration import ConcentrationParams, concentration_power_law
 from geppetto.cosmology import Cosmology, halo_radius_delta_comoving, rho_mean_comoving
@@ -80,6 +82,100 @@ class HaloMassFunctionTable(NamedTuple):
     dndlnm_mpc_h3: Array
 
 
+class HaloCountQuadrature(NamedTuple):
+    """Resolved halo counts divided by box volume, with no mass extrapolation.
+
+    ``scale_factor`` is increasing and ``log_mass_msun_h`` contains the
+    natural logarithm of the native representative masses in ``Msun/h``.
+    ``number_density_weight_mpc_h3`` has shape ``(n_a, n_mass)`` and units
+    ``(Mpc/h)^-3``. These are integration weights, not ``dn/dlnM``: sum
+    ``weight * f(mass)`` directly, without another mass-bin width.
+
+    The count moment is exact for the input tables. Higher moments use each
+    bin's representative mass; in particular the tables do not determine
+    the within-bin mass variance needed for an exact one-halo self term.
+    This pytree and its quadrature are independent of concentration.
+    """
+
+    scale_factor: Array
+    log_mass_msun_h: Array
+    number_density_weight_mpc_h3: Array
+
+
+class HaloBiasTable(NamedTuple):
+    """Numerical-HMF halo bias on the theory mass and scale-factor grid.
+
+    All bias arrays have shape ``(n_scale_factor, n_mass)`` and are
+    dimensionless. ``linear_bias`` is ``pbs_bias * correction``. The mass
+    grid is in natural-log ``Msun/h`` and must match the corresponding
+    :class:`HaloMassFunctionTable` grid.
+    """
+
+    scale_factor: Array
+    log_mass_msun_h: Array
+    pbs_bias: Array
+    correction: Array
+    linear_bias: Array
+
+
+class NormalizedHaloTable(NamedTuple):
+    """Quadrature of a normalized fitted HMF, including analytic tails.
+
+    ``mass_fraction_weight`` and ``biased_mass_fraction_weight`` include
+    integration weights in log mass and have shape ``(n_a, n_mass)``.
+    Masses are ``Msun/h``. Tail arrays have shape ``(n_a,)`` and represent
+    the complete population below the integration interval with ``u=1``.
+    The negligible upper tail is included in these point-limit weights.
+    Host fitting must check its error bound before using this approximation.
+    Linear interpolation in scale factor preserves both closure relations.
+    This immutable pytree is independent of concentration.
+    """
+
+    scale_factor: Array
+    mass_msun_h: Array
+    mass_fraction_weight: Array
+    biased_mass_fraction_weight: Array
+    tail_mass_fraction: Array
+    tail_biased_mass_fraction: Array
+
+
+class NormalizedHaloPower(NamedTuple):
+    """Standard response and two one-halo powers, in ``(Mpc/h)^3``.
+
+    ``response`` is dimensionless. Each field has the shape of the input k.
+    The standard one-halo term has a white low-k limit; the compensated
+    term uses the Lagrangian top-hat difference and has a k^4 limit.
+    """
+
+    response: Array
+    one_halo_standard: Array
+    one_halo_compensated: Array
+
+
+class NormalizedHaloPowerTable(NamedTuple):
+    """Shared profile integrals at increasing scale factor and k in h/Mpc."""
+
+    scale_factor: Array
+    k_h_mpc: Array
+    response: Array
+    one_halo_standard: Array
+    one_halo_compensated: Array
+
+
+class TwoHaloResponseTable(NamedTuple):
+    """Compensated deterministic response for one radial shell.
+
+    ``response`` has shape ``(n_scale_factor, n_k)``. Wavenumbers are in
+    ``h/Mpc`` and all other arrays are dimensionless. The table is built from
+    JAX operations, so interpolation remains differentiable with respect to
+    concentration parameters until a host-side exact projection is requested.
+    """
+
+    scale_factor: Array
+    k_h_mpc: Array
+    response: Array
+
+
 class QuadratureRule(NamedTuple):
     """Nodes and weights for integration over the interval ``[-1, 1]``."""
 
@@ -91,18 +187,21 @@ class AngularPowerSpectra(NamedTuple):
     """Per-shell and count-weighted-sum angular power spectra.
 
     Every shell array has shape ``(n_shell, n_ell)``. Summed arrays have shape
-    ``(n_ell,)``. ``linear`` and ``one_halo`` include the supplied HEALPix
-    pixel window. Particle shot noise is kept white in the pixel-count map
-    convention.
+    ``(n_ell,)``. ``linear``, ``two_halo``, and ``one_halo`` include the
+    supplied HEALPix pixel window. The clustering total uses ``two_halo`` plus
+    ``one_halo``; ``linear`` is diagnostic. Particle shot noise is kept white
+    in the pixel-count map convention.
     """
 
     ell: Array
     shell_linear: Array
+    shell_two_halo: Array
     shell_one_halo: Array
     shell_particle_shot_noise: Array
     shell_clustering: Array
     shell_total: Array
     summed_linear: Array
+    summed_two_halo: Array
     summed_one_halo: Array
     summed_particle_shot_noise: Array
     summed_clustering: Array
@@ -144,6 +243,25 @@ def _linear_interpolate(x: Array, x_grid: Array, values: Array) -> Array:
     value1 = values[upper]
     expand = (None,) * (values.ndim - 1)
     fraction = fraction[(...,) + expand]
+    return value0 + fraction * (value1 - value0)
+
+
+def _linear_interpolate_last_axis(x: Array, x_grid: Array, values: Array) -> Array:
+    """Interpolate the last axis of ``values`` on an increasing grid."""
+
+    coordinate = jnp.asarray(x)
+    grid = jnp.asarray(x_grid)
+    samples = jnp.asarray(values)
+    target_shape = jnp.broadcast_shapes(coordinate.shape, samples.shape[:-1])
+    coordinate = jnp.broadcast_to(coordinate, target_shape)
+    samples = jnp.broadcast_to(samples, target_shape + (samples.shape[-1],))
+    clipped = jnp.clip(coordinate, grid[0], grid[-1])
+    upper = jnp.searchsorted(grid, clipped, side="right")
+    upper = jnp.clip(upper, 1, grid.shape[0] - 1)
+    lower = upper - 1
+    value0 = jnp.take_along_axis(samples, lower[..., None], axis=-1)[..., 0]
+    value1 = jnp.take_along_axis(samples, upper[..., None], axis=-1)[..., 0]
+    fraction = (clipped - grid[lower]) / (grid[upper] - grid[lower])
     return value0 + fraction * (value1 - value0)
 
 
@@ -327,6 +445,30 @@ def measured_hmf_dndlnm(
     )
 
 
+def halo_count_weights(redshift: Array, quadrature: HaloCountQuadrature) -> Array:
+    """Interpolate resolved number-density weights in ``(Mpc/h)^-3``.
+
+    Returns shape ``redshift.shape + (n_mass,)``. Linear interpolation in
+    scale factor preserves every representative-mass quadrature moment.
+    Outside the input redshift range, the nearest snapshot is held fixed;
+    callers requiring coverage must validate their requested interval.
+    No interpolation or integration in mass is performed. Differentiable
+    in the weights and in redshift away from interpolation knots.
+    """
+
+    scale_factor = 1.0 / (1.0 + jnp.asarray(redshift))
+    if quadrature.scale_factor.shape[0] == 1:
+        return jnp.broadcast_to(
+            quadrature.number_density_weight_mpc_h3[0],
+            scale_factor.shape + (quadrature.log_mass_msun_h.shape[0],),
+        )
+    return _linear_interpolate(
+        scale_factor,
+        quadrature.scale_factor,
+        quadrature.number_density_weight_mpc_h3,
+    )
+
+
 def _trapezoid_last_axis(values: Array, coordinate: Array) -> Array:
     widths = coordinate[1:] - coordinate[:-1]
     return jnp.sum(0.5 * (values[..., 1:] + values[..., :-1]) * widths, axis=-1)
@@ -430,6 +572,195 @@ def angular_support_radius(
     return 2.0 * jnp.arcsin(argument)
 
 
+def halo_bias_at_redshift(redshift: Array, halo_bias: HaloBiasTable) -> Array:
+    """Interpolate dimensionless corrected linear halo bias at redshift."""
+
+    scale_factor = 1.0 / (1.0 + jnp.asarray(redshift))
+    return _linear_interpolate(
+        scale_factor,
+        halo_bias.scale_factor,
+        halo_bias.linear_bias,
+    )
+
+
+def compensated_two_halo_response(
+    k_h_mpc: Array,
+    redshift: Array,
+    linear_theory: LinearTheoryTable,
+    mass_function: HaloMassFunctionTable,
+    halo_bias: HaloBiasTable,
+    concentration_params: ConcentrationParams,
+    profile_params: NFWProfileParams = DEFAULT_NFW_PROFILE_PARAMS,
+    *,
+    theta_resolution_rad: float | None = None,
+    profile_quadrature: QuadratureRule | None = None,
+) -> Array:
+    """Return the compensated deterministic matter response.
+
+    The response is
+
+    ``1 + integral dlnM (dn/dlnM) (M/rho_mean) b(M,z) [u_NFW-W_L]``.
+
+    Masses are ``Msun/h`` and wavenumbers are ``h/Mpc``. The measured HMF
+    support is used without low-mass completion or bias renormalization.
+    Since both Fourier profiles equal one at zero wavenumber, the response is
+    exactly one there. The function is differentiable with respect to all
+    concentration parameters; the supplied bias table is independent of
+    concentration.
+    """
+
+    if halo_bias.log_mass_msun_h.shape != mass_function.log_mass_msun_h.shape:
+        raise ValueError("halo-bias and mass-function mass grids must have matching shapes")
+    if halo_bias.linear_bias.shape != (
+        halo_bias.scale_factor.shape[0],
+        mass_function.log_mass_msun_h.shape[0],
+    ):
+        raise ValueError("halo-bias arrays must have shape (n_scale_factor, n_mass)")
+
+    mass = jnp.exp(mass_function.log_mass_msun_h)
+    dndlnm = measured_hmf_dndlnm(redshift, mass_function)
+    bias = halo_bias_at_redshift(redshift, halo_bias)
+    cosmology = Cosmology(omega_m=linear_theory.omega_m0, h=linear_theory.h)
+    profile = nfw_fourier_profile(
+        k_h_mpc,
+        mass,
+        redshift,
+        cosmology,
+        concentration_params,
+        profile_params,
+        quadrature=profile_quadrature,
+    )
+    scalar_k = jnp.asarray(k_h_mpc).ndim == 0
+    if scalar_k:
+        profile = profile[None, :]
+
+    if theta_resolution_rad is not None:
+        chi = comoving_distance_mpc_h(redshift, linear_theory)
+        theta = angular_support_radius(mass, redshift, chi, cosmology, profile_params)
+        profile = jnp.where(theta[None, :] < theta_resolution_rad, 1.0, profile)
+
+    mean_density = rho_mean_comoving(cosmology)
+    lagrangian_radius = (3.0 * mass / (4.0 * jnp.pi * mean_density)) ** (1.0 / 3.0)
+    k_values = jnp.atleast_1d(jnp.asarray(k_h_mpc))
+    lagrangian_window = spherical_top_hat_window(
+        k_values[:, None] * lagrangian_radius[None, :]
+    )
+    integrand = (
+        dndlnm[None, :]
+        * (mass[None, :] / mean_density)
+        * bias[None, :]
+        * (profile - lagrangian_window)
+    )
+    response = 1.0 + _trapezoid_last_axis(
+        integrand,
+        mass_function.log_mass_msun_h,
+    )
+    return response[0] if scalar_k else response
+
+
+def two_halo_matter_power(
+    k_h_mpc: Array,
+    redshift: Array,
+    linear_theory: LinearTheoryTable,
+    mass_function: HaloMassFunctionTable,
+    halo_bias: HaloBiasTable,
+    concentration_params: ConcentrationParams,
+    profile_params: NFWProfileParams = DEFAULT_NFW_PROFILE_PARAMS,
+    *,
+    power_evolution: LinearPowerEvolutionTable | None = None,
+    theta_resolution_rad: float | None = None,
+    profile_quadrature: QuadratureRule | None = None,
+) -> Array:
+    """Return Castro-corrected compensated two-halo power in ``(Mpc/h)^3``."""
+
+    response = compensated_two_halo_response(
+        k_h_mpc,
+        redshift,
+        linear_theory,
+        mass_function,
+        halo_bias,
+        concentration_params,
+        profile_params,
+        theta_resolution_rad=theta_resolution_rad,
+        profile_quadrature=profile_quadrature,
+    )
+    return linear_matter_power(
+        k_h_mpc,
+        redshift,
+        linear_theory,
+        power_evolution,
+    ) * response**2
+
+
+def tabulate_shell_two_halo_response(
+    z_lo: float,
+    z_hi: float,
+    linear_theory: LinearTheoryTable,
+    mass_function: HaloMassFunctionTable,
+    halo_bias: HaloBiasTable,
+    concentration_params: ConcentrationParams,
+    profile_params: NFWProfileParams = DEFAULT_NFW_PROFILE_PARAMS,
+    *,
+    k_h_mpc: Array | None = None,
+    theta_resolution_rad: float | None = None,
+    temporal_order: int = LINEAR_EVOLUTION_INTERPOLATION_ORDER,
+    profile_quadrature: QuadratureRule | None = None,
+) -> TwoHaloResponseTable:
+    """Tabulate one shell's response for repeated angular projections."""
+
+    temporal_quadrature = gauss_legendre_rule(temporal_order)
+    _, redshift, _ = _shell_radial_quadrature(
+        z_lo,
+        z_hi,
+        linear_theory,
+        temporal_quadrature,
+    )
+    k_values = (
+        linear_theory.k_h_mpc if k_h_mpc is None else jnp.asarray(k_h_mpc)
+    )
+
+    def response_at_redshift(redshift_value: Array) -> Array:
+        return compensated_two_halo_response(
+            k_values,
+            redshift_value,
+            linear_theory,
+            mass_function,
+            halo_bias,
+            concentration_params,
+            profile_params,
+            theta_resolution_rad=theta_resolution_rad,
+            profile_quadrature=profile_quadrature,
+        )
+
+    response = lax.map(response_at_redshift, redshift)
+    scale_factor = 1.0 / (1.0 + redshift)
+    return TwoHaloResponseTable(
+        scale_factor=scale_factor[::-1],
+        k_h_mpc=k_values,
+        response=response[::-1],
+    )
+
+
+def interpolate_two_halo_response(
+    k_h_mpc: Array,
+    redshift: Array,
+    response_table: TwoHaloResponseTable,
+) -> Array:
+    """Bilinearly interpolate a shell response in scale factor and log k."""
+
+    scale_factor = 1.0 / (1.0 + jnp.asarray(redshift))
+    response_at_scale = _linear_interpolate(
+        scale_factor,
+        response_table.scale_factor,
+        response_table.response,
+    )
+    return _linear_interpolate_last_axis(
+        jnp.log(jnp.asarray(k_h_mpc)),
+        jnp.log(response_table.k_h_mpc),
+        response_at_scale,
+    )
+
+
 def one_halo_matter_power(
     k_h_mpc: Array,
     redshift: Array,
@@ -491,6 +822,57 @@ def one_halo_matter_power(
     return result[0] if scalar_k else result
 
 
+def normalized_halo_matter_power(
+    k_h_mpc: Array,
+    redshift: Array,
+    linear_theory: LinearTheoryTable,
+    halos: NormalizedHaloTable,
+    concentration_params: ConcentrationParams,
+    profile_params: NFWProfileParams = DEFAULT_NFW_PROFILE_PARAMS,
+    *,
+    theta_resolution_rad: float | None = None,
+    profile_quadrature: QuadratureRule | None = None,
+) -> NormalizedHaloPower:
+    """Integrate the standard halo model using normalized fitted abundances.
+
+    Returns ``I = integral f b u`` and the standard and compensated one-halo
+    powers. The two-halo power is ``I**2 * P_linear(k,z)``, with no additive
+    linear baseline or Lagrangian subtraction in I. All profile evaluations
+    are shared and differentiable with respect to concentration parameters.
+    Fitting and bias normalization are fixed host inputs. The optional NGP
+    threshold is in radians, concentration independent, and sets ``u=1``.
+    The analytic low-mass completion contributes to I; its omitted one-halo
+    power must be bounded and convergence-tested by the caller.
+    Wavenumbers are in h/Mpc and halo masses in Msun/h. I is dimensionless;
+    both one-halo powers are in (comoving Mpc/h)^3.
+    """
+
+    a = 1.0 / (1.0 + jnp.asarray(redshift))
+    weight = _linear_interpolate(a, halos.scale_factor, halos.mass_fraction_weight)
+    biased_weight = _linear_interpolate(
+        a, halos.scale_factor, halos.biased_mass_fraction_weight
+    )
+    tail = _linear_interpolate(a, halos.scale_factor, halos.tail_biased_mass_fraction)
+    mass = halos.mass_msun_h
+    cosmology = Cosmology(omega_m=linear_theory.omega_m0, h=linear_theory.h)
+    profile = nfw_fourier_profile(
+        k_h_mpc, mass, redshift, cosmology, concentration_params, profile_params,
+        quadrature=profile_quadrature,
+    )
+    if theta_resolution_rad is not None:
+        chi = comoving_distance_mpc_h(redshift, linear_theory)
+        theta = angular_support_radius(mass, redshift, chi, cosmology, profile_params)
+        profile = jnp.where(theta < theta_resolution_rad, 1.0, profile)
+    mass_volume = mass / rho_mean_comoving(cosmology)
+    lagrangian_radius = (3.0 * mass_volume / (4.0 * jnp.pi)) ** (1.0 / 3.0)
+    window = spherical_top_hat_window(jnp.asarray(k_h_mpc)[..., None] * lagrangian_radius)
+    return NormalizedHaloPower(
+        response=jnp.sum(biased_weight * profile, axis=-1) + tail,
+        one_halo_standard=jnp.sum(weight * mass_volume * profile**2, axis=-1),
+        one_halo_compensated=jnp.sum(weight * mass_volume * (profile - window)**2, axis=-1),
+    )
+
+
 def _shell_radial_quadrature(
     z_lo: float,
     z_hi: float,
@@ -507,7 +889,64 @@ def _shell_radial_quadrature(
     return chi, redshift, dchi_weight
 
 
-def limber_shell_cls(
+@partial(jit, static_argnames=("profile_params",))
+def normalized_halo_power_grid(
+    k_h_mpc: Array,
+    redshift: Array,
+    linear_theory: LinearTheoryTable,
+    halos: NormalizedHaloTable,
+    concentration_params: ConcentrationParams,
+    profile_params: NFWProfileParams,
+    *,
+    theta_resolution_rad: float | None,
+    profile_quadrature: QuadratureRule,
+) -> NormalizedHaloPower:
+    """Shared mass integrals with bounded k/redshift loops (shape n_z,n_k).
+
+    Units and differentiability follow :func:`normalized_halo_matter_power`.
+    Compilation is reused across shells with identical quadrature shapes.
+    """
+
+    return lax.map(lambda z: normalized_halo_matter_power(
+        k_h_mpc, z, linear_theory, halos, concentration_params, profile_params,
+        theta_resolution_rad=theta_resolution_rad, profile_quadrature=profile_quadrature,
+    ), redshift)
+
+
+def normalized_one_halo_shell_cls(
+    ell: Array,
+    z_lo: float,
+    z_hi: float,
+    linear_theory: LinearTheoryTable,
+    power_table: NormalizedHaloPowerTable,
+    *,
+    radial_quadrature: QuadratureRule,
+) -> tuple[Array, Array]:
+    """Project both tabulated one-halo terms with the count-shell window.
+
+    Returns dimensionless full-sky C_ell before the pixel window. The supplied
+    k grid must cover the relevant support. Like the linear projection, power
+    outside the supplied k range is zero, not a constant endpoint extension.
+    """
+
+    chi, redshift, dchi = _shell_radial_quadrature(z_lo, z_hi, linear_theory, radial_quadrature)
+    lo = comoving_distance_mpc_h(jnp.asarray(z_lo), linear_theory)
+    hi = comoving_distance_mpc_h(jnp.asarray(z_hi), linear_theory)
+    prefactor = dchi * chi**2 / ((hi**3 - lo**3) / 3)**2
+    k = (jnp.asarray(ell)[None, :] + .5) / chi[:, None]
+    scale = 1 / (1 + redshift)
+    result = []
+    for values in (power_table.one_halo_standard, power_table.one_halo_compensated):
+        at_z = _linear_interpolate(scale, power_table.scale_factor, values)
+        at_k = lax.map(lambda pair: jnp.interp(
+            pair[0], jnp.log(power_table.k_h_mpc), pair[1]
+        ), (jnp.log(k), at_z))
+        at_k = jnp.where((k >= power_table.k_h_mpc[0]) & (k <= power_table.k_h_mpc[-1]), at_k, 0.)
+        result.append(jnp.sum(prefactor[:, None] * at_k, axis=0))
+    return result[0], result[1]
+
+
+def _limber_shell_components(
     ell: Array,
     z_lo: float,
     z_hi: float,
@@ -517,11 +956,13 @@ def limber_shell_cls(
     profile_params: NFWProfileParams = DEFAULT_NFW_PROFILE_PARAMS,
     *,
     power_evolution: LinearPowerEvolutionTable | None = None,
+    response_table: TwoHaloResponseTable | None = None,
     theta_resolution_rad: float | None = None,
     radial_quadrature: QuadratureRule | None = None,
     profile_quadrature: QuadratureRule | None = None,
-) -> tuple[Array, Array]:
-    """Return Limber linear and one-halo ``C_ell`` for one count shell.
+    compute_one_halo: bool = True,
+) -> tuple[Array, Array, Array]:
+    """Return Limber linear, two-halo, and one-halo shell spectra.
 
     The shell field is the count overdensity with normalized radial window
     ``W(chi) = 3 chi^2 / (chi_hi^3 - chi_lo^3)``. The one-halo result is fully
@@ -542,7 +983,7 @@ def limber_shell_cls(
     shell_volume_per_sr = (chi_hi**3 - chi_lo**3) / 3.0
     radial_prefactor = dchi_weight * chi**2 / shell_volume_per_sr**2
 
-    def node_power(inputs: tuple[Array, Array]) -> tuple[Array, Array]:
+    def node_power(inputs: tuple[Array, Array]) -> tuple[Array, Array, Array]:
         chi_node, redshift_node = inputs
         k = (ell_values + 0.5) / chi_node
         linear = linear_matter_power(
@@ -557,6 +998,11 @@ def limber_shell_cls(
             linear,
             0.0,
         )
+        if response_table is None:
+            two_halo = linear
+        else:
+            response = interpolate_two_halo_response(k, redshift_node, response_table)
+            two_halo = linear * response**2
         one_halo = one_halo_matter_power(
             k,
             redshift_node,
@@ -566,28 +1012,95 @@ def limber_shell_cls(
             profile_params,
             theta_resolution_rad=theta_resolution_rad,
             profile_quadrature=profile_quadrature,
-        )
-        return linear, one_halo
+        ) if compute_one_halo else jnp.zeros_like(linear)
+        return linear, two_halo, one_halo
 
-    linear_nodes, one_halo_nodes = lax.map(node_power, (chi, redshift))
+    linear_nodes, two_halo_nodes, one_halo_nodes = lax.map(node_power, (chi, redshift))
     return (
         jnp.sum(radial_prefactor[:, None] * linear_nodes, axis=0),
+        jnp.sum(radial_prefactor[:, None] * two_halo_nodes, axis=0),
         jnp.sum(radial_prefactor[:, None] * one_halo_nodes, axis=0),
     )
 
 
-def finite_width_flat_sky_linear_shell_cls(
+def limber_shell_cls(
+    ell: Array,
+    z_lo: float,
+    z_hi: float,
+    linear_theory: LinearTheoryTable,
+    mass_function: HaloMassFunctionTable,
+    concentration_params: ConcentrationParams,
+    profile_params: NFWProfileParams = DEFAULT_NFW_PROFILE_PARAMS,
+    *,
+    power_evolution: LinearPowerEvolutionTable | None = None,
+    theta_resolution_rad: float | None = None,
+    radial_quadrature: QuadratureRule | None = None,
+    profile_quadrature: QuadratureRule | None = None,
+) -> tuple[Array, Array]:
+    """Return the legacy Limber linear and compensated one-halo spectra."""
+
+    linear, _, one_halo = _limber_shell_components(
+        ell,
+        z_lo,
+        z_hi,
+        linear_theory,
+        mass_function,
+        concentration_params,
+        profile_params,
+        power_evolution=power_evolution,
+        theta_resolution_rad=theta_resolution_rad,
+        radial_quadrature=radial_quadrature,
+        profile_quadrature=profile_quadrature,
+    )
+    return linear, one_halo
+
+
+def limber_halo_model_shell_cls(
+    ell: Array,
+    z_lo: float,
+    z_hi: float,
+    linear_theory: LinearTheoryTable,
+    mass_function: HaloMassFunctionTable,
+    concentration_params: ConcentrationParams,
+    response_table: TwoHaloResponseTable,
+    profile_params: NFWProfileParams = DEFAULT_NFW_PROFILE_PARAMS,
+    *,
+    power_evolution: LinearPowerEvolutionTable | None = None,
+    theta_resolution_rad: float | None = None,
+    radial_quadrature: QuadratureRule | None = None,
+    profile_quadrature: QuadratureRule | None = None,
+) -> tuple[Array, Array, Array]:
+    """Return Limber linear, corrected two-halo, and one-halo spectra."""
+
+    return _limber_shell_components(
+        ell,
+        z_lo,
+        z_hi,
+        linear_theory,
+        mass_function,
+        concentration_params,
+        profile_params,
+        power_evolution=power_evolution,
+        response_table=response_table,
+        theta_resolution_rad=theta_resolution_rad,
+        radial_quadrature=radial_quadrature,
+        profile_quadrature=profile_quadrature,
+    )
+
+
+def _finite_width_flat_sky_shell_cls(
     ell: Array,
     z_lo: float,
     z_hi: float,
     linear_theory: LinearTheoryTable,
     *,
     power_evolution: LinearPowerEvolutionTable | None = None,
+    response_table: TwoHaloResponseTable | None = None,
     radial_quadrature: QuadratureRule | None = None,
     line_of_sight_quadrature: QuadratureRule | None = None,
     line_of_sight_tail_periods: float = 40.0,
 ) -> Array:
-    """Return the finite-width flat-sky linear ``C_ell`` for one count shell.
+    """Return one finite-width flat-sky deterministic shell spectrum.
 
     The shell field is the dimensionless count overdensity with radial window
     ``W(chi) = 3 chi^2 / (chi_hi^3 - chi_lo^3)`` for comoving ``chi`` in
@@ -596,16 +1109,18 @@ def finite_width_flat_sky_linear_shell_cls(
 
     ``C_ell = integral dk_parallel |W_sqrtP(k_parallel)|^2 / (pi chi_mid^2)``.
 
-    For scale-dependent evolution, ``sqrt(P(k,z))`` is interpolated across
-    the narrow shell with eight fixed Lagrange nodes before the radial Fourier
-    transform. This keeps the full tabulated k dependence without constructing
-    an ``n_ell * n_los * n_radial`` array. The scalar-growth fallback retains
-    its direct radial quadrature.
+    For scale-dependent evolution or a two-halo response,
+    ``sqrt(P(k,z)) * response(k,z)`` is interpolated across the narrow shell
+    with eight fixed Lagrange nodes before the radial Fourier transform. This
+    keeps the full tabulated k dependence without constructing an
+    ``n_ell * n_los * n_radial`` array. The scalar-growth linear fallback
+    retains its direct radial quadrature.
 
     It is intended as the high-ell continuation for geometrically thin
     shells. The orchestration layer validates it against the exact full-sky
     projection before selecting it. The calculation is JAX-compatible and
-    independent of concentration parameters.
+    differentiable with respect to concentration parameters when a response
+    table is supplied.
     """
 
     if z_hi <= z_lo:
@@ -637,7 +1152,8 @@ def finite_width_flat_sky_linear_shell_cls(
     k_parallel = u / half_width
     power_k_grid = linear_theory.k_h_mpc if power_evolution is None else power_evolution.k_h_mpc
 
-    if power_evolution is None:
+    use_temporal_basis = power_evolution is not None or response_table is not None
+    if not use_temporal_basis:
         transfer_weight = radial_weight * growth_factor(redshift, linear_theory)
         radial_window_power = (
             jnp.sum(jnp.cos(phase) * transfer_weight[None, :], axis=1) ** 2
@@ -659,17 +1175,34 @@ def finite_width_flat_sky_linear_shell_cls(
         k_transverse = (ell_value + 0.5) / midpoint
         k = jnp.sqrt(k_transverse**2 + k_parallel**2)
         valid_k = (k >= power_k_grid[0]) & (k <= power_k_grid[-1])
-        if power_evolution is None:
+        if not use_temporal_basis:
             power = linear_matter_power(k, jnp.zeros_like(k), linear_theory)
             integrand = jnp.where(valid_k, power * radial_window_power, 0.0)
         else:
-            sample_power = linear_matter_power(
-                k[:, None],
-                sample_redshift[None, :],
-                linear_theory,
-                power_evolution,
-            )
-            sample_amplitude = jnp.sqrt(sample_power)
+            if power_evolution is None:
+                power = linear_matter_power(k, jnp.zeros_like(k), linear_theory)
+                sample_amplitude = jnp.broadcast_to(
+                    growth_factor(sample_redshift, linear_theory)[None, :],
+                    (k.shape[0], sample_redshift.shape[0]),
+                )
+            else:
+                sample_power = linear_matter_power(
+                    k[:, None],
+                    sample_redshift[None, :],
+                    linear_theory,
+                    power_evolution,
+                )
+                sample_amplitude = jnp.sqrt(sample_power)
+            if response_table is not None:
+                sample_response = lax.map(
+                    lambda sample_z: interpolate_two_halo_response(
+                        k,
+                        sample_z,
+                        response_table,
+                    ),
+                    sample_redshift,
+                ).T
+                sample_amplitude = sample_amplitude * sample_response
             transformed_real = jnp.sum(
                 radial_basis_real * sample_amplitude,
                 axis=1,
@@ -678,15 +1211,70 @@ def finite_width_flat_sky_linear_shell_cls(
                 radial_basis_imag * sample_amplitude,
                 axis=1,
             )
-            integrand = jnp.where(
-                valid_k,
-                transformed_real**2 + transformed_imag**2,
-                0.0,
-            )
+            transformed_power = transformed_real**2 + transformed_imag**2
+            if power_evolution is None:
+                transformed_power = power * transformed_power
+            integrand = jnp.where(valid_k, transformed_power, 0.0)
         return jnp.sum(du_weight * integrand) / (jnp.pi * midpoint**2 * half_width)
 
     result = lax.map(project_one_ell, ell_vector)
     return result[0] if scalar_ell else result
+
+
+def finite_width_flat_sky_linear_shell_cls(
+    ell: Array,
+    z_lo: float,
+    z_hi: float,
+    linear_theory: LinearTheoryTable,
+    *,
+    power_evolution: LinearPowerEvolutionTable | None = None,
+    radial_quadrature: QuadratureRule | None = None,
+    line_of_sight_quadrature: QuadratureRule | None = None,
+    line_of_sight_tail_periods: float = 40.0,
+) -> Array:
+    """Return the finite-width flat-sky linear ``C_ell`` for one count shell."""
+
+    return _finite_width_flat_sky_shell_cls(
+        ell,
+        z_lo,
+        z_hi,
+        linear_theory,
+        power_evolution=power_evolution,
+        radial_quadrature=radial_quadrature,
+        line_of_sight_quadrature=line_of_sight_quadrature,
+        line_of_sight_tail_periods=line_of_sight_tail_periods,
+    )
+
+
+def finite_width_flat_sky_two_halo_shell_cls(
+    ell: Array,
+    z_lo: float,
+    z_hi: float,
+    linear_theory: LinearTheoryTable,
+    response_table: TwoHaloResponseTable,
+    *,
+    power_evolution: LinearPowerEvolutionTable | None = None,
+    radial_quadrature: QuadratureRule | None = None,
+    line_of_sight_quadrature: QuadratureRule | None = None,
+    line_of_sight_tail_periods: float = 40.0,
+) -> Array:
+    """Return the finite-width corrected two-halo ``C_ell`` for one shell.
+
+    The response table is dimensionless and the result is differentiable with
+    respect to response values, including their concentration dependence.
+    """
+
+    return _finite_width_flat_sky_shell_cls(
+        ell,
+        z_lo,
+        z_hi,
+        linear_theory,
+        power_evolution=power_evolution,
+        response_table=response_table,
+        radial_quadrature=radial_quadrature,
+        line_of_sight_quadrature=line_of_sight_quadrature,
+        line_of_sight_tail_periods=line_of_sight_tail_periods,
+    )
 
 
 class _ExactProjectionState(NamedTuple):
@@ -698,7 +1286,10 @@ class _ExactProjectionState(NamedTuple):
     log_power_evolution: np.ndarray
     evolution_scale_lower: np.ndarray
     evolution_scale_fraction: np.ndarray
+    temporal_growth: np.ndarray
+    response: np.ndarray
     scale_dependent: bool
+    has_response: bool
     weights: np.ndarray
     shell_midpoint: np.ndarray
     shell_width: np.ndarray
@@ -743,13 +1334,30 @@ def _evolution_amplitude_at_log_k(
     return np.exp(0.5 * (sample_log_power - reference_log_power))
 
 
+def _response_at_log_k(
+    log_k: float,
+    state: _ExactProjectionState,
+    shell_index: int | None = None,
+) -> np.ndarray:
+    """Interpolate the deterministic two-halo response at temporal nodes."""
+
+    upper_k = int(np.searchsorted(state.log_k_table, log_k, side="right"))
+    upper_k = int(np.clip(upper_k, 1, state.log_k_table.size - 1))
+    lower_k = upper_k - 1
+    fraction = (log_k - state.log_k_table[lower_k]) / (
+        state.log_k_table[upper_k] - state.log_k_table[lower_k]
+    )
+    response = state.response if shell_index is None else state.response[shell_index]
+    return response[..., lower_k] * (1.0 - fraction) + response[..., upper_k] * fraction
+
+
 def _integrate_exact_multipole(
     ell_value: int,
     state: _ExactProjectionState,
-) -> tuple[np.ndarray, float]:
+) -> tuple[np.ndarray, float, np.ndarray, float]:
     """Integrate one exact multipole using process-local read-only state."""
 
-    from scipy.integrate import quad
+    from scipy.integrate import quad, quad_vec
     from scipy.special import spherical_jn
 
     if ell_value < 0:
@@ -766,61 +1374,125 @@ def _integrate_exact_multipole(
         power = np.exp(np.interp(log_k, state.log_k_table, state.log_power_table))
         return k, (2.0 / np.pi) * k**3 * power
 
-    def shell_integrand(log_k: float, shell_index: int) -> float:
+    def shell_transfers(log_k: float, shell_index: int) -> tuple[float, float]:
         k, prefactor = power_at_log_k(log_k)
         bessel = spherical_jn(ell_value, k * state.chi_nodes[shell_index])
-        if state.scale_dependent:
+        if state.scale_dependent or state.has_response:
             basis_transfer = np.sum(
                 state.temporal_basis_weight[shell_index] * bessel[:, None],
                 axis=0,
             )
-            evolution_amplitude = _evolution_amplitude_at_log_k(
-                log_k,
-                state,
-                shell_index,
-            )
-            transfer = np.sum(basis_transfer * evolution_amplitude)
+            if state.scale_dependent:
+                evolution_amplitude = _evolution_amplitude_at_log_k(
+                    log_k,
+                    state,
+                    shell_index,
+                )
+                linear_transfer = np.sum(basis_transfer * evolution_amplitude)
+            else:
+                evolution_amplitude = state.temporal_growth[shell_index]
+                linear_transfer = np.sum(state.transfer_weight[shell_index] * bessel)
+            if state.has_response:
+                response = _response_at_log_k(log_k, state, shell_index)
+                two_halo_transfer = np.sum(
+                    basis_transfer * evolution_amplitude * response
+                )
+            else:
+                two_halo_transfer = linear_transfer
         else:
-            transfer = np.sum(state.transfer_weight[shell_index] * bessel)
-        return float(prefactor * transfer**2)
-
-    shell_integrated = np.empty(state.chi_nodes.shape[0], dtype=np.float64)
-    for shell_index, shell_limit in enumerate(shell_k_max):
-        shell_integrated[shell_index], _ = quad(
-            shell_integrand,
-            state.log_k_min,
-            np.log(shell_limit),
-            args=(shell_index,),
-            epsabs=1.0e-14,
-            epsrel=state.relative_tolerance,
-            limit=2000,
+            linear_transfer = np.sum(state.transfer_weight[shell_index] * bessel)
+            two_halo_transfer = linear_transfer
+        return (
+            float(prefactor * linear_transfer**2),
+            float(prefactor * two_halo_transfer**2),
         )
 
-    def summed_integrand(log_k: float) -> float:
+    shell_integrated = np.empty(state.chi_nodes.shape[0], dtype=np.float64)
+    shell_two_halo_integrated = np.empty(state.chi_nodes.shape[0], dtype=np.float64)
+    for shell_index, shell_limit in enumerate(shell_k_max):
+        if state.has_response:
+            integrated, _ = quad_vec(
+                lambda log_k, index=shell_index: np.asarray(shell_transfers(log_k, index)),
+                state.log_k_min,
+                np.log(shell_limit),
+                epsabs=1.0e-14,
+                epsrel=state.relative_tolerance,
+                limit=2000,
+            )
+            shell_integrated[shell_index] = integrated[0]
+            shell_two_halo_integrated[shell_index] = integrated[1]
+        else:
+            shell_integrated[shell_index], _ = quad(
+                lambda log_k, index=shell_index: shell_transfers(log_k, index)[0],
+                state.log_k_min,
+                np.log(shell_limit),
+                epsabs=1.0e-14,
+                epsrel=state.relative_tolerance,
+                limit=2000,
+            )
+            shell_two_halo_integrated[shell_index] = shell_integrated[shell_index]
+
+    def summed_transfers(log_k: float) -> tuple[float, float]:
         k, prefactor = power_at_log_k(log_k)
         bessel = spherical_jn(ell_value, k * state.chi_nodes)
-        if state.scale_dependent:
+        if state.scale_dependent or state.has_response:
             basis_transfer = np.sum(
                 state.temporal_basis_weight * bessel[:, :, None],
                 axis=1,
             )
-            evolution_amplitude = _evolution_amplitude_at_log_k(log_k, state)
-            transfer = np.sum(basis_transfer * evolution_amplitude, axis=1)
+            if state.scale_dependent:
+                evolution_amplitude = _evolution_amplitude_at_log_k(log_k, state)
+                linear_transfer = np.sum(basis_transfer * evolution_amplitude, axis=1)
+            else:
+                evolution_amplitude = state.temporal_growth
+                linear_transfer = np.sum(state.transfer_weight * bessel, axis=1)
+            if state.has_response:
+                response = _response_at_log_k(log_k, state)
+                two_halo_transfer = np.sum(
+                    basis_transfer * evolution_amplitude * response,
+                    axis=1,
+                )
+            else:
+                two_halo_transfer = linear_transfer
         else:
-            transfer = np.sum(state.transfer_weight * bessel, axis=1)
-        transfer = np.where(k <= shell_k_max, transfer, 0.0)
-        summed_transfer = np.sum(state.weights * transfer)
-        return float(prefactor * summed_transfer**2)
+            linear_transfer = np.sum(state.transfer_weight * bessel, axis=1)
+            two_halo_transfer = linear_transfer
+        linear_transfer = np.where(k <= shell_k_max, linear_transfer, 0.0)
+        two_halo_transfer = np.where(k <= shell_k_max, two_halo_transfer, 0.0)
+        summed_linear_transfer = np.sum(state.weights * linear_transfer)
+        summed_two_halo_transfer = np.sum(state.weights * two_halo_transfer)
+        return (
+            float(prefactor * summed_linear_transfer**2),
+            float(prefactor * summed_two_halo_transfer**2),
+        )
 
-    summed_integrated, _ = quad(
-        summed_integrand,
-        state.log_k_min,
-        np.log(k_max),
-        epsabs=1.0e-14,
-        epsrel=state.relative_tolerance,
-        limit=2000,
+    if state.has_response:
+        summed_pair, _ = quad_vec(
+            lambda log_k: np.asarray(summed_transfers(log_k)),
+            state.log_k_min,
+            np.log(k_max),
+            epsabs=1.0e-14,
+            epsrel=state.relative_tolerance,
+            limit=2000,
+        )
+        summed_integrated = float(summed_pair[0])
+        summed_two_halo_integrated = float(summed_pair[1])
+    else:
+        summed_integrated, _ = quad(
+            lambda log_k: summed_transfers(log_k)[0],
+            state.log_k_min,
+            np.log(k_max),
+            epsabs=1.0e-14,
+            epsrel=state.relative_tolerance,
+            limit=2000,
+        )
+        summed_two_halo_integrated = summed_integrated
+    return (
+        shell_integrated,
+        float(summed_integrated),
+        shell_two_halo_integrated,
+        float(summed_two_halo_integrated),
     )
-    return shell_integrated, float(summed_integrated)
 
 
 def _initialize_exact_projection_worker(state: _ExactProjectionState) -> None:
@@ -828,7 +1500,9 @@ def _initialize_exact_projection_worker(state: _ExactProjectionState) -> None:
     _EXACT_PROJECTION_STATE = state
 
 
-def _integrate_exact_multipole_worker(ell_value: int) -> tuple[np.ndarray, float]:
+def _integrate_exact_multipole_worker(
+    ell_value: int,
+) -> tuple[np.ndarray, float, np.ndarray, float]:
     if _EXACT_PROJECTION_STATE is None:
         raise RuntimeError("exact projection worker was not initialized")
     return _integrate_exact_multipole(ell_value, _EXACT_PROJECTION_STATE)
@@ -850,30 +1524,33 @@ def _numpy_lagrange_basis(x: np.ndarray, nodes: np.ndarray) -> np.ndarray:
     return basis
 
 
-def exact_linear_shell_cls(
+def _exact_deterministic_shell_cls(
     ell: np.ndarray,
     z_lo: np.ndarray,
     z_hi: np.ndarray,
     linear_theory: LinearTheoryTable,
     *,
     power_evolution: LinearPowerEvolutionTable | None = None,
+    response_tables: Sequence[TwoHaloResponseTable] | None = None,
     shell_weights: np.ndarray | None = None,
     radial_order: int = 512,
     radial_tail_periods: float = 256.0,
     relative_tolerance: float = 1.0e-4,
     workers: int = 1,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Return exact low-ell linear shell autos and weighted-sum spectrum.
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Return exact low-ell linear and two-halo shell and summed spectra.
 
-    This concentration-independent orchestration path uses SciPy's spherical
-    Bessel functions and adaptive scalar quadrature. Shell autos use
+    This host-side orchestration path uses SciPy's spherical Bessel functions
+    and adaptive scalar quadrature. Supplied response tables may encode a
+    concentration-dependent profile, but conversion to NumPy makes this exact
+    path non-differentiable. Shell autos use
     shell-specific wavenumber cutoffs, while the weighted sum retains
     cross-shell correlations up to each shell's cutoff. The radial tail spans
     at least 40 oscillation periods and grows with transverse wavenumber up to
     ``radial_tail_periods``. Independent multipoles are evaluated in
     ``workers`` spawned processes. Install
-    ``geppetto[theory]`` to use it. The differentiable one-halo and Limber
-    kernels do not depend on SciPy. When ``power_evolution`` is supplied, the
+    ``geppetto[theory]`` to use it. The differentiable one-halo, Limber, and
+    finite-width kernels do not depend on SciPy. When ``power_evolution`` is supplied, the
     transfer uses ``sqrt(P(k,z) / P(k,0))`` rather than a scalar growth
     factor. Eight temporal interpolation nodes per shell preserve the smooth
     scale-dependent evolution without expanding the full radial-by-k table.
@@ -884,7 +1561,7 @@ def exact_linear_shell_cls(
         __import__("scipy.special")
     except ImportError as exc:  # pragma: no cover - depends on optional install
         raise ImportError(
-            "exact_linear_shell_cls requires scipy; install geppetto[theory]"
+            "exact shell projection requires scipy; install geppetto[theory]"
         ) from exc
 
     ell_values = np.asarray(ell, dtype=np.int64)
@@ -902,6 +1579,8 @@ def exact_linear_shell_cls(
         raise ValueError("exact projection workers must be positive")
 
     n_shell = z_lo_values.size
+    if response_tables is not None and len(response_tables) != n_shell:
+        raise ValueError("response_tables must contain one table per shell")
     if shell_weights is None:
         weights = np.ones(n_shell, dtype=np.float64) / max(n_shell, 1)
     else:
@@ -967,10 +1646,13 @@ def exact_linear_shell_cls(
     shell_volume_per_sr = (chi_hi**3 - chi_lo**3) / 3.0
     window = chi_nodes**2 / shell_volume_per_sr[:, None]
     transfer_weight = radial_weights * window * growth_nodes
-    if power_evolution is None:
+    use_temporal_basis = power_evolution is not None or response_tables is not None
+    if not use_temporal_basis:
         temporal_basis_weight = np.empty((0, 0, 0), dtype=np.float64)
         evolution_scale_lower = np.empty((0, 0), dtype=np.int64)
         evolution_scale_fraction = np.empty((0, 0), dtype=np.float64)
+        temporal_growth = np.empty((0, 0), dtype=np.float64)
+        response_values = np.empty((0, 0, 0), dtype=np.float64)
     else:
         evolution_nodes, _ = np.polynomial.legendre.leggauss(LINEAR_EVOLUTION_INTERPOLATION_ORDER)
         temporal_basis = _numpy_lagrange_basis(nodes, evolution_nodes)
@@ -983,31 +1665,95 @@ def exact_linear_shell_cls(
             chi_table[::-1],
             scale_factor[::-1],
         )
-        if (
-            np.min(temporal_scale) < evolution_scale_factor[0]
-            or np.max(temporal_scale) > evolution_scale_factor[-1]
-        ):
-            raise ValueError("exact shell redshifts exceed the scale-dependent power table")
-        evolution_scale_upper = np.searchsorted(
-            evolution_scale_factor,
-            temporal_scale,
-            side="right",
-        )
-        evolution_scale_upper = np.clip(
-            evolution_scale_upper,
-            1,
-            evolution_scale_factor.size - 1,
-        )
-        evolution_scale_lower = evolution_scale_upper - 1
-        evolution_scale_fraction = (
-            temporal_scale - evolution_scale_factor[evolution_scale_lower]
-        ) / (
-            evolution_scale_factor[evolution_scale_upper]
-            - evolution_scale_factor[evolution_scale_lower]
-        )
+        temporal_growth = np.interp(temporal_scale, scale_factor, growth_table)
+        if power_evolution is None:
+            evolution_scale_lower = np.empty((0, 0), dtype=np.int64)
+            evolution_scale_fraction = np.empty((0, 0), dtype=np.float64)
+        else:
+            if (
+                np.min(temporal_scale) < evolution_scale_factor[0]
+                or np.max(temporal_scale) > evolution_scale_factor[-1]
+            ):
+                raise ValueError("exact shell redshifts exceed the scale-dependent power table")
+            evolution_scale_upper = np.searchsorted(
+                evolution_scale_factor,
+                temporal_scale,
+                side="right",
+            )
+            evolution_scale_upper = np.clip(
+                evolution_scale_upper,
+                1,
+                evolution_scale_factor.size - 1,
+            )
+            evolution_scale_lower = evolution_scale_upper - 1
+            evolution_scale_fraction = (
+                temporal_scale - evolution_scale_factor[evolution_scale_lower]
+            ) / (
+                evolution_scale_factor[evolution_scale_upper]
+                - evolution_scale_factor[evolution_scale_lower]
+            )
+
+        if response_tables is None:
+            response_values = np.empty((0, 0, 0), dtype=np.float64)
+        else:
+            response_values = np.empty(
+                (n_shell, LINEAR_EVOLUTION_INTERPOLATION_ORDER, k_table.size),
+                dtype=np.float64,
+            )
+            for shell_index, response_table in enumerate(response_tables):
+                response_scale = np.asarray(response_table.scale_factor, dtype=np.float64)
+                response_k = np.asarray(response_table.k_h_mpc, dtype=np.float64)
+                response = np.asarray(response_table.response, dtype=np.float64)
+                target_scale = temporal_scale[shell_index]
+                scale_tolerance = 1.0e-10 * max(1.0, float(np.max(np.abs(response_scale))))
+                k_tolerance = 1.0e-10 * max(1.0, float(response_k[-1]))
+                if (
+                    response_scale.ndim != 1
+                    or response_k.ndim != 1
+                    or response.shape != (response_scale.size, response_k.size)
+                    or response_scale.size < 2
+                    or response_k.size < 2
+                    or np.any(np.diff(response_scale) <= 0.0)
+                    or np.any(np.diff(response_k) <= 0.0)
+                    or np.any(response_k <= 0.0)
+                    or not np.all(np.isfinite(response))
+                    or np.min(target_scale) < response_scale[0] - scale_tolerance
+                    or np.max(target_scale) > response_scale[-1] + scale_tolerance
+                    or k_table[0] < response_k[0] - k_tolerance
+                    or k_table[-1] > response_k[-1] + k_tolerance
+                ):
+                    raise ValueError(
+                        "two-halo response table does not cover the exact shell grid"
+                    )
+                target_scale = np.clip(target_scale, response_scale[0], response_scale[-1])
+                upper_scale = np.clip(
+                    np.searchsorted(response_scale, target_scale, side="right"),
+                    1,
+                    response_scale.size - 1,
+                )
+                lower_scale = upper_scale - 1
+                scale_fraction = (target_scale - response_scale[lower_scale]) / (
+                    response_scale[upper_scale] - response_scale[lower_scale]
+                )
+                response_at_scale = (
+                    response[lower_scale] * (1.0 - scale_fraction[:, None])
+                    + response[upper_scale] * scale_fraction[:, None]
+                )
+                response_values[shell_index] = np.stack(
+                    [
+                        np.interp(
+                            log_k_table,
+                            np.log(response_k),
+                            response_row,
+                        )
+                        for response_row in response_at_scale
+                    ]
+                )
 
     shell_result = np.empty((n_shell, ell_values.size), dtype=np.float64)
     summed_result = np.empty(ell_values.size, dtype=np.float64)
+    shell_two_halo_result = np.empty((n_shell, ell_values.size), dtype=np.float64)
+    summed_two_halo_result = np.empty(ell_values.size, dtype=np.float64)
     shell_midpoint = 0.5 * (chi_lo + chi_hi)
     shell_width = chi_hi - chi_lo
     state = _ExactProjectionState(
@@ -1019,7 +1765,10 @@ def exact_linear_shell_cls(
         log_power_evolution=log_power_evolution,
         evolution_scale_lower=evolution_scale_lower,
         evolution_scale_fraction=evolution_scale_fraction,
+        temporal_growth=temporal_growth,
+        response=response_values,
         scale_dependent=power_evolution is not None,
+        has_response=response_tables is not None,
         weights=weights,
         shell_midpoint=shell_midpoint,
         shell_width=shell_width,
@@ -1033,9 +1782,12 @@ def exact_linear_shell_cls(
         integrated_multipoles = (
             _integrate_exact_multipole(int(ell_value), state) for ell_value in ell_values
         )
-        for ell_index, (shell_integrated, sum_integrated) in enumerate(integrated_multipoles):
+        for ell_index, integrated in enumerate(integrated_multipoles):
+            shell_integrated, sum_integrated, shell_two_halo, sum_two_halo = integrated
             shell_result[:, ell_index] = shell_integrated
             summed_result[ell_index] = sum_integrated
+            shell_two_halo_result[:, ell_index] = shell_two_halo
+            summed_two_halo_result[ell_index] = sum_two_halo
     else:
         affinity_environment = ("OMP_NUM_THREADS", "OMP_PLACES", "OMP_PROC_BIND")
         previous_affinity = {name: os.environ.get(name) for name in affinity_environment}
@@ -1054,11 +1806,12 @@ def exact_linear_shell_cls(
                     (int(ell_value) for ell_value in ell_values),
                     chunksize=1,
                 )
-                for ell_index, (shell_integrated, sum_integrated) in enumerate(
-                    integrated_multipoles
-                ):
+                for ell_index, integrated in enumerate(integrated_multipoles):
+                    shell_integrated, sum_integrated, shell_two_halo, sum_two_halo = integrated
                     shell_result[:, ell_index] = shell_integrated
                     summed_result[ell_index] = sum_integrated
+                    shell_two_halo_result[:, ell_index] = shell_two_halo
+                    summed_two_halo_result[ell_index] = sum_two_halo
         finally:
             for name, previous_value in previous_affinity.items():
                 if previous_value is None:
@@ -1066,7 +1819,73 @@ def exact_linear_shell_cls(
                 else:
                     os.environ[name] = previous_value
 
-    return shell_result, summed_result
+    return shell_result, summed_result, shell_two_halo_result, summed_two_halo_result
+
+
+def exact_linear_shell_cls(
+    ell: np.ndarray,
+    z_lo: np.ndarray,
+    z_hi: np.ndarray,
+    linear_theory: LinearTheoryTable,
+    *,
+    power_evolution: LinearPowerEvolutionTable | None = None,
+    shell_weights: np.ndarray | None = None,
+    radial_order: int = 512,
+    radial_tail_periods: float = 256.0,
+    relative_tolerance: float = 1.0e-4,
+    workers: int = 1,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return exact low-ell linear shell autos and weighted-sum spectrum."""
+
+    shell, summed, _, _ = _exact_deterministic_shell_cls(
+        ell,
+        z_lo,
+        z_hi,
+        linear_theory,
+        power_evolution=power_evolution,
+        shell_weights=shell_weights,
+        radial_order=radial_order,
+        radial_tail_periods=radial_tail_periods,
+        relative_tolerance=relative_tolerance,
+        workers=workers,
+    )
+    return shell, summed
+
+
+def exact_halo_model_shell_cls(
+    ell: np.ndarray,
+    z_lo: np.ndarray,
+    z_hi: np.ndarray,
+    linear_theory: LinearTheoryTable,
+    response_tables: Sequence[TwoHaloResponseTable],
+    *,
+    power_evolution: LinearPowerEvolutionTable | None = None,
+    shell_weights: np.ndarray | None = None,
+    radial_order: int = 512,
+    radial_tail_periods: float = 256.0,
+    relative_tolerance: float = 1.0e-4,
+    workers: int = 1,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Return exact linear and corrected two-halo shell and summed spectra.
+
+    The SciPy projection is host-side and therefore not differentiable. Build
+    and project Limber or finite-width response tables for concentration
+    derivatives.
+    """
+
+    return _exact_deterministic_shell_cls(
+        ell,
+        z_lo,
+        z_hi,
+        linear_theory,
+        power_evolution=power_evolution,
+        response_tables=response_tables,
+        shell_weights=shell_weights,
+        radial_order=radial_order,
+        radial_tail_periods=radial_tail_periods,
+        relative_tolerance=relative_tolerance,
+        workers=workers,
+    )
 
 
 def particle_count_shot_noise(
@@ -1292,6 +2111,9 @@ def hybrid_angular_power_spectra(
     profile_params: Sequence[NFWProfileParams],
     *,
     shell_weights: Array,
+    halo_bias: HaloBiasTable | None = None,
+    two_halo_response_tables: Sequence[TwoHaloResponseTable] | None = None,
+    one_halo_shell_cls: Array | None = None,
     power_evolution: LinearPowerEvolutionTable | None = None,
     pixel_window: Array | None = None,
     mean_uncollapsed_counts_per_pixel: Array | None = None,
@@ -1304,7 +2126,11 @@ def hybrid_angular_power_spectra(
     exact_batch_size: int = 64,
     exact_workers: int = 1,
     exact_batch_callback: Callable[[str, int, int], None] | None = None,
-    exact_batch_evaluator: Callable[[np.ndarray], tuple[np.ndarray, np.ndarray]] | None = None,
+    exact_batch_evaluator: Callable[
+        [np.ndarray],
+        tuple[np.ndarray, np.ndarray] | tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],
+    ]
+    | None = None,
     radial_order: int = 64,
     exact_radial_order: int = 512,
     exact_radial_tail_periods: float = 256.0,
@@ -1323,7 +2149,17 @@ def hybrid_angular_power_spectra(
     Each transition must remain within ``limber_match_rtol`` through the
     complete exact range. The search is bounded by ``ell_exact_cap``. A zero
     cap uses a geometric shell-mode fallback without exact validation.
-    One-halo power always uses Limber. ``power_evolution`` carries the
+    One-halo power always uses Limber. When ``halo_bias`` or precomputed
+    ``two_halo_response_tables`` are supplied, their two-halo spectrum replaces
+    the linear spectrum in the clustering total; the baseline linear spectrum
+    remains a diagnostic. ``halo_bias`` builds the legacy compensated response;
+    supplied tables can instead carry the standard normalized-HMF response.
+    Precomputed tables also avoid rebuilding responses used by an exact batch
+    evaluator.
+    ``one_halo_shell_cls`` can supply a precomputed, unwindowed one-halo
+    spectrum of shape ``(n_shell, n_ell)``, avoiding duplicate profile work
+    when the standard and compensated one-halo terms were computed together.
+    ``power_evolution`` carries the
     optional scale-dependent PINOCCHIO CAMB series through every linear
     projection branch; omitting it retains scalar growth.
     """
@@ -1364,24 +2200,102 @@ def hybrid_angular_power_spectra(
     finite_width_radial_quadrature = gauss_legendre_rule(finite_width_radial_order)
     finite_width_line_of_sight_quadrature = gauss_legendre_rule(finite_width_line_of_sight_order)
     profile_quadrature = gauss_legendre_rule(profile_order)
-    limber_results = [
-        limber_shell_cls(
-            ell_values,
-            float(lo),
-            float(hi),
-            linear_theory,
-            mass_function,
-            concentration_params,
-            shell_profile,
-            power_evolution=power_evolution,
-            theta_resolution_rad=theta_resolution_rad,
-            radial_quadrature=radial_quadrature,
-            profile_quadrature=profile_quadrature,
+    response_k = linear_theory.k_h_mpc if power_evolution is None else power_evolution.k_h_mpc
+    if two_halo_response_tables is not None:
+        response_tables = tuple(two_halo_response_tables)
+        if len(response_tables) != z_lo_values.size:
+            raise ValueError("two_halo_response_tables must contain one table per shell")
+    elif halo_bias is None:
+        response_tables = None
+    else:
+        response_tables = tuple(
+            tabulate_shell_two_halo_response(
+                float(lo),
+                float(hi),
+                linear_theory,
+                mass_function,
+                halo_bias,
+                concentration_params,
+                shell_profile,
+                k_h_mpc=response_k,
+                theta_resolution_rad=theta_resolution_rad,
+                profile_quadrature=profile_quadrature,
+            )
+            for lo, hi, shell_profile in zip(
+                z_lo_values,
+                z_hi_values,
+                profiles,
+                strict=True,
+            )
         )
-        for lo, hi, shell_profile in zip(z_lo_values, z_hi_values, profiles, strict=True)
-    ]
+    if one_halo_shell_cls is not None:
+        supplied_one_halo = jnp.asarray(one_halo_shell_cls)
+        if supplied_one_halo.shape != (z_lo_values.size, ell_values.size):
+            raise ValueError("one_halo_shell_cls must have shape (n_shell, n_ell)")
+        limber_results = [
+            _limber_shell_components(
+                ell_values, float(lo), float(hi), linear_theory, mass_function,
+                concentration_params, shell_profile, power_evolution=power_evolution,
+                response_table=None if response_tables is None else response_tables[index],
+                radial_quadrature=radial_quadrature, compute_one_halo=False,
+            )[:2] + (supplied_one_halo[index],)
+            for index, (lo, hi, shell_profile) in enumerate(zip(
+                z_lo_values, z_hi_values, profiles, strict=True
+            ))
+        ]
+    elif response_tables is None:
+        legacy_limber_results = [
+            limber_shell_cls(
+                ell_values,
+                float(lo),
+                float(hi),
+                linear_theory,
+                mass_function,
+                concentration_params,
+                shell_profile,
+                power_evolution=power_evolution,
+                theta_resolution_rad=theta_resolution_rad,
+                radial_quadrature=radial_quadrature,
+                profile_quadrature=profile_quadrature,
+            )
+            for lo, hi, shell_profile in zip(
+                z_lo_values,
+                z_hi_values,
+                profiles,
+                strict=True,
+            )
+        ]
+        limber_results = [
+            (linear, linear, one_halo) for linear, one_halo in legacy_limber_results
+        ]
+    else:
+        limber_results = [
+            limber_halo_model_shell_cls(
+                ell_values,
+                float(lo),
+                float(hi),
+                linear_theory,
+                mass_function,
+                concentration_params,
+                response_table,
+                shell_profile,
+                power_evolution=power_evolution,
+                theta_resolution_rad=theta_resolution_rad,
+                radial_quadrature=radial_quadrature,
+                profile_quadrature=profile_quadrature,
+            )
+            for lo, hi, shell_profile, response_table in zip(
+                z_lo_values,
+                z_hi_values,
+                profiles,
+                response_tables,
+                strict=True,
+            )
+        ]
     shell_linear = jnp.stack([result[0] for result in limber_results])
     shell_limber_linear = shell_linear
+    shell_two_halo = jnp.stack([result[1] for result in limber_results])
+    shell_limber_two_halo = shell_two_halo
     shell_finite_width_linear = jnp.stack(
         [
             finite_width_flat_sky_linear_shell_cls(
@@ -1397,8 +2311,34 @@ def hybrid_angular_power_spectra(
             for lo, hi in zip(z_lo_values, z_hi_values, strict=True)
         ]
     )
-    shell_one_halo = jnp.stack([result[1] for result in limber_results])
+    shell_finite_width_two_halo = (
+        shell_finite_width_linear
+        if response_tables is None
+        else jnp.stack(
+            [
+                finite_width_flat_sky_two_halo_shell_cls(
+                    ell_values,
+                    float(lo),
+                    float(hi),
+                    linear_theory,
+                    response_table,
+                    power_evolution=power_evolution,
+                    radial_quadrature=finite_width_radial_quadrature,
+                    line_of_sight_quadrature=finite_width_line_of_sight_quadrature,
+                    line_of_sight_tail_periods=finite_width_tail_periods,
+                )
+                for lo, hi, response_table in zip(
+                    z_lo_values,
+                    z_hi_values,
+                    response_tables,
+                    strict=True,
+                )
+            ]
+        )
+    )
+    shell_one_halo = jnp.stack([result[2] for result in limber_results])
     summed_linear = jnp.sum(weights[:, None] ** 2 * shell_linear, axis=0)
+    summed_two_halo = jnp.sum(weights[:, None] ** 2 * shell_two_halo, axis=0)
     summed_one_halo = jnp.sum(weights[:, None] ** 2 * shell_one_halo, axis=0)
 
     shell_ell_high_ell_start = np.full(
@@ -1422,10 +2362,17 @@ def hybrid_angular_power_spectra(
         shell_finite_width_linear,
         shell_limber_linear,
     )
+    shell_two_halo = jnp.where(
+        jnp.asarray(shell_high_ell_mode)[:, None] == LINEAR_HIGH_ELL_FINITE_WIDTH,
+        shell_finite_width_two_halo,
+        shell_limber_two_halo,
+    )
     if ell_exact_cap > 0 and np.any(ell_numpy <= ell_exact_cap):
         exact_indices_all = np.flatnonzero(ell_numpy <= ell_exact_cap)
         exact_shell_blocks: list[np.ndarray] = []
         exact_sum_blocks: list[np.ndarray] = []
+        exact_two_halo_shell_blocks: list[np.ndarray] = []
+        exact_two_halo_sum_blocks: list[np.ndarray] = []
         for batch_start in range(0, exact_indices_all.size, exact_batch_size):
             batch_indices = exact_indices_all[batch_start : batch_start + exact_batch_size]
             batch_ell_min = int(ell_numpy[batch_indices[0]])
@@ -1433,49 +2380,108 @@ def hybrid_angular_power_spectra(
             if exact_batch_callback is not None:
                 exact_batch_callback("start", batch_ell_min, batch_ell_max)
             if exact_batch_evaluator is None:
-                exact_shell_batch, exact_sum_batch = exact_linear_shell_cls(
-                    ell_numpy[batch_indices],
-                    z_lo_values,
-                    z_hi_values,
-                    linear_theory,
-                    power_evolution=power_evolution,
-                    shell_weights=np.asarray(weights),
-                    radial_order=exact_radial_order,
-                    radial_tail_periods=exact_radial_tail_periods,
-                    relative_tolerance=exact_relative_tolerance,
-                    workers=exact_workers,
-                )
+                if response_tables is None:
+                    exact_shell_batch, exact_sum_batch = exact_linear_shell_cls(
+                        ell_numpy[batch_indices],
+                        z_lo_values,
+                        z_hi_values,
+                        linear_theory,
+                        power_evolution=power_evolution,
+                        shell_weights=np.asarray(weights),
+                        radial_order=exact_radial_order,
+                        radial_tail_periods=exact_radial_tail_periods,
+                        relative_tolerance=exact_relative_tolerance,
+                        workers=exact_workers,
+                    )
+                    exact_two_halo_shell_batch = exact_shell_batch
+                    exact_two_halo_sum_batch = exact_sum_batch
+                else:
+                    (
+                        exact_shell_batch,
+                        exact_sum_batch,
+                        exact_two_halo_shell_batch,
+                        exact_two_halo_sum_batch,
+                    ) = exact_halo_model_shell_cls(
+                        ell_numpy[batch_indices],
+                        z_lo_values,
+                        z_hi_values,
+                        linear_theory,
+                        response_tables,
+                        power_evolution=power_evolution,
+                        shell_weights=np.asarray(weights),
+                        radial_order=exact_radial_order,
+                        radial_tail_periods=exact_radial_tail_periods,
+                        relative_tolerance=exact_relative_tolerance,
+                        workers=exact_workers,
+                    )
             else:
-                exact_shell_batch, exact_sum_batch = exact_batch_evaluator(ell_numpy[batch_indices])
+                exact_result = exact_batch_evaluator(ell_numpy[batch_indices])
+                if len(exact_result) == 2 and response_tables is None:
+                    exact_shell_batch, exact_sum_batch = exact_result
+                    exact_two_halo_shell_batch = exact_shell_batch
+                    exact_two_halo_sum_batch = exact_sum_batch
+                elif len(exact_result) == 4:
+                    (
+                        exact_shell_batch,
+                        exact_sum_batch,
+                        exact_two_halo_shell_batch,
+                        exact_two_halo_sum_batch,
+                    ) = exact_result
+                else:
+                    raise ValueError(
+                        "exact batch evaluator must return two linear arrays or four "
+                        "linear and two-halo arrays"
+                    )
             exact_shell_batch = np.asarray(exact_shell_batch, dtype=np.float64)
             exact_sum_batch = np.asarray(exact_sum_batch, dtype=np.float64)
+            exact_two_halo_shell_batch = np.asarray(
+                exact_two_halo_shell_batch,
+                dtype=np.float64,
+            )
+            exact_two_halo_sum_batch = np.asarray(
+                exact_two_halo_sum_batch,
+                dtype=np.float64,
+            )
             expected_shell_shape = (z_lo_values.size, batch_indices.size)
-            if exact_shell_batch.shape != expected_shell_shape or exact_sum_batch.shape != (
-                batch_indices.size,
+            if (
+                exact_shell_batch.shape != expected_shell_shape
+                or exact_two_halo_shell_batch.shape != expected_shell_shape
+                or exact_sum_batch.shape != (batch_indices.size,)
+                or exact_two_halo_sum_batch.shape != (batch_indices.size,)
             ):
                 raise ValueError("exact batch evaluator returned inconsistent spectrum shapes")
-            if not np.all(np.isfinite(exact_shell_batch)) or not np.all(
-                np.isfinite(exact_sum_batch)
+            if not all(
+                np.all(np.isfinite(values))
+                for values in (
+                    exact_shell_batch,
+                    exact_sum_batch,
+                    exact_two_halo_shell_batch,
+                    exact_two_halo_sum_batch,
+                )
             ):
                 raise ValueError("exact batch evaluator returned non-finite spectra")
             if exact_batch_callback is not None:
                 exact_batch_callback("complete", batch_ell_min, batch_ell_max)
             exact_shell_blocks.append(exact_shell_batch)
             exact_sum_blocks.append(exact_sum_batch)
+            exact_two_halo_shell_blocks.append(exact_two_halo_shell_batch)
+            exact_two_halo_sum_blocks.append(exact_two_halo_sum_batch)
 
         exact_shell = np.concatenate(exact_shell_blocks, axis=1)
         exact_sum = np.concatenate(exact_sum_blocks)
+        exact_two_halo_shell = np.concatenate(exact_two_halo_shell_blocks, axis=1)
+        exact_two_halo_sum = np.concatenate(exact_two_halo_sum_blocks)
         exact_indices = exact_indices_all
         if ell_numpy[-1] <= ell_exact_cap:
             shell_ell_high_ell_start.fill(int(ell_numpy[-1]) + 1)
             summed_ell_limber_start = int(ell_numpy[-1]) + 1
         else:
             selected_exact_shell, shell_high_ell_mode = select_shell_high_ell_projection(
-                exact_shell,
+                exact_two_halo_shell,
                 np.stack(
                     (
-                        np.asarray(shell_limber_linear)[:, exact_indices],
-                        np.asarray(shell_finite_width_linear)[:, exact_indices],
+                        np.asarray(shell_limber_two_halo)[:, exact_indices],
+                        np.asarray(shell_finite_width_two_halo)[:, exact_indices],
                     )
                 ),
                 np.asarray(
@@ -1491,6 +2497,11 @@ def hybrid_angular_power_spectra(
                 shell_finite_width_linear,
                 shell_limber_linear,
             )
+            shell_two_halo = jnp.where(
+                jnp.asarray(shell_high_ell_mode)[:, None] == LINEAR_HIGH_ELL_FINITE_WIDTH,
+                shell_finite_width_two_halo,
+                shell_limber_two_halo,
+            )
             (
                 shell_transition,
                 summed_transition,
@@ -1498,10 +2509,10 @@ def hybrid_angular_power_spectra(
                 summed_match_error,
             ) = select_independent_limber_transitions(
                 ell_numpy[exact_indices],
-                exact_shell,
-                exact_sum,
+                exact_two_halo_shell,
+                exact_two_halo_sum,
                 selected_exact_shell,
-                np.asarray(summed_linear)[exact_indices],
+                np.asarray(summed_two_halo)[exact_indices],
                 relative_tolerance=limber_match_rtol,
                 consecutive_multipoles=limber_match_width,
             )
@@ -1523,7 +2534,7 @@ def hybrid_angular_power_spectra(
                     ell_numpy[exact_indices[max(0, exact_indices.size - limber_match_width)]]
                 )
                 raise ValueError(
-                    "an exact and high-ell linear projection did not converge before "
+                    "an exact and high-ell two-halo projection did not converge before "
                     f"ell_exact_cap={ell_exact_cap}: {worst_label}, "
                     f"final_window={final_window_start}-{ell_numpy[exact_indices[-1]]}, "
                     f"maximum_relative_error={worst_error:.6g}"
@@ -1537,11 +2548,26 @@ def hybrid_angular_power_spectra(
                 shell_linear = shell_linear.at[shell_index, jnp.asarray(use_exact)].set(
                     jnp.asarray(exact_shell[shell_index, exact_lookup], dtype=shell_linear.dtype)
                 )
+                shell_two_halo = shell_two_halo.at[
+                    shell_index,
+                    jnp.asarray(use_exact),
+                ].set(
+                    jnp.asarray(
+                        exact_two_halo_shell[shell_index, exact_lookup],
+                        dtype=shell_two_halo.dtype,
+                    )
+                )
         use_exact_sum = exact_indices[ell_numpy[exact_indices] < summed_ell_limber_start]
         if use_exact_sum.size:
             exact_lookup = np.searchsorted(exact_indices, use_exact_sum)
             summed_linear = summed_linear.at[jnp.asarray(use_exact_sum)].set(
                 jnp.asarray(exact_sum[exact_lookup], dtype=summed_linear.dtype)
+            )
+            summed_two_halo = summed_two_halo.at[jnp.asarray(use_exact_sum)].set(
+                jnp.asarray(
+                    exact_two_halo_sum[exact_lookup],
+                    dtype=summed_two_halo.dtype,
+                )
             )
 
     if pixel_window is None:
@@ -1552,8 +2578,10 @@ def hybrid_angular_power_spectra(
             raise ValueError("pixel_window must have shape (n_ell,)")
     pixel_window_squared = pixel_window_values**2
     shell_linear = shell_linear * pixel_window_squared[None, :]
+    shell_two_halo = shell_two_halo * pixel_window_squared[None, :]
     shell_one_halo = shell_one_halo * pixel_window_squared[None, :]
     summed_linear = summed_linear * pixel_window_squared
+    summed_two_halo = summed_two_halo * pixel_window_squared
     summed_one_halo = summed_one_halo * pixel_window_squared
 
     if mean_uncollapsed_counts_per_pixel is None or mean_total_counts_per_pixel is None:
@@ -1577,16 +2605,18 @@ def hybrid_angular_power_spectra(
 
     shell_shot = jnp.broadcast_to(shell_shot_level[:, None], shell_linear.shape)
     summed_shot = jnp.broadcast_to(summed_shot_level, summed_linear.shape)
-    shell_clustering = shell_linear + shell_one_halo
-    summed_clustering = summed_linear + summed_one_halo
+    shell_clustering = shell_two_halo + shell_one_halo
+    summed_clustering = summed_two_halo + summed_one_halo
     return AngularPowerSpectra(
         ell=ell_values,
         shell_linear=shell_linear,
+        shell_two_halo=shell_two_halo,
         shell_one_halo=shell_one_halo,
         shell_particle_shot_noise=shell_shot,
         shell_clustering=shell_clustering,
         shell_total=shell_clustering + shell_shot,
         summed_linear=summed_linear,
+        summed_two_halo=summed_two_halo,
         summed_one_halo=summed_one_halo,
         summed_particle_shot_noise=summed_shot,
         summed_clustering=summed_clustering,

@@ -19,9 +19,9 @@ NPZ_KEYS = (
     "observed_sum",
     "ell",
     "shell_linear_pseudo_over_fsky",
+    "summed_linear_pseudo_over_fsky",
     "shell_one_halo_pseudo_over_fsky",
     "shell_particle_shot_noise_pseudo_over_fsky",
-    "summed_linear_pseudo_over_fsky",
     "summed_one_halo_pseudo_over_fsky",
     "summed_particle_shot_noise_pseudo_over_fsky",
     "shell_weights",
@@ -31,6 +31,12 @@ NPZ_KEYS = (
     "ell_limber_start",
     "shell_ell_high_ell_start",
     "shell_linear_high_ell_mode",
+)
+SCHEMA5_NPZ_KEYS = (
+    "two_halo_model",
+    "cctoolkit_revision",
+    "shell_two_halo_pseudo_over_fsky",
+    "summed_two_halo_pseudo_over_fsky",
 )
 
 BINNED_COLUMNS = (
@@ -49,6 +55,7 @@ BINNED_COLUMNS = (
     "shell_weight",
     "theory_convention",
 )
+SCHEMA5_BINNED_COLUMNS = BINNED_COLUMNS + ("two_halo",)
 
 DIAGNOSTIC_COLUMNS = (
     "segment_index",
@@ -75,6 +82,7 @@ class AngularPowerValidationData:
     ell: np.ndarray
     observed_sum: np.ndarray
     summed_linear: np.ndarray
+    summed_two_halo: np.ndarray
     summed_one_halo: np.ndarray
     summed_particle_shot_noise: np.ndarray
     summed_total: np.ndarray
@@ -89,6 +97,7 @@ class AngularPowerValidationData:
     shell_z_edges: np.ndarray
     observed_shell: np.ndarray
     shell_linear: np.ndarray
+    shell_two_halo: np.ndarray
     shell_one_halo: np.ndarray
     shell_particle_shot_noise: np.ndarray
     shell_total: np.ndarray
@@ -100,6 +109,8 @@ class AngularPowerValidationData:
     reconstructed_sigma8: float
     sigma8_relative_error: float
     ell_limber_start: int
+    summed_one_halo_standard: np.ndarray | None = None
+    shell_one_halo_standard: np.ndarray | None = None
 
 
 def parse_args() -> argparse.Namespace:
@@ -191,14 +202,23 @@ def load_validation_data(input_dir: Path) -> AngularPowerValidationData:
                     f"{theory_path} is a legacy validation archive; rerun angular validation"
                 )
             schema = np.asarray(source["validation_schema_version"])
-            if schema.shape != () or int(schema) != 4:
+            if schema.shape != () or int(schema) not in {4, 5, 6}:
                 raise ValueError(
                     f"{theory_path} uses an unsupported validation schema; rerun angular validation"
                 )
-            missing = set(NPZ_KEYS) - set(source.files)
+            schema_version = int(schema)
+            required_npz_keys = NPZ_KEYS + (SCHEMA5_NPZ_KEYS if schema_version >= 5 else ())
+            key_map = {key: key for key in required_npz_keys}
+            if schema_version == 6:
+                key_map = {key: key.replace("_one_halo_", "_one_halo_compensated_")
+                           for key in required_npz_keys}
+                for scope in ("shell", "summed"):
+                    key = f"{scope}_one_halo_standard_pseudo_over_fsky"
+                    key_map[key] = key
+            missing = set(key_map.values()) - set(source.files)
             if missing:
                 raise ValueError(f"{theory_path} is missing arrays: {sorted(missing)}")
-            arrays = {key: np.array(source[key], copy=True) for key in NPZ_KEYS}
+            arrays = {key: np.array(source[name], copy=True) for key, name in key_map.items()}
     except OSError as exc:
         raise ValueError(f"cannot read validation archive: {theory_path}") from exc
 
@@ -208,6 +228,12 @@ def load_validation_data(input_dir: Path) -> AngularPowerValidationData:
     compensation = str(np.asarray(arrays["one_halo_compensation"]).item())
     if compensation != "lagrangian_top_hat_difference":
         raise ValueError(f"{theory_path} declares an unsupported one-halo compensation")
+    if schema_version >= 5:
+        two_halo_model = str(np.asarray(arrays["two_halo_model"]).item())
+        expected_model = ("standard_normalized_hmf_castro_bias" if schema_version == 6
+                          else "castro_corrected_numerical_pbs_compensated_response")
+        if two_halo_model != expected_model:
+            raise ValueError(f"{theory_path} declares an unsupported two-halo model")
 
     ell = _require_vector("ell", arrays["ell"])
     if ell.size == 0 or np.any(ell < 0) or np.any(ell != np.rint(ell)) or np.any(np.diff(ell) <= 0):
@@ -231,8 +257,19 @@ def load_validation_data(input_dir: Path) -> AngularPowerValidationData:
             n_ell,
         ),
     }
+    summed["summed_two_halo"] = (
+        summed["summed_linear"]
+        if schema_version == 4
+        else _require_vector(
+            "summed_two_halo_pseudo_over_fsky",
+            arrays["summed_two_halo_pseudo_over_fsky"],
+            n_ell,
+        )
+    )
     summed["summed_total"] = (
-        summed["summed_linear"] + summed["summed_one_halo"] + summed["summed_particle_shot_noise"]
+        summed["summed_two_halo"]
+        + summed["summed_one_halo"]
+        + summed["summed_particle_shot_noise"]
     )
     shell_weights = _require_vector("shell_weights", arrays["shell_weights"])
     expected_shell_shape = (shell_weights.size, n_ell)
@@ -247,11 +284,30 @@ def load_validation_data(input_dir: Path) -> AngularPowerValidationData:
             raise ValueError(f"NPZ array {key!r} must be finite with shape {expected_shell_shape}")
 
     shell_linear = arrays["shell_linear_pseudo_over_fsky"]
+    if schema_version == 4:
+        shell_two_halo = shell_linear
+    else:
+        shell_two_halo = np.asarray(arrays["shell_two_halo_pseudo_over_fsky"])
+        if shell_two_halo.shape != expected_shell_shape or not np.all(
+            np.isfinite(shell_two_halo)
+        ):
+            raise ValueError(
+                "NPZ array 'shell_two_halo_pseudo_over_fsky' must be finite with "
+                f"shape {expected_shell_shape}"
+            )
     shell_one_halo = arrays["shell_one_halo_pseudo_over_fsky"]
+    if schema_version == 6:
+        for scope, shape in (("shell", expected_shell_shape), ("summed", (n_ell,))):
+            values = arrays[f"{scope}_one_halo_standard_pseudo_over_fsky"]
+            if values.shape != shape or not np.all(np.isfinite(values)):
+                raise ValueError("standard one-halo arrays have invalid shapes or values")
     shell_shot = arrays["shell_particle_shot_noise_pseudo_over_fsky"]
-    shell_total = shell_linear + shell_one_halo + shell_shot
+    shell_total = shell_two_halo + shell_one_halo + shell_shot
 
-    binned_rows = _read_csv(binned_path, BINNED_COLUMNS)
+    binned_rows = _read_csv(
+        binned_path,
+        SCHEMA5_BINNED_COLUMNS if schema_version >= 5 else BINNED_COLUMNS,
+    )
     convention = "constant_deprojected_pseudo_cl_over_f_sky"
     if any(row["theory_convention"] != convention for row in binned_rows):
         raise ValueError(f"{binned_path} contains an unsupported theory convention")
@@ -387,6 +443,7 @@ def load_validation_data(input_dir: Path) -> AngularPowerValidationData:
         ell=ell,
         observed_sum=summed["observed_sum"],
         summed_linear=summed["summed_linear"],
+        summed_two_halo=summed["summed_two_halo"],
         summed_one_halo=summed["summed_one_halo"],
         summed_particle_shot_noise=summed["summed_particle_shot_noise"],
         summed_total=summed["summed_total"],
@@ -405,6 +462,7 @@ def load_validation_data(input_dir: Path) -> AngularPowerValidationData:
         shell_z_edges=shell_z_edges,
         observed_shell=arrays["observed_shell"][shell_archive_order],
         shell_linear=shell_linear[shell_archive_order],
+        shell_two_halo=shell_two_halo[shell_archive_order],
         shell_one_halo=shell_one_halo[shell_archive_order],
         shell_particle_shot_noise=shell_shot[shell_archive_order],
         shell_total=shell_total[shell_archive_order],
@@ -416,6 +474,10 @@ def load_validation_data(input_dir: Path) -> AngularPowerValidationData:
         reconstructed_sigma8=scalar_diagnostics["reconstructed_sigma8"],
         sigma8_relative_error=scalar_diagnostics["sigma8_relative_error"],
         ell_limber_start=ell_limber_start,
+        summed_one_halo_standard=(arrays["summed_one_halo_standard_pseudo_over_fsky"]
+                                  if schema_version == 6 else None),
+        shell_one_halo_standard=(arrays["shell_one_halo_standard_pseudo_over_fsky"][shell_archive_order]
+                                 if schema_version == 6 else None),
     )
 
 
@@ -529,16 +591,34 @@ def render_validation_figures(
             sharex=True,
             gridspec_kw={"height_ratios": (3.0, 1.0), "hspace": 0.05},
         )
-        spectrum_axis.loglog(ell, scale * data.summed_total, color="black", label="Total theory")
+        spectrum_axis.loglog(ell, scale * data.summed_total, color="black",
+                             label="Total (compensated 1h)" if data.summed_one_halo_standard is not None
+                             else "Total theory")
+        if data.summed_one_halo_standard is not None:
+            standard_total = data.summed_total - data.summed_one_halo + data.summed_one_halo_standard
+            spectrum_axis.loglog(ell, scale * standard_total, color="#CC79A7", linestyle=":",
+                                 label="Total (standard 1h)")
         spectrum_axis.loglog(
-            ell, scale * data.summed_linear, color="#0072B2", linestyle="--", label="Linear"
+            ell,
+            scale * data.summed_two_halo,
+            color="#0072B2",
+            linestyle="--",
+            label="Two halo",
+        )
+        spectrum_axis.loglog(
+            ell,
+            scale * data.summed_linear,
+            color="0.45",
+            linewidth=0.8,
+            linestyle=(0, (1.5, 1.5)),
+            label="Linear baseline",
         )
         spectrum_axis.loglog(
             ell,
             scale * data.summed_one_halo,
             color="#D55E00",
             linestyle="-.",
-            label="One halo",
+            label="One halo (compensated)",
         )
         spectrum_axis.loglog(
             ell,
@@ -568,6 +648,7 @@ def render_validation_figures(
         positive_components = np.concatenate(
             (
                 scale[visible] * data.summed_linear[visible],
+                scale[visible] * data.summed_two_halo[visible],
                 scale[visible] * data.summed_one_halo[visible],
                 scale[visible] * data.summed_particle_shot_noise[visible],
             )
@@ -644,21 +725,34 @@ def render_validation_figures(
                 ell,
                 scale * data.shell_total[shell_index],
                 color="black",
-                label="Total theory",
+                label="Total (compensated 1h)" if data.shell_one_halo_standard is not None else "Total theory",
+            )
+            if data.shell_one_halo_standard is not None:
+                standard_total = (data.shell_total[shell_index] - data.shell_one_halo[shell_index]
+                                  + data.shell_one_halo_standard[shell_index])
+                spectrum_axis.loglog(ell, scale * standard_total, color="#CC79A7", linestyle=":",
+                                     label="Total (standard 1h)")
+            spectrum_axis.loglog(
+                ell,
+                scale * data.shell_two_halo[shell_index],
+                color="#0072B2",
+                linestyle="--",
+                label="Two halo",
             )
             spectrum_axis.loglog(
                 ell,
                 scale * data.shell_linear[shell_index],
-                color="#0072B2",
-                linestyle="--",
-                label="Linear",
+                color="0.45",
+                linewidth=0.8,
+                linestyle=(0, (1.5, 1.5)),
+                label="Linear baseline",
             )
             spectrum_axis.loglog(
                 ell,
                 scale * data.shell_one_halo[shell_index],
                 color="#D55E00",
                 linestyle="-.",
-                label="One halo",
+                label="One halo (compensated)",
             )
             spectrum_axis.loglog(
                 ell,
@@ -680,6 +774,7 @@ def render_validation_figures(
             panel_components = np.concatenate(
                 (
                     scale[visible] * data.shell_linear[shell_index, visible],
+                    scale[visible] * data.shell_two_halo[shell_index, visible],
                     scale[visible] * data.shell_one_halo[shell_index, visible],
                     scale[visible] * data.shell_particle_shot_noise[shell_index, visible],
                 )

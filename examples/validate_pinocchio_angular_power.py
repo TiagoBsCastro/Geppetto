@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare PINOCCHIO+GEPPETTO shell maps with linear-plus-one-halo theory.
+"""Compare PINOCCHIO+GEPPETTO shell maps with corrected halo-model theory.
 
 The original PINOCCHIO FITS map supplies compact RING pixel IDs and
 uncollapsed-particle counts. The lean GEPPETTO NPZ supplies painted one-halo
@@ -17,7 +17,7 @@ import glob
 import hashlib
 import os
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
@@ -29,12 +29,18 @@ import numpy as np
 
 from geppetto.concentration import ConcentrationParams
 from geppetto.cosmology import Cosmology
+from geppetto.halo_bias import (
+    CCTOOLKIT_REVISION,
+    NumericalPBSFitParams,
+    fit_pinocchio_numerical_halo_bias,
+)
 from geppetto.io import (
     PinocchioCatalogError,
     healpix_pixel_area_sr,
+    pinocchio_mass_function_series_from_tables,
     read_pinocchio_cosmology_table,
     read_pinocchio_linear_power_evolution,
-    read_pinocchio_mass_function_series,
+    read_pinocchio_mass_function,
     read_pinocchio_mass_map_fits,
     read_pinocchio_parameter_file,
 )
@@ -44,18 +50,22 @@ from geppetto.theory import (
     LINEAR_HIGH_ELL_LIMBER,
     LinearPowerEvolutionTable,
     LinearTheoryTable,
+    TwoHaloResponseTable,
     comoving_distance_mpc_h,
-    exact_linear_shell_cls,
+    exact_halo_model_shell_cls,
+    gauss_legendre_rule,
     hybrid_angular_power_spectra,
     linear_matter_power,
     one_halo_matter_power,
     resolved_halo_mass_fraction,
     sigma8_from_linear_power,
+    tabulate_shell_two_halo_response,
+    two_halo_matter_power,
 )
 
-VALIDATION_SCHEMA_VERSION = 4
-EXACT_CHECKPOINT_SCHEMA_VERSION = 2
-THEORY_COMPONENTS = ("linear", "one_halo", "particle_shot_noise")
+VALIDATION_SCHEMA_VERSION = 5
+EXACT_CHECKPOINT_SCHEMA_VERSION = 3
+THEORY_COMPONENTS = ("linear", "two_halo", "one_halo", "particle_shot_noise")
 
 
 @dataclass(frozen=True)
@@ -101,6 +111,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--finite-width-los-order", type=int, default=512)
     parser.add_argument("--finite-width-tail-periods", type=float, default=40.0)
     parser.add_argument("--profile-order", type=int, default=64)
+    parser.add_argument("--pbs-fit-min-populated-bins", type=int, default=8)
+    parser.add_argument("--pbs-fit-max-weighted-log-residual", type=float, default=0.05)
     parser.add_argument("--exact-relative-tolerance", type=float, default=1.0e-4)
     parser.add_argument("--sigma8-rtol", type=float, default=0.01)
     parser.add_argument("--mask-sht-iterations", type=int, default=3)
@@ -119,6 +131,7 @@ def exact_checkpoint_fingerprint(
     linear_theory: LinearTheoryTable,
     power_evolution: LinearPowerEvolutionTable | None = None,
     *,
+    response_tables: Sequence[TwoHaloResponseTable] | None = None,
     radial_order: int,
     radial_tail_periods: float,
     relative_tolerance: float,
@@ -130,6 +143,7 @@ def exact_checkpoint_fingerprint(
     digest.update(f"radial_order={radial_order}".encode())
     digest.update(f"radial_tail_periods={radial_tail_periods:.17g}".encode())
     digest.update(f"relative_tolerance={relative_tolerance:.17g}".encode())
+    digest.update(f"cctoolkit_revision={CCTOOLKIT_REVISION}".encode())
     digest.update(
         (
             "linear_power_evolution=scalar_growth"
@@ -163,6 +177,13 @@ def exact_checkpoint_fingerprint(
             digest.update(array.dtype.str.encode())
             digest.update(np.asarray(array.shape, dtype=np.int64).tobytes())
             digest.update(array.view(np.uint8))
+    if response_tables is not None:
+        for table in response_tables:
+            for value in (table.scale_factor, table.k_h_mpc, table.response):
+                array = np.ascontiguousarray(np.asarray(value))
+                digest.update(array.dtype.str.encode())
+                digest.update(np.asarray(array.shape, dtype=np.int64).tobytes())
+                digest.update(array.view(np.uint8))
     return digest.hexdigest()
 
 
@@ -171,8 +192,11 @@ def exact_batch_with_checkpoint(
     fingerprint: str,
     ell: np.ndarray,
     n_shell: int,
-    compute: Callable[[np.ndarray], tuple[np.ndarray, np.ndarray]],
-) -> tuple[np.ndarray, np.ndarray, bool]:
+    compute: Callable[
+        [np.ndarray],
+        tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],
+    ],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, bool]:
     """Load or compute one exact batch and atomically extend its checkpoint.
 
     ``compute`` receives only missing multipoles. The boolean result reports
@@ -185,6 +209,8 @@ def exact_batch_with_checkpoint(
     cached_ell = np.empty(0, dtype=np.int64)
     cached_shell = np.empty((n_shell, 0), dtype=np.float64)
     cached_sum = np.empty(0, dtype=np.float64)
+    cached_two_halo_shell = np.empty((n_shell, 0), dtype=np.float64)
+    cached_two_halo_sum = np.empty(0, dtype=np.float64)
     if checkpoint_path.exists():
         try:
             with np.load(checkpoint_path, allow_pickle=False) as checkpoint:
@@ -197,14 +223,29 @@ def exact_batch_with_checkpoint(
                     cached_ell = np.asarray(checkpoint["ell"], dtype=np.int64)
                     cached_shell = np.asarray(checkpoint["shell_linear"], dtype=np.float64)
                     cached_sum = np.asarray(checkpoint["summed_linear"], dtype=np.float64)
+                    cached_two_halo_shell = np.asarray(
+                        checkpoint["shell_two_halo"],
+                        dtype=np.float64,
+                    )
+                    cached_two_halo_sum = np.asarray(
+                        checkpoint["summed_two_halo"],
+                        dtype=np.float64,
+                    )
         except (OSError, KeyError, ValueError) as exc:
             raise ValueError(f"cannot read exact-projection checkpoint: {checkpoint_path}") from exc
-    if cached_shell.shape != (n_shell, cached_ell.size) or cached_sum.shape != cached_ell.shape:
+    if (
+        cached_shell.shape != (n_shell, cached_ell.size)
+        or cached_two_halo_shell.shape != (n_shell, cached_ell.size)
+        or cached_sum.shape != cached_ell.shape
+        or cached_two_halo_sum.shape != cached_ell.shape
+    ):
         raise ValueError(f"exact-projection checkpoint has inconsistent shapes: {checkpoint_path}")
     if cached_ell.size and (
         np.unique(cached_ell).size != cached_ell.size
         or not np.all(np.isfinite(cached_shell))
         or not np.all(np.isfinite(cached_sum))
+        or not np.all(np.isfinite(cached_two_halo_shell))
+        or not np.all(np.isfinite(cached_two_halo_sum))
     ):
         raise ValueError(f"exact-projection checkpoint contains invalid values: {checkpoint_path}")
 
@@ -214,20 +255,42 @@ def exact_batch_with_checkpoint(
     )
     cache_hit = missing.size == 0
     if missing.size:
-        missing_shell, missing_sum = compute(missing)
+        missing_shell, missing_sum, missing_two_halo_shell, missing_two_halo_sum = compute(missing)
         missing_shell = np.asarray(missing_shell, dtype=np.float64)
         missing_sum = np.asarray(missing_sum, dtype=np.float64)
-        if missing_shell.shape != (n_shell, missing.size) or missing_sum.shape != missing.shape:
+        missing_two_halo_shell = np.asarray(missing_two_halo_shell, dtype=np.float64)
+        missing_two_halo_sum = np.asarray(missing_two_halo_sum, dtype=np.float64)
+        if (
+            missing_shell.shape != (n_shell, missing.size)
+            or missing_two_halo_shell.shape != (n_shell, missing.size)
+            or missing_sum.shape != missing.shape
+            or missing_two_halo_sum.shape != missing.shape
+        ):
             raise ValueError("exact-projection compute callback returned inconsistent shapes")
-        if not np.all(np.isfinite(missing_shell)) or not np.all(np.isfinite(missing_sum)):
+        if not all(
+            np.all(np.isfinite(values))
+            for values in (
+                missing_shell,
+                missing_sum,
+                missing_two_halo_shell,
+                missing_two_halo_sum,
+            )
+        ):
             raise ValueError("exact-projection compute callback returned non-finite values")
         combined_ell = np.concatenate((cached_ell, missing))
         combined_shell = np.concatenate((cached_shell, missing_shell), axis=1)
         combined_sum = np.concatenate((cached_sum, missing_sum))
+        combined_two_halo_shell = np.concatenate(
+            (cached_two_halo_shell, missing_two_halo_shell),
+            axis=1,
+        )
+        combined_two_halo_sum = np.concatenate((cached_two_halo_sum, missing_two_halo_sum))
         order = np.argsort(combined_ell)
         cached_ell = combined_ell[order]
         cached_shell = combined_shell[:, order]
         cached_sum = combined_sum[order]
+        cached_two_halo_shell = combined_two_halo_shell[:, order]
+        cached_two_halo_sum = combined_two_halo_sum[order]
         checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
         temporary_path: Path | None = None
         try:
@@ -245,6 +308,8 @@ def exact_batch_with_checkpoint(
                     ell=cached_ell,
                     shell_linear=cached_shell,
                     summed_linear=cached_sum,
+                    shell_two_halo=cached_two_halo_shell,
+                    summed_two_halo=cached_two_halo_sum,
                 )
             os.replace(temporary_path, checkpoint_path)
         finally:
@@ -255,7 +320,13 @@ def exact_batch_with_checkpoint(
     requested_indices = np.asarray(
         [cached_lookup[int(value)] for value in requested], dtype=np.int64
     )
-    return cached_shell[:, requested_indices], cached_sum[requested_indices], cache_hit
+    return (
+        cached_shell[:, requested_indices],
+        cached_sum[requested_indices],
+        cached_two_halo_shell[:, requested_indices],
+        cached_two_halo_sum[requested_indices],
+        cache_hit,
+    )
 
 
 def load_manifest(path: Path) -> list[dict[str, str]]:
@@ -391,7 +462,8 @@ def build_mask_coupling(
     lmax_mask = min(2 * lmax, 3 * nside - 1)
     reference_field = nmt.NmtField(
         mask,
-        None,
+        # NaMaster returns early for maps=None, before processing templates.
+        np.zeros((1, npix), dtype=np.float64),
         spin=0,
         templates=template,
         n_iter=n_iter,
@@ -400,6 +472,8 @@ def build_mask_coupling(
         lmax_mask=lmax_mask,
         masked_on_input=True,
     )
+    if reference_field.n_temp != 1:
+        raise RuntimeError("NaMaster did not retain the constant-deprojection template")
     bins = nmt.NmtBin.from_lmax_linear(lmax, nlb=max(1, bin_width))
     workspace = nmt.NmtWorkspace.from_fields(reference_field, reference_field, bins)
     return MaskCoupling(
@@ -539,6 +613,7 @@ def _binned_rows(
     ell: np.ndarray,
     measured: np.ndarray,
     linear: np.ndarray,
+    two_halo: np.ndarray,
     one_halo: np.ndarray,
     shot: np.ndarray,
     *,
@@ -565,9 +640,10 @@ def _binned_rows(
 
         measured_bin = average(measured)
         linear_bin = average(linear)
+        two_halo_bin = average(two_halo)
         one_halo_bin = average(one_halo)
         shot_bin = average(shot)
-        clustering = linear_bin + one_halo_bin
+        clustering = two_halo_bin + one_halo_bin
         total = clustering + shot_bin
         rows.append(
             {
@@ -577,6 +653,7 @@ def _binned_rows(
                 "ell_effective": float(np.average(ell[selected], weights=weights)),
                 "measured": measured_bin,
                 "linear": linear_bin,
+                "two_halo": two_halo_bin,
                 "one_halo": one_halo_bin,
                 "particle_shot_noise": shot_bin,
                 "clustering": clustering,
@@ -631,8 +708,8 @@ def validate_power_evolution_consistency(
     return float(relative_error)
 
 
-def run_validation(args: argparse.Namespace) -> tuple[Path, Path, Path]:
-    """Run the map/theory comparison and return its three output paths."""
+def run_validation(args: argparse.Namespace) -> tuple[Path, Path, Path, Path]:
+    """Run the map/theory comparison and return its four output paths."""
 
     print("[theory] loading manifest and PINOCCHIO tables", flush=True)
     rows = load_manifest(args.manifest)
@@ -679,9 +756,26 @@ def run_validation(args: argparse.Namespace) -> tuple[Path, Path, Path]:
     if not np.isfinite(reconstructed_sigma8) or reconstructed_sigma8 <= 0.0:
         raise ValueError("reconstructed sigma8 must be positive and finite")
     hmf_paths = tuple(Path(path) for path in sorted(glob.glob(args.hmf_glob)))
-    mass_function = read_pinocchio_mass_function_series(
-        hmf_paths,
+    native_mass_functions = tuple(read_pinocchio_mass_function(path) for path in hmf_paths)
+    mass_function = pinocchio_mass_function_series_from_tables(
+        native_mass_functions,
         required_redshifts=required_redshifts,
+    )
+    bias_fit_params = NumericalPBSFitParams(
+        minimum_populated_bins=args.pbs_fit_min_populated_bins,
+        maximum_weighted_log_residual=args.pbs_fit_max_weighted_log_residual,
+    )
+    halo_bias, bias_fit_diagnostics = fit_pinocchio_numerical_halo_bias(
+        native_mass_functions,
+        mass_function,
+        linear_theory,
+        params=bias_fit_params,
+    )
+    print(
+        "[theory] fitted numerical-HMF PBS bias at "
+        f"{len(bias_fit_diagnostics)} redshifts; Castro correction from "
+        f"CCToolkit {CCTOOLKIT_REVISION[:12]}",
+        flush=True,
     )
     table_z_max = 1.0 / float(np.min(np.asarray(linear_theory.scale_factor))) - 1.0
     if float(np.max(z_hi)) > table_z_max:
@@ -712,6 +806,8 @@ def run_validation(args: argparse.Namespace) -> tuple[Path, Path, Path]:
         or args.finite_width_radial_order < 2
         or args.finite_width_los_order < 2
         or args.profile_order < 2
+        or args.pbs_fit_min_populated_bins < 8
+        or args.pbs_fit_max_weighted_log_residual <= 0.0
     ):
         raise ValueError("bin width and quadrature orders must be positive")
     if (
@@ -853,6 +949,24 @@ def run_validation(args: argparse.Namespace) -> tuple[Path, Path, Path]:
         ) from exc
     theta_resolution = _consistent_float(rows, "theta_resolution_rad")
     theory_started = perf_counter()
+    response_k = linear_theory.k_h_mpc if power_evolution is None else power_evolution.k_h_mpc
+    response_profile_quadrature = gauss_legendre_rule(args.profile_order)
+    print("[theory] tabulating corrected compensated two-halo responses", flush=True)
+    response_tables = tuple(
+        tabulate_shell_two_halo_response(
+            float(lo),
+            float(hi),
+            linear_theory,
+            mass_function,
+            halo_bias,
+            concentration,
+            profile,
+            k_h_mpc=response_k,
+            theta_resolution_rad=theta_resolution,
+            profile_quadrature=response_profile_quadrature,
+        )
+        for lo, hi, profile in zip(z_lo, z_hi, profiles, strict=True)
+    )
     exact_batch_started = theory_started
     exact_fingerprint = exact_checkpoint_fingerprint(
         z_lo,
@@ -860,6 +974,7 @@ def run_validation(args: argparse.Namespace) -> tuple[Path, Path, Path]:
         shell_weights,
         linear_theory,
         power_evolution,
+        response_tables=response_tables,
         radial_order=args.exact_radial_order,
         radial_tail_periods=args.exact_radial_tail_periods,
         relative_tolerance=args.exact_relative_tolerance,
@@ -880,12 +995,15 @@ def run_validation(args: argparse.Namespace) -> tuple[Path, Path, Path]:
                 flush=True,
             )
 
-    def compute_exact_batch(batch_ell: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        return exact_linear_shell_cls(
+    def compute_exact_batch(
+        batch_ell: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        return exact_halo_model_shell_cls(
             batch_ell,
             z_lo,
             z_hi,
             linear_theory,
+            response_tables,
             power_evolution=power_evolution,
             shell_weights=shell_weights,
             radial_order=args.exact_radial_order,
@@ -894,13 +1012,17 @@ def run_validation(args: argparse.Namespace) -> tuple[Path, Path, Path]:
             workers=args.exact_workers,
         )
 
-    def evaluate_exact_batch(batch_ell: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        shell_result, summed_result, cache_hit = exact_batch_with_checkpoint(
-            exact_checkpoint_path,
-            exact_fingerprint,
-            batch_ell,
-            len(rows),
-            compute_exact_batch,
+    def evaluate_exact_batch(
+        batch_ell: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        shell_result, summed_result, shell_two_halo, summed_two_halo, cache_hit = (
+            exact_batch_with_checkpoint(
+                exact_checkpoint_path,
+                exact_fingerprint,
+                batch_ell,
+                len(rows),
+                compute_exact_batch,
+            )
         )
         action = "restored from" if cache_hit else "saved to"
         print(
@@ -908,10 +1030,10 @@ def run_validation(args: argparse.Namespace) -> tuple[Path, Path, Path]:
             f"{action} {exact_checkpoint_path}",
             flush=True,
         )
-        return shell_result, summed_result
+        return shell_result, summed_result, shell_two_halo, summed_two_halo
 
     print(
-        "[theory] computing full-sky exact/Limber and one-halo spectra "
+        "[theory] computing full-sky exact/Limber two-halo and one-halo spectra "
         f"with {args.exact_workers} exact workers",
         flush=True,
     )
@@ -924,6 +1046,8 @@ def run_validation(args: argparse.Namespace) -> tuple[Path, Path, Path]:
         concentration,
         profiles,
         shell_weights=jnp.asarray(shell_weights),
+        halo_bias=halo_bias,
+        two_halo_response_tables=response_tables,
         power_evolution=power_evolution,
         pixel_window=jnp.asarray(pixel_window),
         mean_uncollapsed_counts_per_pixel=jnp.asarray(mean_uncollapsed),
@@ -1009,6 +1133,22 @@ def run_validation(args: argparse.Namespace) -> tuple[Path, Path, Path]:
             for z in midpoint_z
         ]
     )
+    low_k_two_halo = np.asarray(
+        [
+            two_halo_matter_power(
+                jnp.asarray(diagnostic_k),
+                z,
+                linear_theory,
+                mass_function,
+                halo_bias,
+                concentration,
+                profile,
+                power_evolution=power_evolution,
+                theta_resolution_rad=theta_resolution,
+            )
+            for z, profile in zip(midpoint_z, profiles, strict=True)
+        ]
+    )
 
     theory_path = args.output_dir / "angular_power_theory.npz"
     print(f"[theory] writing {theory_path}", flush=True)
@@ -1017,14 +1157,21 @@ def run_validation(args: argparse.Namespace) -> tuple[Path, Path, Path]:
         validation_schema_version=np.asarray(VALIDATION_SCHEMA_VERSION, dtype=np.int64),
         linear_power_evolution=np.asarray(power_evolution_mode),
         linear_power_z0_max_relative_error=np.asarray(power_evolution_closure_error),
+        two_halo_model=np.asarray("castro_corrected_numerical_pbs_compensated_response"),
+        cctoolkit_revision=np.asarray(CCTOOLKIT_REVISION),
+        halo_mass_definition_note=np.asarray(
+            "numerical PINOCCHIO HMF convention; Castro correction calibrated for virial halos"
+        ),
         one_halo_compensation=np.asarray("lagrangian_top_hat_difference"),
         observed_shell=observed_shell,
         observed_sum=observed_sum,
         ell=theory_np["ell"],
         shell_linear=theory_np["shell_linear"],
+        shell_two_halo=theory_np["shell_two_halo"],
         shell_one_halo=theory_np["shell_one_halo"],
         shell_particle_shot_noise=theory_np["shell_particle_shot_noise"],
         summed_linear=theory_np["summed_linear"],
+        summed_two_halo=theory_np["summed_two_halo"],
         summed_one_halo=theory_np["summed_one_halo"],
         summed_particle_shot_noise=theory_np["summed_particle_shot_noise"],
         shell_weights=theory_np["shell_weights"],
@@ -1034,6 +1181,11 @@ def run_validation(args: argparse.Namespace) -> tuple[Path, Path, Path]:
         high_ell_match_shell_relative_error=theory_np["high_ell_match_shell_relative_error"],
         limber_match_summed_relative_error=theory_np["limber_match_summed_relative_error"],
         shell_linear_high_ell_mode=mode_names,
+        bias_scale_factor=np.asarray(halo_bias.scale_factor),
+        bias_mass_msun_h=np.exp(np.asarray(halo_bias.log_mass_msun_h)),
+        bias_pbs=np.asarray(halo_bias.pbs_bias),
+        bias_correction=np.asarray(halo_bias.correction),
+        bias_linear=np.asarray(halo_bias.linear_bias),
         reference_sigma8=np.asarray(reference_sigma8),
         reconstructed_sigma8=np.asarray(reconstructed_sigma8),
         sigma8_relative_error=np.asarray(sigma8_relative_error),
@@ -1051,6 +1203,7 @@ def run_validation(args: argparse.Namespace) -> tuple[Path, Path, Path]:
         finite_width_tail_periods=np.asarray(args.finite_width_tail_periods),
         exact_relative_tolerance=np.asarray(args.exact_relative_tolerance),
         mask_sht_iterations=np.asarray(args.mask_sht_iterations, dtype=np.int64),
+        mask_reference_template_count=np.asarray(coupling.reference_field.n_temp, dtype=np.int64),
         mask_pixel_sha256=np.asarray(
             hashlib.sha256(np.ascontiguousarray(compact_pixels).view(np.uint8)).hexdigest()
         ),
@@ -1065,6 +1218,7 @@ def run_validation(args: argparse.Namespace) -> tuple[Path, Path, Path]:
                 ell,
                 observed_shell[index],
                 pseudo_theory["shell_linear_pseudo_over_fsky"][index],
+                pseudo_theory["shell_two_halo_pseudo_over_fsky"][index],
                 pseudo_theory["shell_one_halo_pseudo_over_fsky"][index],
                 pseudo_theory["shell_particle_shot_noise_pseudo_over_fsky"][index],
                 ell_min=args.ell_min_compare,
@@ -1079,6 +1233,7 @@ def run_validation(args: argparse.Namespace) -> tuple[Path, Path, Path]:
             ell,
             observed_sum,
             pseudo_theory["summed_linear_pseudo_over_fsky"],
+            pseudo_theory["summed_two_halo_pseudo_over_fsky"],
             pseudo_theory["summed_one_halo_pseudo_over_fsky"],
             pseudo_theory["summed_particle_shot_noise_pseudo_over_fsky"],
             ell_min=args.ell_min_compare,
@@ -1108,6 +1263,11 @@ def run_validation(args: argparse.Namespace) -> tuple[Path, Path, Path]:
                 "one_halo_over_linear_at_diagnostic_k": (
                     low_k_one_halo[index] / low_k_linear[index]
                 ),
+                "two_halo_over_linear_at_diagnostic_k": (
+                    low_k_two_halo[index] / low_k_linear[index]
+                ),
+                "two_halo_model": "castro_corrected_numerical_pbs_compensated_response",
+                "cctoolkit_revision": CCTOOLKIT_REVISION,
                 "linear_power_evolution": power_evolution_mode,
                 "linear_power_z0_max_relative_error": power_evolution_closure_error,
                 "one_halo_compensation": "lagrangian_top_hat_difference",
@@ -1143,8 +1303,35 @@ def run_validation(args: argparse.Namespace) -> tuple[Path, Path, Path]:
         )
     diagnostics_path = args.output_dir / "angular_power_diagnostics.csv"
     _write_csv(diagnostics_path, diagnostic_rows)
+    bias_fit_path = args.output_dir / "angular_power_bias_fit.csv"
+    _write_csv(
+        bias_fit_path,
+        [
+            {
+                "source": str(diagnostic.source),
+                "redshift": diagnostic.redshift,
+                "populated_bins": diagnostic.populated_bins,
+                "log_amplitude": diagnostic.log_amplitude,
+                "a": diagnostic.a,
+                "p": diagnostic.p,
+                "q": diagnostic.q,
+                "weighted_log_residual": diagnostic.weighted_log_residual,
+                "reduced_weighted_residual": diagnostic.reduced_weighted_residual,
+                "minimum_pbs_bias": diagnostic.minimum_pbs_bias,
+                "maximum_pbs_bias": diagnostic.maximum_pbs_bias,
+                "minimum_correction": diagnostic.minimum_correction,
+                "maximum_correction": diagnostic.maximum_correction,
+                "minimum_linear_bias": diagnostic.minimum_linear_bias,
+                "maximum_linear_bias": diagnostic.maximum_linear_bias,
+                "cctoolkit_revision": CCTOOLKIT_REVISION,
+                "castro_calibration_mass_definition": "virial",
+                "applied_hmf_mass_definition": "PINOCCHIO_native_map_convention",
+            }
+            for diagnostic in bias_fit_diagnostics
+        ],
+    )
     exact_checkpoint_path.unlink(missing_ok=True)
-    return theory_path, binned_path, diagnostics_path
+    return theory_path, binned_path, diagnostics_path, bias_fit_path
 
 
 def main() -> None:
@@ -1152,7 +1339,7 @@ def main() -> None:
     jax.config.update("jax_enable_x64", args.jax_precision == "float64")
     try:
         outputs = run_validation(args)
-    except (PinocchioCatalogError, ValueError) as exc:
+    except (ImportError, PinocchioCatalogError, ValueError) as exc:
         raise SystemExit(f"error: {exc}") from exc
     for output in outputs:
         print(f"Wrote {output}")
