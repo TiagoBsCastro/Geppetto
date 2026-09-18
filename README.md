@@ -627,6 +627,26 @@ More design context is in [docs/architecture.md](docs/architecture.md).
 
 ## Development and Validation
 
+### Native-Mass Galaxy Lightcones
+
+The optional [PINOCCHIO-to-galaxy pipeline](docs/pinocchio_galaxy_lightcone.md)
+adapts hodpy's luminosity-dependent HOD and rest-frame colour model. It keeps
+the native fragmentation-group mass as `M_PIN`, calibrates abundances against
+an independent SDSS/GAMA luminosity function, and uses an explicit effective
+satellite profile. It does not fit clustering or cluster richness.
+
+```bash
+python -m pip install -e '.[galaxies,dev]'
+bash scripts/fetch_hodpy.sh
+python examples/run_pinocchio_galaxies.py --config examples/galaxy_lightcone_config.json
+```
+
+The configuration points to the real staged `L3870N4096/000` input in this
+workspace. See the linked report for staging commands, completeness limits,
+the generated catalogue, six-bin LF results, colour plots, and the upstream
+MXXL input-path smoke test. Large input/catalogue products remain under the
+ignored `outputs/` directory. Existing matter-painting APIs are unchanged.
+
 Run the standard checks from the repository root:
 
 ```bash

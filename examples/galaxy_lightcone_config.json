@@ -1,0 +1,42 @@
+{
+  "hodpy_root": "outputs/galaxy_lightcone/vendor/hodpy",
+  "halo_input": "outputs/galaxy_lightcone/input/halos_z004_z033.hdf5",
+  "cosmology_table": "outputs/galaxy_lightcone/input/pinocchio.000.cosmology.out",
+  "output_dir": "outputs/galaxy_lightcone/validation",
+  "random_seed": 20260917,
+  "halo_chunk_size": 2048,
+  "survey_r_limit": 20.0,
+  "calibration": {
+    "z_min": 0.04,
+    "z_max": 0.33,
+    "redshift_step": 0.01,
+    "aperture_deg": 65.0,
+    "min_particles": 32,
+    "magnitude_bright": -25.0,
+    "magnitude_faint": -21.5,
+    "magnitude_step": 0.01,
+    "mass_bin_width_dex": 0.01
+  },
+  "validation": {
+    "redshift_slices": [[0.05, 0.17], [0.22, 0.32]],
+    "magnitude_edges": [-22.8, -22.5, -22.2, -22.0],
+    "minimum_bin_count": 200,
+    "cumulative_prediction_rtol": 0.02,
+    "mock_rtol_floor": 0.05,
+    "mock_sigma_multiplier": 3.0,
+    "max_unresolved_fraction": 0.01,
+    "colour_familywise_alpha": 0.01,
+    "jackknife_azimuth_regions": 8,
+    "jackknife_radial_regions": 4,
+    "clustering_max_galaxies": 30000
+  },
+  "satellites": {
+    "overdensity_mean": 200.0,
+    "radius_factor": 1.0,
+    "concentration_amplitude": 5.0,
+    "concentration_mass_pivot": 100000000000000.0,
+    "concentration_mass_slope": -0.1,
+    "concentration_redshift_slope": -0.5,
+    "velocity_factor": 1.0
+  }
+}

@@ -58,6 +58,12 @@ harmonics = [
 plot = [
   "matplotlib>=3.8"
 ]
+galaxies = [
+  "h5py>=3.10",
+  "scipy>=1.10",
+  "matplotlib>=3.8",
+  "astropy>=6.0"
+]
 validation = [
   "astropy>=6.0",
   "healpy>=1.16",
@@ -71,6 +77,9 @@ Repository = "https://github.com/TiagoBsCastro/GEPPETTO"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/geppetto"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"docs/licenses/hodpy.txt" = "geppetto/galaxies/LICENSE.hodpy"
 
 [tool.hatch.metadata]
 allow-direct-references = true
