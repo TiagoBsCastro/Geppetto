@@ -1,0 +1,46 @@
+{
+  "seeds": [
+    1386,
+    2281,
+    3253,
+    4253,
+    5237,
+    6211,
+    7213,
+    8231
+  ],
+  "n_shells": 13,
+  "ell_min": 20,
+  "ell_stop": 2000,
+  "normalization": "theoretical total shell mean",
+  "mask": "none; full sky",
+  "uncertainties": "sample standard deviation / sqrt(n_seed); no covariance inversion",
+  "theory": "fixed candidate and original HMF; not refit to ensemble spectra",
+  "reference_seed": 1386,
+  "component_note": "stationary components; exact-linear replacement is separate",
+  "prediction_sha256": {
+    "outputs/fullsky_pair_model/predictions/shell_000.npz": "46b3c861cb8488e810c576281692263bcc5bc29f3af56e682e7fac17b60cf67e",
+    "outputs/fullsky_pair_model/predictions/shell_001.npz": "098b00c762b3a4eed5691a156978e17fdb4b24641e49999bb3034d8348c303ab",
+    "outputs/fullsky_pair_model/predictions/shell_002.npz": "c5b91af74ea3775a9b558c4c71d5035caf734373fe2c9325f1e4551f866041fa",
+    "outputs/fullsky_pair_model/predictions/shell_003.npz": "3021f6cea20dba8475f1d7497941869214f43ab54966ac8c6458988fdcba408c",
+    "outputs/fullsky_pair_model/predictions/shell_004.npz": "091a8b979dc39f41acac3a904631bfc46124689cb27981e601e7d41c7c8894a0",
+    "outputs/fullsky_pair_model/predictions/shell_005.npz": "ed7134cd648822824c07792ec41ffb92a1328d967c951ddb3c9534783bb1d726",
+    "outputs/fullsky_pair_model/predictions/shell_006.npz": "1ae9efca2d7b258f55bced606652fca9ff3f74badf7084dfdc76087cbb395aa3",
+    "outputs/fullsky_pair_model/predictions/shell_007.npz": "44931608229d99137005fbefeb8f696b0ace3f46f66276b1d6d01d43d5795f3b",
+    "outputs/fullsky_pair_model/predictions/shell_008.npz": "023c27d9e1dca701b5e0912cbc9f7ff9713c8db15805c9f68db1ef263bb89faf",
+    "outputs/fullsky_pair_model/predictions/shell_009.npz": "ecf17cae76cf7f5865ab6abf56c4b50e3b5e4b607c2a188e2fa4bd51f1553154",
+    "outputs/fullsky_pair_model/predictions/shell_010.npz": "28b799e5267efd183bb8188ef97a923cc95e740ed7622df2c68096357ff03d0a",
+    "outputs/fullsky_pair_model/predictions/shell_011.npz": "a373788cf6e3e3d59a556c4b756f4a7b6aa33ceaa232dea2f4e2819fae74294b",
+    "outputs/fullsky_pair_model/predictions/shell_012.npz": "9dcd05d78a59e3859c2cc13978eb189bbb9f408616c341e20eff1eca200eb445"
+  },
+  "observation_sha256": {
+    "outputs/fullsky_pair_model/inputs/seed001386/geppetto_reduced/fullsky_observed_spectra.npz": "5d64befa6fee7d241269d3937ef28ab682cb84441fb25ba643700644b9e80f5f",
+    "outputs/fullsky_pair_model/inputs/seed002281/geppetto_reduced/fullsky_observed_spectra.npz": "7f2a25fe81173e024031c7e765889b4a0cd0404db12bf8c51e4d91c6a3f3e8cc",
+    "outputs/fullsky_pair_model/inputs/seed003253/geppetto_reduced/fullsky_observed_spectra.npz": "541fd24e37104a7aa56bb489a5777cbefdb78975020cca8340d4d9f01ed6c3ce",
+    "outputs/fullsky_pair_model/inputs/seed004253/geppetto_reduced/fullsky_observed_spectra.npz": "2fc0d4da41f48526acf3ce90c9719cd7fcd7d4426aa0de5db60b221b629ac972",
+    "outputs/fullsky_pair_model/inputs/seed005237/geppetto_reduced/fullsky_observed_spectra.npz": "1f830263dedae9a12e3d43ba6aaa19dc9ae19cad0259cad1944425131bae1420",
+    "outputs/fullsky_pair_model/inputs/seed006211/geppetto_reduced/fullsky_observed_spectra.npz": "97e95be28faa561b9fc486bbd85e294f0c606d9f233065b7c0e93b17dc83f32d",
+    "outputs/fullsky_pair_model/inputs/seed007213/geppetto_reduced/fullsky_observed_spectra.npz": "319aab9fd8137a421e5a9516dc28c9b2be90248c4eb3b42af4775905f0aea9a0",
+    "outputs/fullsky_pair_model/inputs/seed008231/geppetto_reduced/fullsky_observed_spectra.npz": "7ae6fb6ba0914f184751dfc5e4a263d64981f68ab840fb5c9155f0cf0a64fca7"
+  }
+}

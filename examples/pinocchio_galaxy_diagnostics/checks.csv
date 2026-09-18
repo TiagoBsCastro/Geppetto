@@ -1,0 +1,11 @@
+check,status,evidence,cause
+Frozen inputs and model,PASS,"Catalogue, input, calibration and model-source hashes verified before/after; no fitter called",Read-only audit
+Independent LF target,PASS,9 complete bins; min N=246; max mock residual=3.026%; cumulative=0.00838%,Fixed target is fitted by the HOD; remaining mock deviations are stochastic and include boundary migrations
+Native-mass completeness,LIMIT,10-particle native floor; 32-particle painting cut; max missing fraction in claimed bins=0.7532%,Fainter M_r>-22 and sparse bright bins are diagnostic only; not a physical halo-finder convergence test
+HOD occupation,PASS,"Conditional chi2=88.9/61 bins; p=0.0114, alpha=.01","Mild excess scatter; E[N]>=20 and variance>=10 for Gaussian chi2. Compatible at the stated threshold, not a precision richness validation"
+Conditional colours,PASS,80 mixture/mean/width tests; 0 failures at familywise alpha=.01,"Same hodpy prescription tested, not independent observed colour data; red probability saturates in bright satellite bins"
+NFW radial / Gaussian velocity draws,PASS,12 mass/redshift-stratified KS tests; 0 failures; minimum p=0.0242,Model tests only; low-z satellites have limited statistics
+"Units, support and redshift closure",PASS,Integrity passed=True; Doppler closure=2.95e-17,"R_sat is an effective model radius, not measured R200m"
+Native PLC identities,CAVEAT,374 extra group-ID occurrences; 59 extra centrals across persistent IDs,"Nearby distinct native crossing records retained; one central per unique PLC occurrence, not persistent ID"
+Sky / distance closure,CAVEAT,Native distance max relative mismatch=1.14e-04; sky residuals shown,Finite-precision native table/PLC; host-centre sky prediction omits satellite boundary migrations
+Angular clustering,DIAGNOSTIC,"Measured across 3 z and 3 host-mass bins, with spatial jackknife; no fitting",Nonzero clustering relative to the unclustered null is expected; no observed clustering or richness claim

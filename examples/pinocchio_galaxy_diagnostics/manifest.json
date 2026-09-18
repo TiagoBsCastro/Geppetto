@@ -1,0 +1,789 @@
+{
+  "settings": {
+    "catalogue": "outputs/galaxy_lightcone/validation/galaxies_dc3fc74d63c89809.hdf5",
+    "output_dir": "examples/pinocchio_galaxy_diagnostics",
+    "redshift_edges": [
+      0.05,
+      0.14,
+      0.23,
+      0.32
+    ],
+    "log10_host_mass_edges": [
+      12.4,
+      13.5,
+      14.2,
+      15.0
+    ],
+    "luminosity_edges": [
+      -23.4,
+      -23.1,
+      -22.8,
+      -22.5,
+      -22.2,
+      -22.0,
+      -21.8,
+      -21.5
+    ],
+    "complete_magnitude_limit": -22.0,
+    "minimum_lf_count": 200,
+    "aperture_deg": 65.0,
+    "clustering_max_data": 10000,
+    "clustering_random_multiplier": 3,
+    "clustering_jackknife_regions": 8,
+    "diagnostic_seed": 271828
+  },
+  "frozen_model": {
+    "absolute_magnitude_convention": "^0.1 M_r - 5 log10(h); AB, hodpy SDSS/GAMA r band",
+    "apparent_magnitude": "M_r_h1 + 5 log10((1+z_cos) chi_mpc_h) +25 + K_r(z_cos, ^0.1(g-r))",
+    "calibration_key": "c8bdc28b842ee14611b5d65055d88aa564175c9ad659fbca18b9a739e238d74a",
+    "colour_reference_redshift": 0.1,
+    "config": {
+      "calibration": {
+        "aperture_deg": 65.0,
+        "magnitude_bright": -25.0,
+        "magnitude_faint": -21.5,
+        "magnitude_step": 0.01,
+        "mass_bin_width_dex": 0.01,
+        "min_particles": 32,
+        "redshift_step": 0.01,
+        "z_max": 0.33,
+        "z_min": 0.04
+      },
+      "cosmology_table": "outputs/galaxy_lightcone/input/pinocchio.000.cosmology.out",
+      "halo_chunk_size": 2048,
+      "halo_input": "outputs/galaxy_lightcone/input/halos_z004_z033.hdf5",
+      "hodpy_root": "outputs/galaxy_lightcone/vendor/hodpy",
+      "output_dir": "outputs/galaxy_lightcone/validation",
+      "random_seed": 20260917,
+      "satellites": {
+        "concentration_amplitude": 5.0,
+        "concentration_mass_pivot": 100000000000000.0,
+        "concentration_mass_slope": -0.1,
+        "concentration_redshift_slope": -0.5,
+        "overdensity_mean": 200.0,
+        "radius_factor": 1.0,
+        "velocity_factor": 1.0
+      },
+      "survey_r_limit": 20.0,
+      "validation": {
+        "clustering_max_galaxies": 30000,
+        "colour_familywise_alpha": 0.01,
+        "cumulative_prediction_rtol": 0.02,
+        "jackknife_azimuth_regions": 8,
+        "jackknife_radial_regions": 4,
+        "magnitude_edges": [
+          -22.8,
+          -22.5,
+          -22.2,
+          -22.0
+        ],
+        "max_unresolved_fraction": 0.01,
+        "minimum_bin_count": 200,
+        "mock_rtol_floor": 0.05,
+        "mock_sigma_multiplier": 3.0,
+        "redshift_slices": [
+          [
+            0.05,
+            0.17
+          ],
+          [
+            0.22,
+            0.32
+          ]
+        ]
+      }
+    },
+    "expected_omitted_bright_tail": 4.959179708871194e-08,
+    "jax_version": "0.10.2",
+    "magnitude_reference_redshift": 0.1,
+    "mass_definition": "M_PIN = PINOCCHIO fragmentation-group particle count times particle mass; not spherical overdensity",
+    "mean_density_comoving": 108605305021.84999,
+    "n_galaxies": 660873,
+    "native_input": {
+      "cosmology_sha256": "4073680b99dd3ade9a479150f204c56efb1cfb8c6e58b55c699380dc0f32824e",
+      "input_to_h100_factor": 1.0,
+      "mass_definition": "M_PIN = PINOCCHIO fragmentation-group particle count times particle mass; not spherical overdensity",
+      "mass_unit": "Msun/h",
+      "n_halos": 5435239,
+      "native_audit": {
+        "max_direction_chord_residual": 5.4556766108972116e-05,
+        "max_observed_redshift_residual": 1.5231924277436804e-08
+      },
+      "occurrence_id_definition": "(source part index << 48) + zero-based native row index",
+      "parameter_sha256": "6a3a651d4f5014a52dbe0f3a1b687f33723da9dfb62e532af5495fbcd1a436ef",
+      "parameters": {
+        "AnalyticMassFunction": [
+          "9"
+        ],
+        "BoundaryLayerFactor": [
+          "2.0"
+        ],
+        "BoxInH100": [],
+        "BoxSize": [
+          "3870"
+        ],
+        "CAMBMatterFile": [
+          "CambFiles/pk_cb"
+        ],
+        "CAMBRedshiftsFile": [
+          "CambFiles/redshifts.dat"
+        ],
+        "DEw0": [
+          "-1.168"
+        ],
+        "DEwa": [
+          "-0.6605"
+        ],
+        "DoNotWriteHistories": [],
+        "FileWithInputSpectrum": [
+          "CAMBTable"
+        ],
+        "GridSize": [
+          "4096"
+        ],
+        "Hubble100": [
+          "0.7276"
+        ],
+        "HubbleTableFile": [
+          "CambFiles/hubble.dat"
+        ],
+        "InputSpectrum_UnitLength_in_cm": [
+          "0"
+        ],
+        "LastzForPLC": [
+          "0.0"
+        ],
+        "MassMapNSIDE": [
+          "2048"
+        ],
+        "MaxMem": [
+          "13000"
+        ],
+        "MaxMemPerParticle": [
+          "480"
+        ],
+        "MinHaloMass": [
+          "10"
+        ],
+        "NumFiles": [
+          "32"
+        ],
+        "Omega0": [
+          "0.3913"
+        ],
+        "OmegaBaryon": [
+          "0.0419"
+        ],
+        "OmegaLambda": [
+          "0.6087"
+        ],
+        "OutputInH100": [],
+        "OutputList": [
+          "outputs"
+        ],
+        "PLCAperture": [
+          "70"
+        ],
+        "PLCAxis": [
+          "-0.822556930095597",
+          "-0.112935946744643",
+          "-0.55735587256671"
+        ],
+        "PLCCenter": [
+          "415.2600210416666",
+          "3786.244397541667",
+          "2252.2445095416665"
+        ],
+        "PLCProvideConeData": [],
+        "PredPeakFactor": [
+          "2.0"
+        ],
+        "PrimordialIndex": [
+          "0.9312"
+        ],
+        "RandomSeed": [
+          "1386"
+        ],
+        "RunFlag": [
+          "000"
+        ],
+        "Sigma8": [
+          "0.0"
+        ],
+        "StartingzForPLC": [
+          "2.0"
+        ],
+        "TabulatedEoSfile": [
+          "no"
+        ],
+        "WDM_PartMass_in_kev": [
+          "0.0"
+        ]
+      },
+      "position_unit": "comoving Mpc/h, observer-relative simulation Cartesian basis",
+      "schema_version": 1,
+      "source_format": "PINOCCHIO full native PLC",
+      "sources": [
+        {
+          "path": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N4096/000/pinocchio.000.plc.out.0",
+          "rows_read": 6353344,
+          "rows_retained": 618867,
+          "sha256": "d42ca23b3f1ec2f72b66c809b6737d179079ad70a3697a5626b312c43fd5897d"
+        },
+        {
+          "path": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N4096/000/pinocchio.000.plc.out.1",
+          "rows_read": 6518422,
+          "rows_retained": 1026891,
+          "sha256": "a7afaf47b10839184c842a465b9dc8ce9da9d1e7ed138fac49603dbf22f90fe1"
+        },
+        {
+          "path": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N4096/000/pinocchio.000.plc.out.2",
+          "rows_read": 4886368,
+          "rows_retained": 364769,
+          "sha256": "f5465384da2a5aef2f3c06d4027ba88771cb3e31f4a26eeacafcfc306886dcc0"
+        },
+        {
+          "path": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N4096/000/pinocchio.000.plc.out.3",
+          "rows_read": 5599615,
+          "rows_retained": 751413,
+          "sha256": "68aa87d4a05f7faf2480a2f6fd5510c9f20e0fdb9ba59f0b878f4e2e952fe7ae"
+        },
+        {
+          "path": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N4096/000/pinocchio.000.plc.out.4",
+          "rows_read": 2977897,
+          "rows_retained": 36786,
+          "sha256": "a5e6f48fa32a0cc11e9cd00bdb7ebf22b02196d1a77cd8480d9cdb2317cc0197"
+        },
+        {
+          "path": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N4096/000/pinocchio.000.plc.out.5",
+          "rows_read": 4154298,
+          "rows_retained": 147819,
+          "sha256": "2ff2417d96c49cd695e3247bdce16ab8566072e256eecfd582e9ebbab9cf7624"
+        },
+        {
+          "path": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N4096/000/pinocchio.000.plc.out.6",
+          "rows_read": 1430057,
+          "rows_retained": 0,
+          "sha256": "5fa3d06ec6e3369321d5c8011db514b5a6e64cc0eaff06446482cb342735d076"
+        },
+        {
+          "path": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N4096/000/pinocchio.000.plc.out.7",
+          "rows_read": 2664997,
+          "rows_retained": 0,
+          "sha256": "bc897b9ced4c317f68fc441302ac5faa760d2f894a10cd35ff1a7727e945f1ce"
+        },
+        {
+          "path": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N4096/000/pinocchio.000.plc.out.8",
+          "rows_read": 1464430,
+          "rows_retained": 0,
+          "sha256": "93564fbfb67acb1fb4e7a1bbb446b7217d6bff3c08ce31cf8168cd8e383f11b5"
+        },
+        {
+          "path": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N4096/000/pinocchio.000.plc.out.9",
+          "rows_read": 2285233,
+          "rows_retained": 0,
+          "sha256": "c206c12fa749382428f9088091463fbf71a1e8de9442d4d8959c430ccaddb9d7"
+        },
+        {
+          "path": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N4096/000/pinocchio.000.plc.out.10",
+          "rows_read": 2641089,
+          "rows_retained": 0,
+          "sha256": "92576b6e2bd390e58267b6358db3600990bc1f45dd4c0eecb79676e1fddea6cb"
+        },
+        {
+          "path": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N4096/000/pinocchio.000.plc.out.11",
+          "rows_read": 2982740,
+          "rows_retained": 0,
+          "sha256": "3e9658cf7ea140c5b3cf253d247f24e1341132adf97dbd2925a82b78cb8e31cb"
+        },
+        {
+          "path": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N4096/000/pinocchio.000.plc.out.12",
+          "rows_read": 4154766,
+          "rows_retained": 0,
+          "sha256": "903688fa0a061d98f317980c5585159d84a5331a53a47e0744dd571007a190c1"
+        },
+        {
+          "path": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N4096/000/pinocchio.000.plc.out.13",
+          "rows_read": 4419381,
+          "rows_retained": 0,
+          "sha256": "b6ba6bbf4ae2ce309c477b212b65eab0c212da5b0e0ca5600272d5db1c0e1b6a"
+        },
+        {
+          "path": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N4096/000/pinocchio.000.plc.out.14",
+          "rows_read": 5433063,
+          "rows_retained": 0,
+          "sha256": "73431c1d6f097661dc97a57df9af9104e4619f9146515e207f0b4c436b83d554"
+        },
+        {
+          "path": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N4096/000/pinocchio.000.plc.out.15",
+          "rows_read": 5745160,
+          "rows_retained": 0,
+          "sha256": "72d7a1ea6da3208894e31d58a0dac0e2d64fe1e8c7769d9d85d08ba30155c2b0"
+        },
+        {
+          "path": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N4096/000/pinocchio.000.plc.out.16",
+          "rows_read": 6592240,
+          "rows_retained": 0,
+          "sha256": "565f01156ebb177e838335a28daa9d01261c2d5d8aa8aba7ca6ea340a18ac1c2"
+        },
+        {
+          "path": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N4096/000/pinocchio.000.plc.out.17",
+          "rows_read": 6810448,
+          "rows_retained": 0,
+          "sha256": "73eabe8f30d393737e88c3c8b7ba928609d83c4302fbbff32c2d0818d3838066"
+        },
+        {
+          "path": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N4096/000/pinocchio.000.plc.out.18",
+          "rows_read": 7502923,
+          "rows_retained": 0,
+          "sha256": "638af25b9003740a9ce6e5a7537d7fea76d7c2e1f57120ff42ba082bf694eaba"
+        },
+        {
+          "path": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N4096/000/pinocchio.000.plc.out.19",
+          "rows_read": 7562292,
+          "rows_retained": 0,
+          "sha256": "b0864d1e3cec76df9b08a16e4b78f4b4ebf3fd869779e3b76340ab201c623d53"
+        },
+        {
+          "path": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N4096/000/pinocchio.000.plc.out.20",
+          "rows_read": 8172412,
+          "rows_retained": 0,
+          "sha256": "779006cd588bf4f608a1d4ba2accf74ec078ce48dce7d54c7e158968e0d28890"
+        },
+        {
+          "path": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N4096/000/pinocchio.000.plc.out.21",
+          "rows_read": 8106673,
+          "rows_retained": 0,
+          "sha256": "f5889ba3a5fd7cb82419c72a7f8b668f781ca57d84f5c6b22536b149b44fd5ac"
+        },
+        {
+          "path": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N4096/000/pinocchio.000.plc.out.22",
+          "rows_read": 8567655,
+          "rows_retained": 0,
+          "sha256": "f4ca8478d6297e0073f8766fbf1cfc38c1c9592bfc8145419c3511addd6c8199"
+        },
+        {
+          "path": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N4096/000/pinocchio.000.plc.out.23",
+          "rows_read": 8379077,
+          "rows_retained": 0,
+          "sha256": "25d20a67feeccfbd0d01f64cdcd3b7b9ee7745f7fad84bc668ca862d74815138"
+        },
+        {
+          "path": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N4096/000/pinocchio.000.plc.out.24",
+          "rows_read": 8710416,
+          "rows_retained": 0,
+          "sha256": "e7af48a1356e51831a27ad526f4caf0848b870e460d1e1b1fc722c09c30bb85a"
+        },
+        {
+          "path": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N4096/000/pinocchio.000.plc.out.25",
+          "rows_read": 8407824,
+          "rows_retained": 0,
+          "sha256": "630161144abb9ef3726d81599bbfe6a48114aaf4f8fb275806a89af64ad896c4"
+        },
+        {
+          "path": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N4096/000/pinocchio.000.plc.out.26",
+          "rows_read": 8579518,
+          "rows_retained": 226,
+          "sha256": "571d8b64686a0ae8e9b7f6001fe86cb9afdacb5a89e0989219d9a93e3232f114"
+        },
+        {
+          "path": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N4096/000/pinocchio.000.plc.out.27",
+          "rows_read": 8208385,
+          "rows_retained": 2245,
+          "sha256": "2ab4004575916d4c9c98c70d5f8f8cb6fc0e72a6cc5627e01de0894d51f4dd03"
+        },
+        {
+          "path": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N4096/000/pinocchio.000.plc.out.28",
+          "rows_read": 8136136,
+          "rows_retained": 328612,
+          "sha256": "3af463fb5c53ba20e346de81b14af64af0a845a5b1532b24b1ee8cf046079ae8"
+        },
+        {
+          "path": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N4096/000/pinocchio.000.plc.out.29",
+          "rows_read": 7805421,
+          "rows_retained": 519838,
+          "sha256": "58db9afc3f618fc1f05fd8b6fb286b220f672c15098716fe9dac1b0af99cb78e"
+        },
+        {
+          "path": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N4096/000/pinocchio.000.plc.out.30",
+          "rows_read": 7411604,
+          "rows_retained": 650902,
+          "sha256": "48744b2f1799cdd96198bbd9affbad587737e7830f9e4a7f6e6908f8edc32c9d"
+        },
+        {
+          "path": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N4096/000/pinocchio.000.plc.out.31",
+          "rows_read": 7248099,
+          "rows_retained": 986871,
+          "sha256": "d762e780582cd371129a2fa14efedc16374924e6fdeabe890cb9aeca23181cfe"
+        }
+      ],
+      "velocity_unit": "proper peculiar km/s, simulation Cartesian basis",
+      "z_max": 0.33,
+      "z_min": 0.04
+    },
+    "numpy_version": "2.5.0",
+    "observed_redshift": "z_cos + (1+z_cos) dot(v,n)/299792.458",
+    "occupation_sampling": "Independent central Bernoulli and satellite Poisson, as hodpy; unobserved centrals may be fainter than the underlying cut",
+    "particle_mass_msun_h": 91601817520.35501,
+    "pipeline_sha256": "bae644d6e16c2825de26efdfe6debcedaa246be70c4a0e7bd685bbba300c8dc0",
+    "position_units": "observer-relative comoving Mpc/h; native simulation Cartesian basis",
+    "run_key": "dc3fc74d63c8980934f8d36eb013caa441d9690f253abc562f2339f10aedfbb6",
+    "satellite_parameters": {
+      "concentration_amplitude": 5.0,
+      "concentration_mass_pivot": 100000000000000.0,
+      "concentration_mass_slope": -0.1,
+      "concentration_redshift_slope": -0.5,
+      "gravitational_constant": 4.30091727e-09,
+      "overdensity_mean": 200.0,
+      "radius_factor": 1.0,
+      "velocity_factor": 1.0
+    },
+    "selection": "Underlying bright absolute-magnitude sample; selected_r_limit is applied only after painting. Not a complete faint flux-limited survey.",
+    "sky_basis_rows": [
+      [
+        -0.13602254963004765,
+        0.9907057413743706,
+        0.0
+      ],
+      [
+        0.5521756629405616,
+        0.07581296683780381,
+        -0.8302737086740742
+      ],
+      [
+        -0.8225569300955968,
+        -0.11293594674464297,
+        -0.5573558725667099
+      ]
+    ],
+    "sky_coordinates": "cone-aligned longitude/latitude in degrees; not ICRS",
+    "target_input_hashes": {
+      "hodpy/colour.py": "0d83909488005895061d60ae2c522db8dd22bc78b17739e27981135ac009c15f",
+      "hodpy/hod_bgs.py": "546e84c64243120069cfe600f96f570c64273c8729e86962fd03b75e5806bbc5",
+      "hodpy/k_correction.py": "56faea73ad705209ed166506013ec8d7ca9f71f52a939ca909359acb59810a15",
+      "hodpy/luminosity_function.py": "d29c98086c2ce793c326c9542e0ebdc39208cc54b1c982fc254dea50064705df",
+      "lookup/hod_params.dat": "e3ec78bf9b773ea824d01a2b80ed16184b77658de6f66b6dc345d19b75d0f1f6",
+      "lookup/k_corr_rband_z01.dat": "f456f6e0e0465fe0b662366268b31c30bfe8b958fe3632cec64f78d907803126",
+      "lookup/lf_params.dat": "8f5a825f06ef931e4fec087b87392ef3a09d6d5100ac338f5f34942533699695",
+      "lookup/sdss_cumulative_lf.dat": "644dc7e059147141a448ad72ef8170160930c50810eb70e48be0ac1254e2bee8"
+    },
+    "target_parameters": {
+      "P": 1.8,
+      "Q": 0.7,
+      "alpha": -1.23,
+      "m_star": -20.7,
+      "phi_star": 0.0094
+    },
+    "velocity_units": "proper peculiar km/s; native simulation Cartesian basis"
+  },
+  "input_hashes": {
+    "outputs/galaxy_lightcone/validation/galaxies_dc3fc74d63c89809.hdf5": "c6e6ee70a646e2b4cba34eb1593fd1e33a265d93e6072d3d03540c11f1c53c51",
+    "outputs/galaxy_lightcone/validation/cache/hod_c8bdc28b842ee14611b5d65055d88aa564175c9ad659fbca18b9a739e238d74a.npz": "699b5734ea135bcd47f199c52329629f618ec22e17100abb8d0dee64ae6c7ba9",
+    "outputs/galaxy_lightcone/input/halos_z004_z033.hdf5": "1c2f2a0e7caedfe7c439d02efbf3fda0554ace207758c337da42dd4e05bf3db0",
+    "outputs/galaxy_lightcone/input/pinocchio.000.cosmology.out": "4073680b99dd3ade9a479150f204c56efb1cfb8c6e58b55c699380dc0f32824e",
+    "/home/tcastro/CodexSessions/Geppetto/src/geppetto/galaxies/adapters.py": "26d40a475b4577fb7b2705fe90252561e62871f84bfe96d479727c4e559214e2",
+    "/home/tcastro/CodexSessions/Geppetto/src/geppetto/galaxies/calibration.py": "8b4db9901deaf46bf1607558a96164ab4b8b4f6c0bc396aef209a9ec7b9b7579",
+    "/home/tcastro/CodexSessions/Geppetto/src/geppetto/galaxies/models.py": "f622e8c4f337407cc8933e65f296f89b451d6316e2df6350f05b3af8bc3ceaf8",
+    "outputs/galaxy_lightcone/vendor/hodpy/lookup/sdss_cumulative_lf.dat": "644dc7e059147141a448ad72ef8170160930c50810eb70e48be0ac1254e2bee8",
+    "outputs/galaxy_lightcone/vendor/hodpy/lookup/lf_params.dat": "8f5a825f06ef931e4fec087b87392ef3a09d6d5100ac338f5f34942533699695",
+    "outputs/galaxy_lightcone/vendor/hodpy/lookup/hod_params.dat": "e3ec78bf9b773ea824d01a2b80ed16184b77658de6f66b6dc345d19b75d0f1f6",
+    "outputs/galaxy_lightcone/vendor/hodpy/lookup/k_corr_rband_z01.dat": "f456f6e0e0465fe0b662366268b31c30bfe8b958fe3632cec64f78d907803126",
+    "outputs/galaxy_lightcone/vendor/hodpy/hodpy/colour.py": "0d83909488005895061d60ae2c522db8dd22bc78b17739e27981135ac009c15f",
+    "outputs/galaxy_lightcone/vendor/hodpy/hodpy/luminosity_function.py": "d29c98086c2ce793c326c9542e0ebdc39208cc54b1c982fc254dea50064705df",
+    "outputs/galaxy_lightcone/vendor/hodpy/hodpy/hod_bgs.py": "546e84c64243120069cfe600f96f570c64273c8729e86962fd03b75e5806bbc5",
+    "outputs/galaxy_lightcone/vendor/hodpy/hodpy/k_correction.py": "56faea73ad705209ed166506013ec8d7ca9f71f52a939ca909359acb59810a15",
+    "/home/tcastro/CodexSessions/Geppetto/src/geppetto/galaxies/pipeline.py": "bae644d6e16c2825de26efdfe6debcedaa246be70c4a0e7bd685bbba300c8dc0"
+  },
+  "integrity": {
+    "checks": {
+      "finite_values": true,
+      "unique_galaxy_ids": true,
+      "valid_host_ids": true,
+      "native_group_ids_preserved": true,
+      "native_host_mass_preserved": true,
+      "at_most_one_central": true,
+      "central_position_exact": true,
+      "central_velocity_exact": true,
+      "central_redshift_exact": true,
+      "satellite_support": true,
+      "satellite_offsets_consistent": true,
+      "angular_buffer_sufficient": true,
+      "redshift_buffer_sufficient": true,
+      "observed_redshift_consistent": true,
+      "physical_ranges": true,
+      "magnitude_domain": true
+    },
+    "passed": true,
+    "n_galaxies": 660873,
+    "n_centrals": 588385,
+    "n_satellites": 72488,
+    "satellite_velocity_standardized_mean": [
+      -0.005023120042752811,
+      0.0023987147645880363,
+      -0.003556809054976286
+    ],
+    "satellite_velocity_standardized_std": [
+      1.004337892960145,
+      0.9967944648984811,
+      1.0019784623362908
+    ],
+    "max_satellite_radius_fraction": 0.9999754434550273,
+    "distance_units": "Mpc/h comoving; sigma_v uses physical radius R_com/(1+z)",
+    "min_colour": 0.22295920274883474,
+    "max_colour": 1.303369593037488
+  },
+  "placement": {
+    "max_radius_relative_error": 2.220446049250313e-16,
+    "max_concentration_relative_error": 6.661338147750939e-16,
+    "max_velocity_scale_relative_error": 2.220446049250313e-16,
+    "max_observed_redshift_closure": 2.949029909160572e-17,
+    "max_satellite_radius_fraction": 0.9999754434550273,
+    "satellite_count": 4418,
+    "placement_tests": [
+      {
+        "test": "radial",
+        "dimension": "redshift",
+        "group": 0,
+        "n": 56,
+        "statistic": 0.1009661839876117,
+        "p_value": 0.5825691821893506
+      },
+      {
+        "test": "velocity",
+        "dimension": "redshift",
+        "group": 0,
+        "n": 56,
+        "statistic": 0.07857144522697002,
+        "p_value": 0.8529100147108846
+      },
+      {
+        "test": "radial",
+        "dimension": "redshift",
+        "group": 1,
+        "n": 919,
+        "statistic": 0.023154178741306986,
+        "p_value": 0.6990036299047748
+      },
+      {
+        "test": "velocity",
+        "dimension": "redshift",
+        "group": 1,
+        "n": 919,
+        "statistic": 0.03323315308691954,
+        "p_value": 0.25637950324243963
+      },
+      {
+        "test": "radial",
+        "dimension": "redshift",
+        "group": 2,
+        "n": 3443,
+        "statistic": 0.02013013819770826,
+        "p_value": 0.12112539658514487
+      },
+      {
+        "test": "velocity",
+        "dimension": "redshift",
+        "group": 2,
+        "n": 3443,
+        "statistic": 0.02526763481465244,
+        "p_value": 0.02422348929735907
+      },
+      {
+        "test": "radial",
+        "dimension": "mass",
+        "group": 0,
+        "n": 410,
+        "statistic": 0.04040538779744626,
+        "p_value": 0.5021005797999762
+      },
+      {
+        "test": "velocity",
+        "dimension": "mass",
+        "group": 0,
+        "n": 410,
+        "statistic": 0.04016761504641686,
+        "p_value": 0.5097145653053203
+      },
+      {
+        "test": "radial",
+        "dimension": "mass",
+        "group": 1,
+        "n": 2647,
+        "statistic": 0.010888166148446898,
+        "p_value": 0.9087518866260273
+      },
+      {
+        "test": "velocity",
+        "dimension": "mass",
+        "group": 1,
+        "n": 2647,
+        "statistic": 0.0255301657450982,
+        "p_value": 0.06236887763921539
+      },
+      {
+        "test": "radial",
+        "dimension": "mass",
+        "group": 2,
+        "n": 1361,
+        "statistic": 0.03713838102961442,
+        "p_value": 0.045660848428523026
+      },
+      {
+        "test": "velocity",
+        "dimension": "mass",
+        "group": 2,
+        "n": 1361,
+        "statistic": 0.01688287048055337,
+        "p_value": 0.8262306407858532
+      }
+    ]
+  },
+  "identity": {
+    "extra_native_group_occurrences": 374,
+    "extra_central_group_occurrences": 59,
+    "max_native_distance_relative_error": 0.00011412708000013705
+  },
+  "n_galaxies": 660873,
+  "n_halos": 5435239,
+  "source_sha256": "5d33f1d16db17ccd70e5e9425e523117d73ba232401042d25fca5f6540982080",
+  "command": "examples/diagnose_pinocchio_galaxies.py --config examples/pinocchio_galaxy_diagnostics_config.json",
+  "python": "/home/tcastro/miniforge3/envs/geppetto-dev/bin/python",
+  "products": [
+    "hmf",
+    "occupation",
+    "luminosity_function",
+    "cumulative_lf",
+    "redshift_counts",
+    "sky",
+    "completeness",
+    "apparent_magnitude",
+    "colour_magnitude",
+    "colour_distribution",
+    "colour_moments",
+    "satellite_radii",
+    "satellite_velocity",
+    "clustering"
+  ],
+  "model_parameters_changed": false,
+  "versions": {
+    "numpy": "2.5.0",
+    "scipy": "1.18.0",
+    "matplotlib": "3.11.0",
+    "jax": "0.10.2",
+    "h5py": "3.16.0"
+  },
+  "groups": {
+    "01": "Native HMF and completeness",
+    "02": "Luminosity functions",
+    "03": "Redshift and apparent-magnitude selection",
+    "04": "Central and satellite occupations",
+    "05": "Colour-magnitude and colour distributions",
+    "06": "Satellite radii",
+    "07": "Satellite velocities and observed-redshift closure",
+    "08": "Sky geometry and identity checks",
+    "09": "Unfitted angular clustering"
+  },
+  "figures": [
+    {
+      "file": "01_native_hmf.png",
+      "title": "01  Native HMF, halo selection and occupied hosts",
+      "group": "01",
+      "selection": "inner 65 deg, z_host bins; HMF: all native halos; occupied hosts: M_r<-22, before r<20",
+      "uncertainty": "occupied-host Bernoulli 1 sigma; ratios shown only for expected counts >=5; grey = below painting cut",
+      "reference": "native HMF is measured input, NOT an independent analytic HMF; occupied-host curve is the tested HOD",
+      "sample": "z=0.05-0.14; z=0.14-0.23; z=0.23-0.32",
+      "caption": "L3870N4096/000: native fragmentation-group M_PIN [Msun/h], NOT M200m; native floor 10 particles; painting cut 32 particles = 2.931e12 Msun/h.\nMagnitudes: 0.1 M_r - 5 log10(h), AB; colour: rest-frame 0.1(g-r). Distances: comoving Mpc/h; peculiar velocities: proper km/s. Cone frame, not ICRS.\nSelection: inner 65 deg, z_host bins; HMF: all native halos; occupied hosts: M_r<-22, before r<20 | Sample: z=0.05-0.14; z=0.14-0.23; z=0.23-0.32\nUncertainty: occupied-host Bernoulli 1 sigma; ratios shown only for expected counts >=5; grey = below painting cut\nReference: native HMF is measured input, NOT an independent analytic HMF; occupied-host curve is the tested HOD. Completeness claims: M_r <= -22, inner 65 deg, 0.05 <= z_cos < 0.32 only."
+    },
+    {
+      "file": "02_luminosity_function.png",
+      "title": "02  Luminosity-function closure to an independent target",
+      "group": "02",
+      "selection": "inner 65 deg; r<20; z_cos and M_r bins shown; red shading = no completeness claim",
+      "uncertainty": "1 sigma = max(HOD Bernoulli+Poisson, 32-region jackknife); open symbols: N<200 or M_r>-22",
+      "reference": "SDSS/GAMA LF is independently specified; HOD is calibrated to that target",
+      "sample": "counts per bin printed; 3 required complete bins per z slice",
+      "caption": "L3870N4096/000: native fragmentation-group M_PIN [Msun/h], NOT M200m; native floor 10 particles; painting cut 32 particles = 2.931e12 Msun/h.\nMagnitudes: 0.1 M_r - 5 log10(h), AB; colour: rest-frame 0.1(g-r). Distances: comoving Mpc/h; peculiar velocities: proper km/s. Cone frame, not ICRS.\nSelection: inner 65 deg; r<20; z_cos and M_r bins shown; red shading = no completeness claim | Sample: counts per bin printed; 3 required complete bins per z slice\nUncertainty: 1 sigma = max(HOD Bernoulli+Poisson, 32-region jackknife); open symbols: N<200 or M_r>-22\nReference: SDSS/GAMA LF is independently specified; HOD is calibrated to that target. Completeness claims: M_r <= -22, inner 65 deg, 0.05 <= z_cos < 0.32 only."
+    },
+    {
+      "file": "03_selection.png",
+      "title": "03  Redshift counts and the apparent-magnitude selection",
+      "group": "03",
+      "selection": "inner 65 deg; upper-left M_r<-22, r<20; other panels underlying M_r<-21.5 BEFORE r<20",
+      "uncertainty": "upper-left: conditional HOD 1 sigma; apparent-r: conditional colour-draw 1 sigma (N and M_r,z held fixed)",
+      "reference": "upper-left independent LF and frozen HOD; other panels analytic colour+k-correction of the same model",
+      "sample": "N printed; r=20 line is NOT a claim of faint flux completeness",
+      "caption": "L3870N4096/000: native fragmentation-group M_PIN [Msun/h], NOT M200m; native floor 10 particles; painting cut 32 particles = 2.931e12 Msun/h.\nMagnitudes: 0.1 M_r - 5 log10(h), AB; colour: rest-frame 0.1(g-r). Distances: comoving Mpc/h; peculiar velocities: proper km/s. Cone frame, not ICRS.\nSelection: inner 65 deg; upper-left M_r<-22, r<20; other panels underlying M_r<-21.5 BEFORE r<20 | Sample: N printed; r=20 line is NOT a claim of faint flux completeness\nUncertainty: upper-left: conditional HOD 1 sigma; apparent-r: conditional colour-draw 1 sigma (N and M_r,z held fixed)\nReference: upper-left independent LF and frozen HOD; other panels analytic colour+k-correction of the same model. Completeness claims: M_r <= -22, inner 65 deg, 0.05 <= z_cos < 0.32 only."
+    },
+    {
+      "file": "04_occupation.png",
+      "title": "04  Luminosity-threshold occupations on native halo mass",
+      "group": "04",
+      "selection": "host-selected inner 65 deg and z_host; M_r<-22, before r<20; ALL resolved halos in denominators",
+      "uncertainty": "central Bernoulli and satellite Poisson 1 sigma; lines=HOD, markers=mock; ratios require expectation >=5",
+      "reference": "frozen native-mass HOD averaged over actual masses and redshifts, NOT observed richness",
+      "sample": "z=0.05-0.14; z=0.14-0.23; z=0.23-0.32",
+      "caption": "L3870N4096/000: native fragmentation-group M_PIN [Msun/h], NOT M200m; native floor 10 particles; painting cut 32 particles = 2.931e12 Msun/h.\nMagnitudes: 0.1 M_r - 5 log10(h), AB; colour: rest-frame 0.1(g-r). Distances: comoving Mpc/h; peculiar velocities: proper km/s. Cone frame, not ICRS.\nSelection: host-selected inner 65 deg and z_host; M_r<-22, before r<20; ALL resolved halos in denominators | Sample: z=0.05-0.14; z=0.14-0.23; z=0.23-0.32\nUncertainty: central Bernoulli and satellite Poisson 1 sigma; lines=HOD, markers=mock; ratios require expectation >=5\nReference: frozen native-mass HOD averaged over actual masses and redshifts, NOT observed richness. Completeness claims: M_r <= -22, inner 65 deg, 0.05 <= z_cos < 0.32 only."
+    },
+    {
+      "file": "05a_colour_magnitude.png",
+      "title": "05a  Rest-frame colour versus luminosity",
+      "group": "05",
+      "selection": "inner 65 deg; z_cos bins shown; underlying M_r<-21.5 BEFORE flux cut; right of dashed line not LF-complete",
+      "uncertainty": "mean residual: exact conditional-mixture 1 sigma; count image uses log colour scale, not an uncertainty",
+      "reference": "white curve is hodpy's conditional mixture mean, NOT an independently observed colour target",
+      "sample": "N inside displayed magnitude/colour range printed; residual bins N>=20",
+      "caption": "L3870N4096/000: native fragmentation-group M_PIN [Msun/h], NOT M200m; native floor 10 particles; painting cut 32 particles = 2.931e12 Msun/h.\nMagnitudes: 0.1 M_r - 5 log10(h), AB; colour: rest-frame 0.1(g-r). Distances: comoving Mpc/h; peculiar velocities: proper km/s. Cone frame, not ICRS.\nSelection: inner 65 deg; z_cos bins shown; underlying M_r<-21.5 BEFORE flux cut; right of dashed line not LF-complete | Sample: N inside displayed magnitude/colour range printed; residual bins N>=20\nUncertainty: mean residual: exact conditional-mixture 1 sigma; count image uses log colour scale, not an uncertainty\nReference: white curve is hodpy's conditional mixture mean, NOT an independently observed colour target. Completeness claims: M_r <= -22, inner 65 deg, 0.05 <= z_cos < 0.32 only."
+    },
+    {
+      "file": "05b_colour_distributions.png",
+      "title": "05b  Colour mixtures across redshift and host mass",
+      "group": "05",
+      "selection": "inner 65 deg; M_r<-22; pre-flux-cut intrinsic sample; z_cos and log10 native host mass bins labelled",
+      "uncertainty": "conditional Poisson-binomial 1 sigma from Gaussian-mixture bin probabilities; ratios only E[N]>=5",
+      "reference": "integrated upstream hodpy colour mixture at each galaxy's M_r,z and central status; model test only",
+      "sample": "N in each panel; 3 redshift x 3 host-mass bins",
+      "caption": "L3870N4096/000: native fragmentation-group M_PIN [Msun/h], NOT M200m; native floor 10 particles; painting cut 32 particles = 2.931e12 Msun/h.\nMagnitudes: 0.1 M_r - 5 log10(h), AB; colour: rest-frame 0.1(g-r). Distances: comoving Mpc/h; peculiar velocities: proper km/s. Cone frame, not ICRS.\nSelection: inner 65 deg; M_r<-22; pre-flux-cut intrinsic sample; z_cos and log10 native host mass bins labelled | Sample: N in each panel; 3 redshift x 3 host-mass bins\nUncertainty: conditional Poisson-binomial 1 sigma from Gaussian-mixture bin probabilities; ratios only E[N]>=5\nReference: integrated upstream hodpy colour mixture at each galaxy's M_r,z and central status; model test only. Completeness claims: M_r <= -22, inner 65 deg, 0.05 <= z_cos < 0.32 only."
+    },
+    {
+      "file": "06_satellite_radii.png",
+      "title": "06  Truncated-NFW satellite radii",
+      "group": "06",
+      "selection": "SATELLITES; host-selected cone65, 0.05<=z_host<0.32; M_r<-22; pre-flux cut (avoids position/velocity selection)",
+      "uncertainty": "conditional binomial 1 sigma; ratios require expected bin count>=5; low-z satellite sample is small",
+      "reference": "exact truncated 3D NFW CDF, averaged over each halo's predicted concentration; internal sampler test",
+      "sample": "N per panel; hard support at r/R_sat=1; effective radius is NOT measured R200m",
+      "caption": "L3870N4096/000: native fragmentation-group M_PIN [Msun/h], NOT M200m; native floor 10 particles; painting cut 32 particles = 2.931e12 Msun/h.\nMagnitudes: 0.1 M_r - 5 log10(h), AB; colour: rest-frame 0.1(g-r). Distances: comoving Mpc/h; peculiar velocities: proper km/s. Cone frame, not ICRS.\nSelection: SATELLITES; host-selected cone65, 0.05<=z_host<0.32; M_r<-22; pre-flux cut (avoids position/velocity selection) | Sample: N per panel; hard support at r/R_sat=1; effective radius is NOT measured R200m\nUncertainty: conditional binomial 1 sigma; ratios require expected bin count>=5; low-z satellite sample is small\nReference: exact truncated 3D NFW CDF, averaged over each halo's predicted concentration; internal sampler test. Completeness claims: M_r <= -22, inner 65 deg, 0.05 <= z_cos < 0.32 only."
+    },
+    {
+      "file": "07_satellite_velocities.png",
+      "title": "07  Satellite velocities and redshift-space prescription",
+      "group": "07",
+      "selection": "SATELLITES; host-selected cone65, 0.05<=z_host<0.32; M_r<-22; pre-flux cut (avoids position/velocity selection)",
+      "uncertainty": "conditional binomial 1 sigma; ratios require expected bin count>=5; low-z satellite sample is small",
+      "reference": "unit Gaussian for satellite velocity relative to its host; sigma from the frozen effective radius; internal sampler test",
+      "sample": "N per panel; max Doppler-redshift closure error=2.95e-17",
+      "caption": "L3870N4096/000: native fragmentation-group M_PIN [Msun/h], NOT M200m; native floor 10 particles; painting cut 32 particles = 2.931e12 Msun/h.\nMagnitudes: 0.1 M_r - 5 log10(h), AB; colour: rest-frame 0.1(g-r). Distances: comoving Mpc/h; peculiar velocities: proper km/s. Cone frame, not ICRS.\nSelection: SATELLITES; host-selected cone65, 0.05<=z_host<0.32; M_r<-22; pre-flux cut (avoids position/velocity selection) | Sample: N per panel; max Doppler-redshift closure error=2.95e-17\nUncertainty: conditional binomial 1 sigma; ratios require expected bin count>=5; low-z satellite sample is small\nReference: unit Gaussian for satellite velocity relative to its host; sigma from the frozen effective radius; internal sampler test. Completeness claims: M_r <= -22, inner 65 deg, 0.05 <= z_cos < 0.32 only."
+    },
+    {
+      "file": "08_sky_geometry.png",
+      "title": "08  Sky distribution, footprint and identity audit",
+      "group": "08",
+      "selection": "inner 65 deg; M_r<-22, r<20; z_cos bins shown; q=(1-cos opening angle)/(1-cos65deg)",
+      "uncertainty": "conditional HOD 1 sigma; pull cells need variance>=10; no cosmic-variance error (same fixed halo realization)",
+      "reference": "HOD at host centres, a model diagnostic; satellite boundary migrations are not integrated into the reference",
+      "sample": "counts per row; 374 extra native group occurrences preserved; max native distance residual=1.14e-04",
+      "caption": "L3870N4096/000: native fragmentation-group M_PIN [Msun/h], NOT M200m; native floor 10 particles; painting cut 32 particles = 2.931e12 Msun/h.\nMagnitudes: 0.1 M_r - 5 log10(h), AB; colour: rest-frame 0.1(g-r). Distances: comoving Mpc/h; peculiar velocities: proper km/s. Cone frame, not ICRS.\nSelection: inner 65 deg; M_r<-22, r<20; z_cos bins shown; q=(1-cos opening angle)/(1-cos65deg) | Sample: counts per row; 374 extra native group occurrences preserved; max native distance residual=1.14e-04\nUncertainty: conditional HOD 1 sigma; pull cells need variance>=10; no cosmic-variance error (same fixed halo realization)\nReference: HOD at host centres, a model diagnostic; satellite boundary migrations are not integrated into the reference. Completeness claims: M_r <= -22, inner 65 deg, 0.05 <= z_cos < 0.32 only."
+    },
+    {
+      "file": "09_clustering.png",
+      "title": "09  Unfitted angular clustering: a diagnostic, not a calibration",
+      "group": "09",
+      "selection": "inner65 deg; M_r<-22, r<20; z_cos and host-mass bins labelled; deterministic random subsampling",
+      "uncertainty": "8 equal-area-region delete-one jackknife, 1 sigma; 3 randoms per data object; finite-random and covariance limitations apply",
+      "reference": "zero is an UNCLUSTERED NULL, NOT a predicted galaxy clustering model; no goodness-of-fit threshold",
+      "sample": "N per curve; <=10,000 data galaxies each; plotted null significance is diagnostic only",
+      "caption": "L3870N4096/000: native fragmentation-group M_PIN [Msun/h], NOT M200m; native floor 10 particles; painting cut 32 particles = 2.931e12 Msun/h.\nMagnitudes: 0.1 M_r - 5 log10(h), AB; colour: rest-frame 0.1(g-r). Distances: comoving Mpc/h; peculiar velocities: proper km/s. Cone frame, not ICRS.\nSelection: inner65 deg; M_r<-22, r<20; z_cos and host-mass bins labelled; deterministic random subsampling | Sample: N per curve; <=10,000 data galaxies each; plotted null significance is diagnostic only\nUncertainty: 8 equal-area-region delete-one jackknife, 1 sigma; 3 randoms per data object; finite-random and covariance limitations apply\nReference: zero is an UNCLUSTERED NULL, NOT a predicted galaxy clustering model; no goodness-of-fit threshold. Completeness claims: M_r <= -22, inner 65 deg, 0.05 <= z_cos < 0.32 only."
+    }
+  ],
+  "plot_source_sha256": "5d33f1d16db17ccd70e5e9425e523117d73ba232401042d25fca5f6540982080"
+}

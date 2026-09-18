@@ -1,0 +1,27 @@
+{
+  "segment_indices": [
+    23,
+    9,
+    3,
+    0
+  ],
+  "max_fractional_bandpower_difference": [
+    9.992007221626409e-16,
+    4.440892098500626e-16,
+    0.0,
+    0.0
+  ],
+  "component_jacobian_shape": [
+    4,
+    3,
+    5,
+    4095
+  ],
+  "all_component_jacobians_finite": true,
+  "component_jacobian_closure_max_absolute_error": 4.235164736271502e-22,
+  "radial_nodes": 12,
+  "population_relative_tolerance": 0.0003,
+  "population_absolute_tolerance": 5e-08,
+  "finite_difference": "central Richardson, steps 1e-3 and 5e-4",
+  "status": "assignment numerics verified; statistical backbone is not accepted"
+}

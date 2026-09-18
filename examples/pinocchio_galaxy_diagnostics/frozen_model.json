@@ -1,0 +1,444 @@
+{
+  "absolute_magnitude_convention": "^0.1 M_r - 5 log10(h); AB, hodpy SDSS/GAMA r band",
+  "apparent_magnitude": "M_r_h1 + 5 log10((1+z_cos) chi_mpc_h) +25 + K_r(z_cos, ^0.1(g-r))",
+  "calibration_key": "c8bdc28b842ee14611b5d65055d88aa564175c9ad659fbca18b9a739e238d74a",
+  "colour_reference_redshift": 0.1,
+  "config": {
+    "calibration": {
+      "aperture_deg": 65.0,
+      "magnitude_bright": -25.0,
+      "magnitude_faint": -21.5,
+      "magnitude_step": 0.01,
+      "mass_bin_width_dex": 0.01,
+      "min_particles": 32,
+      "redshift_step": 0.01,
+      "z_max": 0.33,
+      "z_min": 0.04
+    },
+    "cosmology_table": "outputs/galaxy_lightcone/input/pinocchio.000.cosmology.out",
+    "halo_chunk_size": 2048,
+    "halo_input": "outputs/galaxy_lightcone/input/halos_z004_z033.hdf5",
+    "hodpy_root": "outputs/galaxy_lightcone/vendor/hodpy",
+    "output_dir": "outputs/galaxy_lightcone/validation",
+    "random_seed": 20260917,
+    "satellites": {
+      "concentration_amplitude": 5.0,
+      "concentration_mass_pivot": 100000000000000.0,
+      "concentration_mass_slope": -0.1,
+      "concentration_redshift_slope": -0.5,
+      "overdensity_mean": 200.0,
+      "radius_factor": 1.0,
+      "velocity_factor": 1.0
+    },
+    "survey_r_limit": 20.0,
+    "validation": {
+      "clustering_max_galaxies": 30000,
+      "colour_familywise_alpha": 0.01,
+      "cumulative_prediction_rtol": 0.02,
+      "jackknife_azimuth_regions": 8,
+      "jackknife_radial_regions": 4,
+      "magnitude_edges": [
+        -22.8,
+        -22.5,
+        -22.2,
+        -22.0
+      ],
+      "max_unresolved_fraction": 0.01,
+      "minimum_bin_count": 200,
+      "mock_rtol_floor": 0.05,
+      "mock_sigma_multiplier": 3.0,
+      "redshift_slices": [
+        [
+          0.05,
+          0.17
+        ],
+        [
+          0.22,
+          0.32
+        ]
+      ]
+    }
+  },
+  "expected_omitted_bright_tail": 4.959179708871194e-08,
+  "jax_version": "0.10.2",
+  "magnitude_reference_redshift": 0.1,
+  "mass_definition": "M_PIN = PINOCCHIO fragmentation-group particle count times particle mass; not spherical overdensity",
+  "mean_density_comoving": 108605305021.84999,
+  "n_galaxies": 660873,
+  "native_input": {
+    "cosmology_sha256": "4073680b99dd3ade9a479150f204c56efb1cfb8c6e58b55c699380dc0f32824e",
+    "input_to_h100_factor": 1.0,
+    "mass_definition": "M_PIN = PINOCCHIO fragmentation-group particle count times particle mass; not spherical overdensity",
+    "mass_unit": "Msun/h",
+    "n_halos": 5435239,
+    "native_audit": {
+      "max_direction_chord_residual": 5.4556766108972116e-05,
+      "max_observed_redshift_residual": 1.5231924277436804e-08
+    },
+    "occurrence_id_definition": "(source part index << 48) + zero-based native row index",
+    "parameter_sha256": "6a3a651d4f5014a52dbe0f3a1b687f33723da9dfb62e532af5495fbcd1a436ef",
+    "parameters": {
+      "AnalyticMassFunction": [
+        "9"
+      ],
+      "BoundaryLayerFactor": [
+        "2.0"
+      ],
+      "BoxInH100": [],
+      "BoxSize": [
+        "3870"
+      ],
+      "CAMBMatterFile": [
+        "CambFiles/pk_cb"
+      ],
+      "CAMBRedshiftsFile": [
+        "CambFiles/redshifts.dat"
+      ],
+      "DEw0": [
+        "-1.168"
+      ],
+      "DEwa": [
+        "-0.6605"
+      ],
+      "DoNotWriteHistories": [],
+      "FileWithInputSpectrum": [
+        "CAMBTable"
+      ],
+      "GridSize": [
+        "4096"
+      ],
+      "Hubble100": [
+        "0.7276"
+      ],
+      "HubbleTableFile": [
+        "CambFiles/hubble.dat"
+      ],
+      "InputSpectrum_UnitLength_in_cm": [
+        "0"
+      ],
+      "LastzForPLC": [
+        "0.0"
+      ],
+      "MassMapNSIDE": [
+        "2048"
+      ],
+      "MaxMem": [
+        "13000"
+      ],
+      "MaxMemPerParticle": [
+        "480"
+      ],
+      "MinHaloMass": [
+        "10"
+      ],
+      "NumFiles": [
+        "32"
+      ],
+      "Omega0": [
+        "0.3913"
+      ],
+      "OmegaBaryon": [
+        "0.0419"
+      ],
+      "OmegaLambda": [
+        "0.6087"
+      ],
+      "OutputInH100": [],
+      "OutputList": [
+        "outputs"
+      ],
+      "PLCAperture": [
+        "70"
+      ],
+      "PLCAxis": [
+        "-0.822556930095597",
+        "-0.112935946744643",
+        "-0.55735587256671"
+      ],
+      "PLCCenter": [
+        "415.2600210416666",
+        "3786.244397541667",
+        "2252.2445095416665"
+      ],
+      "PLCProvideConeData": [],
+      "PredPeakFactor": [
+        "2.0"
+      ],
+      "PrimordialIndex": [
+        "0.9312"
+      ],
+      "RandomSeed": [
+        "1386"
+      ],
+      "RunFlag": [
+        "000"
+      ],
+      "Sigma8": [
+        "0.0"
+      ],
+      "StartingzForPLC": [
+        "2.0"
+      ],
+      "TabulatedEoSfile": [
+        "no"
+      ],
+      "WDM_PartMass_in_kev": [
+        "0.0"
+      ]
+    },
+    "position_unit": "comoving Mpc/h, observer-relative simulation Cartesian basis",
+    "schema_version": 1,
+    "source_format": "PINOCCHIO full native PLC",
+    "sources": [
+      {
+        "path": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N4096/000/pinocchio.000.plc.out.0",
+        "rows_read": 6353344,
+        "rows_retained": 618867,
+        "sha256": "d42ca23b3f1ec2f72b66c809b6737d179079ad70a3697a5626b312c43fd5897d"
+      },
+      {
+        "path": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N4096/000/pinocchio.000.plc.out.1",
+        "rows_read": 6518422,
+        "rows_retained": 1026891,
+        "sha256": "a7afaf47b10839184c842a465b9dc8ce9da9d1e7ed138fac49603dbf22f90fe1"
+      },
+      {
+        "path": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N4096/000/pinocchio.000.plc.out.2",
+        "rows_read": 4886368,
+        "rows_retained": 364769,
+        "sha256": "f5465384da2a5aef2f3c06d4027ba88771cb3e31f4a26eeacafcfc306886dcc0"
+      },
+      {
+        "path": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N4096/000/pinocchio.000.plc.out.3",
+        "rows_read": 5599615,
+        "rows_retained": 751413,
+        "sha256": "68aa87d4a05f7faf2480a2f6fd5510c9f20e0fdb9ba59f0b878f4e2e952fe7ae"
+      },
+      {
+        "path": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N4096/000/pinocchio.000.plc.out.4",
+        "rows_read": 2977897,
+        "rows_retained": 36786,
+        "sha256": "a5e6f48fa32a0cc11e9cd00bdb7ebf22b02196d1a77cd8480d9cdb2317cc0197"
+      },
+      {
+        "path": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N4096/000/pinocchio.000.plc.out.5",
+        "rows_read": 4154298,
+        "rows_retained": 147819,
+        "sha256": "2ff2417d96c49cd695e3247bdce16ab8566072e256eecfd582e9ebbab9cf7624"
+      },
+      {
+        "path": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N4096/000/pinocchio.000.plc.out.6",
+        "rows_read": 1430057,
+        "rows_retained": 0,
+        "sha256": "5fa3d06ec6e3369321d5c8011db514b5a6e64cc0eaff06446482cb342735d076"
+      },
+      {
+        "path": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N4096/000/pinocchio.000.plc.out.7",
+        "rows_read": 2664997,
+        "rows_retained": 0,
+        "sha256": "bc897b9ced4c317f68fc441302ac5faa760d2f894a10cd35ff1a7727e945f1ce"
+      },
+      {
+        "path": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N4096/000/pinocchio.000.plc.out.8",
+        "rows_read": 1464430,
+        "rows_retained": 0,
+        "sha256": "93564fbfb67acb1fb4e7a1bbb446b7217d6bff3c08ce31cf8168cd8e383f11b5"
+      },
+      {
+        "path": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N4096/000/pinocchio.000.plc.out.9",
+        "rows_read": 2285233,
+        "rows_retained": 0,
+        "sha256": "c206c12fa749382428f9088091463fbf71a1e8de9442d4d8959c430ccaddb9d7"
+      },
+      {
+        "path": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N4096/000/pinocchio.000.plc.out.10",
+        "rows_read": 2641089,
+        "rows_retained": 0,
+        "sha256": "92576b6e2bd390e58267b6358db3600990bc1f45dd4c0eecb79676e1fddea6cb"
+      },
+      {
+        "path": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N4096/000/pinocchio.000.plc.out.11",
+        "rows_read": 2982740,
+        "rows_retained": 0,
+        "sha256": "3e9658cf7ea140c5b3cf253d247f24e1341132adf97dbd2925a82b78cb8e31cb"
+      },
+      {
+        "path": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N4096/000/pinocchio.000.plc.out.12",
+        "rows_read": 4154766,
+        "rows_retained": 0,
+        "sha256": "903688fa0a061d98f317980c5585159d84a5331a53a47e0744dd571007a190c1"
+      },
+      {
+        "path": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N4096/000/pinocchio.000.plc.out.13",
+        "rows_read": 4419381,
+        "rows_retained": 0,
+        "sha256": "b6ba6bbf4ae2ce309c477b212b65eab0c212da5b0e0ca5600272d5db1c0e1b6a"
+      },
+      {
+        "path": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N4096/000/pinocchio.000.plc.out.14",
+        "rows_read": 5433063,
+        "rows_retained": 0,
+        "sha256": "73431c1d6f097661dc97a57df9af9104e4619f9146515e207f0b4c436b83d554"
+      },
+      {
+        "path": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N4096/000/pinocchio.000.plc.out.15",
+        "rows_read": 5745160,
+        "rows_retained": 0,
+        "sha256": "72d7a1ea6da3208894e31d58a0dac0e2d64fe1e8c7769d9d85d08ba30155c2b0"
+      },
+      {
+        "path": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N4096/000/pinocchio.000.plc.out.16",
+        "rows_read": 6592240,
+        "rows_retained": 0,
+        "sha256": "565f01156ebb177e838335a28daa9d01261c2d5d8aa8aba7ca6ea340a18ac1c2"
+      },
+      {
+        "path": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N4096/000/pinocchio.000.plc.out.17",
+        "rows_read": 6810448,
+        "rows_retained": 0,
+        "sha256": "73eabe8f30d393737e88c3c8b7ba928609d83c4302fbbff32c2d0818d3838066"
+      },
+      {
+        "path": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N4096/000/pinocchio.000.plc.out.18",
+        "rows_read": 7502923,
+        "rows_retained": 0,
+        "sha256": "638af25b9003740a9ce6e5a7537d7fea76d7c2e1f57120ff42ba082bf694eaba"
+      },
+      {
+        "path": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N4096/000/pinocchio.000.plc.out.19",
+        "rows_read": 7562292,
+        "rows_retained": 0,
+        "sha256": "b0864d1e3cec76df9b08a16e4b78f4b4ebf3fd869779e3b76340ab201c623d53"
+      },
+      {
+        "path": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N4096/000/pinocchio.000.plc.out.20",
+        "rows_read": 8172412,
+        "rows_retained": 0,
+        "sha256": "779006cd588bf4f608a1d4ba2accf74ec078ce48dce7d54c7e158968e0d28890"
+      },
+      {
+        "path": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N4096/000/pinocchio.000.plc.out.21",
+        "rows_read": 8106673,
+        "rows_retained": 0,
+        "sha256": "f5889ba3a5fd7cb82419c72a7f8b668f781ca57d84f5c6b22536b149b44fd5ac"
+      },
+      {
+        "path": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N4096/000/pinocchio.000.plc.out.22",
+        "rows_read": 8567655,
+        "rows_retained": 0,
+        "sha256": "f4ca8478d6297e0073f8766fbf1cfc38c1c9592bfc8145419c3511addd6c8199"
+      },
+      {
+        "path": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N4096/000/pinocchio.000.plc.out.23",
+        "rows_read": 8379077,
+        "rows_retained": 0,
+        "sha256": "25d20a67feeccfbd0d01f64cdcd3b7b9ee7745f7fad84bc668ca862d74815138"
+      },
+      {
+        "path": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N4096/000/pinocchio.000.plc.out.24",
+        "rows_read": 8710416,
+        "rows_retained": 0,
+        "sha256": "e7af48a1356e51831a27ad526f4caf0848b870e460d1e1b1fc722c09c30bb85a"
+      },
+      {
+        "path": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N4096/000/pinocchio.000.plc.out.25",
+        "rows_read": 8407824,
+        "rows_retained": 0,
+        "sha256": "630161144abb9ef3726d81599bbfe6a48114aaf4f8fb275806a89af64ad896c4"
+      },
+      {
+        "path": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N4096/000/pinocchio.000.plc.out.26",
+        "rows_read": 8579518,
+        "rows_retained": 226,
+        "sha256": "571d8b64686a0ae8e9b7f6001fe86cb9afdacb5a89e0989219d9a93e3232f114"
+      },
+      {
+        "path": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N4096/000/pinocchio.000.plc.out.27",
+        "rows_read": 8208385,
+        "rows_retained": 2245,
+        "sha256": "2ab4004575916d4c9c98c70d5f8f8cb6fc0e72a6cc5627e01de0894d51f4dd03"
+      },
+      {
+        "path": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N4096/000/pinocchio.000.plc.out.28",
+        "rows_read": 8136136,
+        "rows_retained": 328612,
+        "sha256": "3af463fb5c53ba20e346de81b14af64af0a845a5b1532b24b1ee8cf046079ae8"
+      },
+      {
+        "path": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N4096/000/pinocchio.000.plc.out.29",
+        "rows_read": 7805421,
+        "rows_retained": 519838,
+        "sha256": "58db9afc3f618fc1f05fd8b6fb286b220f672c15098716fe9dac1b0af99cb78e"
+      },
+      {
+        "path": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N4096/000/pinocchio.000.plc.out.30",
+        "rows_read": 7411604,
+        "rows_retained": 650902,
+        "sha256": "48744b2f1799cdd96198bbd9affbad587737e7830f9e4a7f6e6908f8edc32c9d"
+      },
+      {
+        "path": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N4096/000/pinocchio.000.plc.out.31",
+        "rows_read": 7248099,
+        "rows_retained": 986871,
+        "sha256": "d762e780582cd371129a2fa14efedc16374924e6fdeabe890cb9aeca23181cfe"
+      }
+    ],
+    "velocity_unit": "proper peculiar km/s, simulation Cartesian basis",
+    "z_max": 0.33,
+    "z_min": 0.04
+  },
+  "numpy_version": "2.5.0",
+  "observed_redshift": "z_cos + (1+z_cos) dot(v,n)/299792.458",
+  "occupation_sampling": "Independent central Bernoulli and satellite Poisson, as hodpy; unobserved centrals may be fainter than the underlying cut",
+  "particle_mass_msun_h": 91601817520.35501,
+  "pipeline_sha256": "bae644d6e16c2825de26efdfe6debcedaa246be70c4a0e7bd685bbba300c8dc0",
+  "position_units": "observer-relative comoving Mpc/h; native simulation Cartesian basis",
+  "run_key": "dc3fc74d63c8980934f8d36eb013caa441d9690f253abc562f2339f10aedfbb6",
+  "satellite_parameters": {
+    "concentration_amplitude": 5.0,
+    "concentration_mass_pivot": 100000000000000.0,
+    "concentration_mass_slope": -0.1,
+    "concentration_redshift_slope": -0.5,
+    "gravitational_constant": 4.30091727e-09,
+    "overdensity_mean": 200.0,
+    "radius_factor": 1.0,
+    "velocity_factor": 1.0
+  },
+  "selection": "Underlying bright absolute-magnitude sample; selected_r_limit is applied only after painting. Not a complete faint flux-limited survey.",
+  "sky_basis_rows": [
+    [
+      -0.13602254963004765,
+      0.9907057413743706,
+      0.0
+    ],
+    [
+      0.5521756629405616,
+      0.07581296683780381,
+      -0.8302737086740742
+    ],
+    [
+      -0.8225569300955968,
+      -0.11293594674464297,
+      -0.5573558725667099
+    ]
+  ],
+  "sky_coordinates": "cone-aligned longitude/latitude in degrees; not ICRS",
+  "target_input_hashes": {
+    "hodpy/colour.py": "0d83909488005895061d60ae2c522db8dd22bc78b17739e27981135ac009c15f",
+    "hodpy/hod_bgs.py": "546e84c64243120069cfe600f96f570c64273c8729e86962fd03b75e5806bbc5",
+    "hodpy/k_correction.py": "56faea73ad705209ed166506013ec8d7ca9f71f52a939ca909359acb59810a15",
+    "hodpy/luminosity_function.py": "d29c98086c2ce793c326c9542e0ebdc39208cc54b1c982fc254dea50064705df",
+    "lookup/hod_params.dat": "e3ec78bf9b773ea824d01a2b80ed16184b77658de6f66b6dc345d19b75d0f1f6",
+    "lookup/k_corr_rband_z01.dat": "f456f6e0e0465fe0b662366268b31c30bfe8b958fe3632cec64f78d907803126",
+    "lookup/lf_params.dat": "8f5a825f06ef931e4fec087b87392ef3a09d6d5100ac338f5f34942533699695",
+    "lookup/sdss_cumulative_lf.dat": "644dc7e059147141a448ad72ef8170160930c50810eb70e48be0ac1254e2bee8"
+  },
+  "target_parameters": {
+    "P": 1.8,
+    "Q": 0.7,
+    "alpha": -1.23,
+    "m_star": -20.7,
+    "phi_star": 0.0094
+  },
+  "velocity_units": "proper peculiar km/s; native simulation Cartesian basis"
+}

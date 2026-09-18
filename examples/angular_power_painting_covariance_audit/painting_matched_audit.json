@@ -1,0 +1,47 @@
+{
+  "status": "experimental, not an accepted replacement for production theory",
+  "projection": "outputs/two_regime_research/painting_model_with_derivatives.npz",
+  "assignment": "outputs/two_regime_research/painting_model_with_derivatives.npz",
+  "mask_response": "outputs/two_regime_research/mask_response_deprojected.npz",
+  "metric": "unweighted RMS(measured / prediction - 1), mode-count-weighted bands",
+  "ell_min": 20,
+  "ell_stop": 2000,
+  "shells": [
+    {
+      "segment": 23,
+      "z_lo": 0.17404257,
+      "z_hi": 0.21083225,
+      "scheme5_rms_percent": 17.02406910703286,
+      "scheme6_rms_percent": 10.41108561208164,
+      "candidate_rms_percent": 2.068794491985705,
+      "candidate_better_than_both": true
+    },
+    {
+      "segment": 9,
+      "z_lo": 0.77881201,
+      "z_hi": 0.83176003,
+      "scheme5_rms_percent": 3.7705395775665638,
+      "scheme6_rms_percent": 13.159302670509627,
+      "candidate_rms_percent": 2.1061922522431304,
+      "candidate_better_than_both": true
+    },
+    {
+      "segment": 3,
+      "z_lo": 1.3991603,
+      "z_hi": 1.55438291,
+      "scheme5_rms_percent": 2.414296294683636,
+      "scheme6_rms_percent": 4.247785443532204,
+      "candidate_rms_percent": 1.6858971302340966,
+      "candidate_better_than_both": true
+    },
+    {
+      "segment": 0,
+      "z_lo": 1.90743426,
+      "z_hi": 2.0,
+      "scheme5_rms_percent": 3.2030462738832095,
+      "scheme6_rms_percent": 2.8392520734131015,
+      "candidate_rms_percent": 1.728403911670905,
+      "candidate_better_than_both": true
+    }
+  ]
+}

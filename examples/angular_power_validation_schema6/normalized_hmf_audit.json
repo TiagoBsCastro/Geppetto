@@ -1,0 +1,2849 @@
+{
+  "schema": 6,
+  "model": "standard_normalized_hmf_castro_bias",
+  "cctoolkit_revision": "ac16ab613eb93f795f562f928ad145597d981b2f",
+  "fit_parameters": [
+    [
+      {
+        "source": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/pinocchio.2.0000.000.mf.out",
+        "redshift": 2.0,
+        "log_a": -0.11367516792076246,
+        "p": 0.31812208136695574,
+        "s": 0.9219583958777297,
+        "populated_bins": 26,
+        "weighted_log_residual": 0.010193488430632803,
+        "peak_height_max_relative_error": 0.0019491100887016888,
+        "collapse_threshold": 1.686
+      },
+      {
+        "source": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/pinocchio.1.9074.000.mf.out",
+        "redshift": 1.907434,
+        "log_a": -0.13113183735884695,
+        "p": 3.5493385342906286e-05,
+        "s": 1.187060779868095,
+        "populated_bins": 27,
+        "weighted_log_residual": 0.012595590773650963,
+        "peak_height_max_relative_error": 0.001963824908498779,
+        "collapse_threshold": 1.686
+      },
+      {
+        "source": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/pinocchio.1.7232.000.mf.out",
+        "redshift": 1.723189,
+        "log_a": -0.15206988968583662,
+        "p": 3.5476154684849453e-08,
+        "s": 1.105429336071409,
+        "populated_bins": 28,
+        "weighted_log_residual": 0.013198009315882464,
+        "peak_height_max_relative_error": 0.0019091559553607862,
+        "collapse_threshold": 1.686
+      },
+      {
+        "source": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/pinocchio.1.5544.000.mf.out",
+        "redshift": 1.554383,
+        "log_a": -0.17423427306077025,
+        "p": 5.757366445891595e-07,
+        "s": 1.0297748763459187,
+        "populated_bins": 30,
+        "weighted_log_residual": 0.01348824397051506,
+        "peak_height_max_relative_error": 0.0018939526359378345,
+        "collapse_threshold": 1.686
+      },
+      {
+        "source": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/pinocchio.1.3992.000.mf.out",
+        "redshift": 1.39916,
+        "log_a": -0.19676929558266687,
+        "p": 8.324964740528167e-07,
+        "s": 0.9612527432562579,
+        "populated_bins": 32,
+        "weighted_log_residual": 0.014101069735002253,
+        "peak_height_max_relative_error": 0.0018641502386509412,
+        "collapse_threshold": 1.686
+      },
+      {
+        "source": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/pinocchio.1.2559.000.mf.out",
+        "redshift": 1.255919,
+        "log_a": -0.22037991482227748,
+        "p": 3.4876578013075236e-07,
+        "s": 0.9001972106173227,
+        "populated_bins": 34,
+        "weighted_log_residual": 0.016202444808808465,
+        "peak_height_max_relative_error": 0.0018122307241097424,
+        "collapse_threshold": 1.686
+      },
+      {
+        "source": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/pinocchio.1.0000.000.mf.out",
+        "redshift": 1.0,
+        "log_a": -0.21671284693127332,
+        "p": 0.46606127051749535,
+        "s": 0.4919932047403623,
+        "populated_bins": 38,
+        "weighted_log_residual": 0.01659547938505669,
+        "peak_height_max_relative_error": 0.001730569921806202,
+        "collapse_threshold": 1.686
+      },
+      {
+        "source": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/pinocchio.0.9430.000.mf.out",
+        "redshift": 0.942993,
+        "log_a": -0.20888822205496796,
+        "p": 0.5390666870323992,
+        "s": 0.451194479122722,
+        "populated_bins": 39,
+        "weighted_log_residual": 0.016917595407045884,
+        "peak_height_max_relative_error": 0.0016867585627606818,
+        "collapse_threshold": 1.686
+      },
+      {
+        "source": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/pinocchio.0.8865.000.mf.out",
+        "redshift": 0.886452,
+        "log_a": -0.20935017895380156,
+        "p": 0.5676624026222157,
+        "s": 0.4304312851091458,
+        "populated_bins": 40,
+        "weighted_log_residual": 0.017500869825734462,
+        "peak_height_max_relative_error": 0.0016423216993610712,
+        "collapse_threshold": 1.686
+      },
+      {
+        "source": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/pinocchio.0.8318.000.mf.out",
+        "redshift": 0.83176,
+        "log_a": -0.2006576368352982,
+        "p": 0.6296243168465279,
+        "s": 0.4017101442778882,
+        "populated_bins": 40,
+        "weighted_log_residual": 0.017718547565495017,
+        "peak_height_max_relative_error": 0.0015525988418143566,
+        "collapse_threshold": 1.686
+      },
+      {
+        "source": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/pinocchio.0.7788.000.mf.out",
+        "redshift": 0.778812,
+        "log_a": -0.2060894451245908,
+        "p": 0.6231149876268829,
+        "s": 0.3978296365321109,
+        "populated_bins": 41,
+        "weighted_log_residual": 0.020279069535919972,
+        "peak_height_max_relative_error": 0.0015042869748127519,
+        "collapse_threshold": 1.686
+      },
+      {
+        "source": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/pinocchio.0.7275.000.mf.out",
+        "redshift": 0.727508,
+        "log_a": -0.201661218224761,
+        "p": 0.6569953661889663,
+        "s": 0.38141474881549753,
+        "populated_bins": 42,
+        "weighted_log_residual": 0.021066285321910017,
+        "peak_height_max_relative_error": 0.0014650783017171598,
+        "collapse_threshold": 1.686
+      },
+      {
+        "source": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/pinocchio.0.6778.000.mf.out",
+        "redshift": 0.677755,
+        "log_a": -0.19802152252031086,
+        "p": 0.685916918660758,
+        "s": 0.36742548600635916,
+        "populated_bins": 43,
+        "weighted_log_residual": 0.02189647555061373,
+        "peak_height_max_relative_error": 0.0014096606013282997,
+        "collapse_threshold": 1.686
+      },
+      {
+        "source": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/pinocchio.0.6295.000.mf.out",
+        "redshift": 0.629465,
+        "log_a": -0.19545725511001055,
+        "p": 0.7107834830788012,
+        "s": 0.3551762958696248,
+        "populated_bins": 44,
+        "weighted_log_residual": 0.022215804230992935,
+        "peak_height_max_relative_error": 0.0013455517026055297,
+        "collapse_threshold": 1.686
+      },
+      {
+        "source": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/pinocchio.0.5826.000.mf.out",
+        "redshift": 0.582554,
+        "log_a": -0.18977471682267696,
+        "p": 0.7416114796975056,
+        "s": 0.3432802438961326,
+        "populated_bins": 44,
+        "weighted_log_residual": 0.02271893898241643,
+        "peak_height_max_relative_error": 0.001259501592635326,
+        "collapse_threshold": 1.686
+      },
+      {
+        "source": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/pinocchio.0.5369.000.mf.out",
+        "redshift": 0.536945,
+        "log_a": -0.18550609350386107,
+        "p": 0.764151526617604,
+        "s": 0.33406999833076756,
+        "populated_bins": 46,
+        "weighted_log_residual": 0.023042838248666323,
+        "peak_height_max_relative_error": 0.001233093026055343,
+        "collapse_threshold": 1.686
+      },
+      {
+        "source": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/pinocchio.0.4926.000.mf.out",
+        "redshift": 0.492563,
+        "log_a": -0.18250768654549968,
+        "p": 0.7824534214280764,
+        "s": 0.32614942663286434,
+        "populated_bins": 46,
+        "weighted_log_residual": 0.02331686957231923,
+        "peak_height_max_relative_error": 0.0011440458849396595,
+        "collapse_threshold": 1.686
+      },
+      {
+        "source": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/pinocchio.0.4493.000.mf.out",
+        "redshift": 0.449338,
+        "log_a": -0.17414242384919004,
+        "p": 0.8117923485217554,
+        "s": 0.3172017099961041,
+        "populated_bins": 46,
+        "weighted_log_residual": 0.023391505897989922,
+        "peak_height_max_relative_error": 0.001054947123147798,
+        "collapse_threshold": 1.686
+      },
+      {
+        "source": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/pinocchio.0.4072.000.mf.out",
+        "redshift": 0.407205,
+        "log_a": -0.17377995429747387,
+        "p": 0.8203669548033522,
+        "s": 0.31231591719028085,
+        "populated_bins": 47,
+        "weighted_log_residual": 0.02396510041202273,
+        "peak_height_max_relative_error": 0.0009814294365793064,
+        "collapse_threshold": 1.686
+      },
+      {
+        "source": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/pinocchio.0.3661.000.mf.out",
+        "redshift": 0.366101,
+        "log_a": -0.1713263436113825,
+        "p": 0.8344317546202835,
+        "s": 0.30688661458123495,
+        "populated_bins": 47,
+        "weighted_log_residual": 0.02413580894007822,
+        "peak_height_max_relative_error": 0.0008821621540884284,
+        "collapse_threshold": 1.686
+      },
+      {
+        "source": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/pinocchio.0.3260.000.mf.out",
+        "redshift": 0.325966,
+        "log_a": -0.16664960019384437,
+        "p": 0.8530503629097888,
+        "s": 0.30122075477718085,
+        "populated_bins": 47,
+        "weighted_log_residual": 0.024047393766275592,
+        "peak_height_max_relative_error": 0.0008000288116480903,
+        "collapse_threshold": 1.686
+      },
+      {
+        "source": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/pinocchio.0.2867.000.mf.out",
+        "redshift": 0.286745,
+        "log_a": -0.1649387868464815,
+        "p": 0.8648084907490374,
+        "s": 0.29735450101997785,
+        "populated_bins": 47,
+        "weighted_log_residual": 0.0245861721273832,
+        "peak_height_max_relative_error": 0.000709145635626296,
+        "collapse_threshold": 1.686
+      },
+      {
+        "source": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/pinocchio.0.2484.000.mf.out",
+        "redshift": 0.248384,
+        "log_a": -0.16391502363156032,
+        "p": 0.8730637267560023,
+        "s": 0.2944484754344917,
+        "populated_bins": 48,
+        "weighted_log_residual": 0.025039707111186124,
+        "peak_height_max_relative_error": 0.0006289426182772839,
+        "collapse_threshold": 1.686
+      },
+      {
+        "source": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/pinocchio.0.2108.000.mf.out",
+        "redshift": 0.210832,
+        "log_a": -0.16019128074609945,
+        "p": 0.8858621927994823,
+        "s": 0.291403794948836,
+        "populated_bins": 49,
+        "weighted_log_residual": 0.025500604361732,
+        "peak_height_max_relative_error": 0.0005476146066618615,
+        "collapse_threshold": 1.686
+      },
+      {
+        "source": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/pinocchio.0.1740.000.mf.out",
+        "redshift": 0.174043,
+        "log_a": -0.15797099179015228,
+        "p": 0.8950473478894915,
+        "s": 0.28905865666078334,
+        "populated_bins": 49,
+        "weighted_log_residual": 0.02584507543217921,
+        "peak_height_max_relative_error": 0.0004640277496732459,
+        "collapse_threshold": 1.686
+      },
+      {
+        "source": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/pinocchio.0.1380.000.mf.out",
+        "redshift": 0.137969,
+        "log_a": -0.15526098030777402,
+        "p": 0.9045315493045851,
+        "s": 0.2870033480518031,
+        "populated_bins": 51,
+        "weighted_log_residual": 0.026400663644695344,
+        "peak_height_max_relative_error": 0.0003813239164203175,
+        "collapse_threshold": 1.686
+      },
+      {
+        "source": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/pinocchio.0.1026.000.mf.out",
+        "redshift": 0.102568,
+        "log_a": -0.1536951761105507,
+        "p": 0.9084438291236121,
+        "s": 0.2865086618184061,
+        "populated_bins": 52,
+        "weighted_log_residual": 0.027428637361806882,
+        "peak_height_max_relative_error": 0.0002906257567738546,
+        "collapse_threshold": 1.686
+      },
+      {
+        "source": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/pinocchio.0.0678.000.mf.out",
+        "redshift": 0.067799,
+        "log_a": -0.15366690916219658,
+        "p": 0.9097693825701543,
+        "s": 0.286354626741406,
+        "populated_bins": 52,
+        "weighted_log_residual": 0.028551898967283496,
+        "peak_height_max_relative_error": 0.00022678065832004712,
+        "collapse_threshold": 1.686
+      },
+      {
+        "source": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/pinocchio.0.0336.000.mf.out",
+        "redshift": 0.033622,
+        "log_a": -0.15576516551959216,
+        "p": 0.9076131621533671,
+        "s": 0.28656632950555055,
+        "populated_bins": 53,
+        "weighted_log_residual": 0.029645203622611915,
+        "peak_height_max_relative_error": 5.422283483658141e-05,
+        "collapse_threshold": 1.686
+      },
+      {
+        "source": "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/pinocchio.0.0000.000.mf.out",
+        "redshift": 0.0,
+        "log_a": -0.15418307511838256,
+        "p": 0.9123069278419218,
+        "s": 0.2861366807312549,
+        "populated_bins": 53,
+        "weighted_log_residual": 0.030492730277488226,
+        "peak_height_max_relative_error": 1.5915092459461988e-05,
+        "collapse_threshold": 1.686
+      }
+    ]
+  ],
+  "closure": [
+    [
+      {
+        "redshift": 2.0,
+        "mass_integral": 1.000000000234562,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8700234581191487,
+        "low_mass_fraction": 0.2915700060932746,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 2.6848046551540308e-14
+      },
+      {
+        "redshift": 1.9981047843150788,
+        "mass_integral": 1.0000000002350182,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.870135377867186,
+        "low_mass_fraction": 0.2901323452278608,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 2.671566535651571e-14
+      },
+      {
+        "redshift": 1.990320851527669,
+        "mass_integral": 1.0000000002367369,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8705659617208311,
+        "low_mass_fraction": 0.2846217713861305,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 2.6208246417884735e-14
+      },
+      {
+        "redshift": 1.9775109917673528,
+        "mass_integral": 1.0000000002388734,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.871154704923348,
+        "low_mass_fraction": 0.27718286296217326,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 2.5523264576524974e-14
+      },
+      {
+        "redshift": 1.961504170882046,
+        "mass_integral": 1.0000000002400933,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8716555875359514,
+        "low_mass_fraction": 0.2710877242503469,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 2.4962018342504382e-14
+      },
+      {
+        "redshift": 1.9445284362346462,
+        "mass_integral": 1.000000000239689,
+        "bias_integral": 0.9999999999999999,
+        "bias_renormalization": 0.8719257465875452,
+        "low_mass_fraction": 0.268189409171875,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 2.4695138702892374e-14
+      },
+      {
+        "redshift": 1.9288733412449934,
+        "mass_integral": 1.0000000002382394,
+        "bias_integral": 1.0000000000000002,
+        "bias_renormalization": 0.8720318463971773,
+        "low_mass_fraction": 0.26749404749690303,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 2.4631109131161215e-14
+      },
+      {
+        "redshift": 1.9165834451808261,
+        "mass_integral": 1.0000000002368385,
+        "bias_integral": 0.9999999999999999,
+        "bias_renormalization": 0.8721087312651482,
+        "low_mass_fraction": 0.2670752796582072,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 2.4592548585862888e-14
+      },
+      {
+        "redshift": 1.9092165424550709,
+        "mass_integral": 1.0000000002360405,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8721818272332608,
+        "low_mass_fraction": 0.26648022424554374,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 2.453775531122536e-14
+      },
+      {
+        "redshift": 1.9074340000000007,
+        "mass_integral": 1.0000000002358598,
+        "bias_integral": 1.0000000000000002,
+        "bias_renormalization": 0.8722040662062497,
+        "low_mass_fraction": 0.26627735248271417,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 2.4519074684210866e-14
+      },
+      {
+        "redshift": 1.9036345423008947,
+        "mass_integral": 1.0000000002354748,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8722519617095806,
+        "low_mass_fraction": 0.26583891247197566,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 2.4478702706392957e-14
+      },
+      {
+        "redshift": 1.8880822330378053,
+        "mass_integral": 1.0000000002338079,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8724152619406237,
+        "low_mass_fraction": 0.2644722683542777,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 2.4352860801791813e-14
+      },
+      {
+        "redshift": 1.862142655005207,
+        "mass_integral": 1.0000000002307705,
+        "bias_integral": 1.0000000000000002,
+        "bias_renormalization": 0.8725877003326022,
+        "low_mass_fraction": 0.26358238562865727,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 2.4270919544654326e-14
+      },
+      {
+        "redshift": 1.8299479388316149,
+        "mass_integral": 1.000000000226691,
+        "bias_integral": 1.0000000000000002,
+        "bias_renormalization": 0.8726513482460536,
+        "low_mass_fraction": 0.2644464893698586,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 2.4350487048115955e-14
+      },
+      {
+        "redshift": 1.7962172393814972,
+        "mass_integral": 1.0000000002222096,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.872594806969453,
+        "low_mass_fraction": 0.2669465353089115,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 2.4580693682371773e-14
+      },
+      {
+        "redshift": 1.765480598465944,
+        "mass_integral": 1.000000000218054,
+        "bias_integral": 1.0000000000000002,
+        "bias_renormalization": 0.8724996674337657,
+        "low_mass_fraction": 0.26980157670131866,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 2.484358863935648e-14
+      },
+      {
+        "redshift": 1.7412748488455945,
+        "mass_integral": 1.000000000214799,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8724500868659972,
+        "low_mass_fraction": 0.2718104956859739,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 2.502857183135546e-14
+      },
+      {
+        "redshift": 1.7267020037599048,
+        "mass_integral": 1.0000000002128693,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8724507553847446,
+        "low_mass_fraction": 0.27267567600226283,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 2.5108238466886454e-14
+      },
+      {
+        "redshift": 1.723189,
+        "mass_integral": 1.0000000002124074,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8724556305837119,
+        "low_mass_fraction": 0.27282584471198285,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 2.5122066146088332e-14
+      },
+      {
+        "redshift": 1.7196624526995978,
+        "mass_integral": 1.0000000002119442,
+        "bias_integral": 0.9999999999999999,
+        "bias_renormalization": 0.8724615800247314,
+        "low_mass_fraction": 0.2729637647846466,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 2.513476595901108e-14
+      },
+      {
+        "redshift": 1.7052289043933473,
+        "mass_integral": 1.000000000210054,
+        "bias_integral": 0.9999999999999999,
+        "bias_renormalization": 0.8724845870815616,
+        "low_mass_fraction": 0.27354763741093097,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 2.518852951192481e-14
+      },
+      {
+        "redshift": 1.6816459465492604,
+        "mass_integral": 1.0000000002069411,
+        "bias_integral": 0.9999999999999999,
+        "bias_renormalization": 0.8725220085014567,
+        "low_mass_fraction": 0.2745213898884066,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 2.52781935764671e-14
+      },
+      {
+        "redshift": 1.652470934779736,
+        "mass_integral": 1.0000000002030758,
+        "bias_integral": 0.9999999999999999,
+        "bias_renormalization": 0.872566098585082,
+        "low_mass_fraction": 0.2757793077957809,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 2.5394023867064266e-14
+      },
+      {
+        "redshift": 1.6216618428682157,
+        "mass_integral": 1.0000000001989702,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.872616169342906,
+        "low_mass_fraction": 0.2771505854333759,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 2.5520292430633387e-14
+      },
+      {
+        "redshift": 1.5930488633570694,
+        "mass_integral": 1.0000000001951435,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8726730914393745,
+        "low_mass_fraction": 0.2784550041719946,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 2.5640404562489403e-14
+      },
+      {
+        "redshift": 1.5708111344120859,
+        "mass_integral": 1.0000000001921614,
+        "bias_integral": 0.9999999999999998,
+        "bias_renormalization": 0.8727183870277154,
+        "low_mass_fraction": 0.27947923787022577,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 2.573471698638451e-14
+      },
+      {
+        "redshift": 1.5575747510978801,
+        "mass_integral": 1.000000000190389,
+        "bias_integral": 1.0000000000000002,
+        "bias_renormalization": 0.8727455400901963,
+        "low_mass_fraction": 0.2800953576346079,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 2.5791449886784984e-14
+      },
+      {
+        "redshift": 1.554383,
+        "mass_integral": 1.0000000001899605,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8727522773555431,
+        "low_mass_fraction": 0.2802428707833499,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 2.5805033039378268e-14
+      },
+      {
+        "redshift": 1.5511687087146893,
+        "mass_integral": 1.0000000001895284,
+        "bias_integral": 1.0000000000000002,
+        "bias_renormalization": 0.8727591146331859,
+        "low_mass_fraction": 0.2803912944942597,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 2.5818700037411613e-14
+      },
+      {
+        "redshift": 1.5380096676151354,
+        "mass_integral": 1.0000000001877627,
+        "bias_integral": 0.9999999999999998,
+        "bias_renormalization": 0.8727865724634882,
+        "low_mass_fraction": 0.28100936000818727,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 2.5875612104301372e-14
+      },
+      {
+        "redshift": 1.5165006368587823,
+        "mass_integral": 1.0000000001848752,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8728311064571737,
+        "low_mass_fraction": 0.28204000418350156,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 2.5970514811090975e-14
+      },
+      {
+        "redshift": 1.4892935493146005,
+        "mass_integral": 1.0000000001812237,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8729011153319358,
+        "low_mass_fraction": 0.28337650821271737,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 2.6093581387360234e-14
+      },
+      {
+        "redshift": 1.4606359242263163,
+        "mass_integral": 1.000000000177376,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8729792502186622,
+        "low_mass_fraction": 0.2848082471081445,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 2.6225417281693556e-14
+      },
+      {
+        "redshift": 1.434501495257865,
+        "mass_integral": 1.0000000001738671,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8730527230500609,
+        "low_mass_fraction": 0.2861244503513141,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 2.634661454206128e-14
+      },
+      {
+        "redshift": 1.414179373944362,
+        "mass_integral": 1.0000000001711389,
+        "bias_integral": 1.0000000000000002,
+        "bias_renormalization": 0.8731122382489882,
+        "low_mass_fraction": 0.28714462599478524,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 2.6440553296371622e-14
+      },
+      {
+        "redshift": 1.402078757242216,
+        "mass_integral": 1.0000000001695164,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8731487360312852,
+        "low_mass_fraction": 0.2877496965813251,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 2.6496268777850856e-14
+      },
+      {
+        "redshift": 1.3991600000000002,
+        "mass_integral": 1.0000000001691238,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8731577975231265,
+        "low_mass_fraction": 0.28789392675116177,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 2.6509549630589433e-14
+      },
+      {
+        "redshift": 1.3961694772499453,
+        "mass_integral": 1.0000000001687204,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8731696793643742,
+        "low_mass_fraction": 0.28803524227565175,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 2.65225620999816e-14
+      },
+      {
+        "redshift": 1.383887897089525,
+        "mass_integral": 1.0000000001670524,
+        "bias_integral": 0.9999999999999999,
+        "bias_renormalization": 0.8732286489744607,
+        "low_mass_fraction": 0.28851087063700176,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 2.656635841688627e-14
+      },
+      {
+        "redshift": 1.3638113848711755,
+        "mass_integral": 1.0000000001642693,
+        "bias_integral": 0.9999999999999999,
+        "bias_renormalization": 0.8733524342662734,
+        "low_mass_fraction": 0.28898435792910426,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 2.6609957582075658e-14
+      },
+      {
+        "redshift": 1.3389576904003762,
+        "mass_integral": 1.0000000001607898,
+        "bias_integral": 0.9999999999999998,
+        "bias_renormalization": 0.8735273707163395,
+        "low_mass_fraction": 0.289349786888606,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 2.6643606632084066e-14
+      },
+      {
+        "redshift": 1.3128786209853676,
+        "mass_integral": 1.000000000157176,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8736973823355109,
+        "low_mass_fraction": 0.28994166418293804,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 2.6698107262529374e-14
+      },
+      {
+        "redshift": 1.2890282746641724,
+        "mass_integral": 1.0000000001540033,
+        "bias_integral": 0.9999999999999999,
+        "bias_renormalization": 0.8737984246272786,
+        "low_mass_fraction": 0.2911914023706459,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 2.6813184356673562e-14
+      },
+      {
+        "redshift": 1.269989731329269,
+        "mass_integral": 1.0000000001516327,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8738246238179036,
+        "low_mass_fraction": 0.2930559443047764,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 2.698487317101896e-14
+      },
+      {
+        "redshift": 1.2586528574561227,
+        "mass_integral": 1.0000000001503087,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8737988908423533,
+        "low_mass_fraction": 0.29467110456334333,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 2.713359868085872e-14
+      },
+      {
+        "redshift": 1.255919,
+        "mass_integral": 1.0000000001500033,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.873786876122847,
+        "low_mass_fraction": 0.2951307067091714,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 2.71759192884264e-14
+      },
+      {
+        "redshift": 1.2503873326783252,
+        "mass_integral": 1.000000000149392,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8737652258137868,
+        "low_mass_fraction": 0.2960285322970691,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 2.7258591931960693e-14
+      },
+      {
+        "redshift": 1.2278795798474773,
+        "mass_integral": 1.0000000001469016,
+        "bias_integral": 0.9999999999999998,
+        "bias_renormalization": 0.8737766340257089,
+        "low_mass_fraction": 0.29848268437692993,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 2.7484572615527935e-14
+      },
+      {
+        "redshift": 1.1915578491802425,
+        "mass_integral": 1.0000000001425993,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8740274735535818,
+        "low_mass_fraction": 0.29972483615510837,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 2.759895114578713e-14
+      },
+      {
+        "redshift": 1.146219617021817,
+        "mass_integral": 1.0000000001353841,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8743073791059676,
+        "low_mass_fraction": 0.3027636915384161,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 2.7878771871820056e-14
+      },
+      {
+        "redshift": 1.0995275838370828,
+        "mass_integral": 1.0000000001243468,
+        "bias_integral": 0.9999999999999999,
+        "bias_renormalization": 0.8738139633647395,
+        "low_mass_fraction": 0.31647365320903614,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 2.914119832673767e-14
+      },
+      {
+        "redshift": 1.056826375027791,
+        "mass_integral": 1.0000000001115175,
+        "bias_integral": 1.0000000000000002,
+        "bias_renormalization": 0.8725183985081231,
+        "low_mass_fraction": 0.3406947671469591,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 3.137150179055654e-14
+      },
+      {
+        "redshift": 1.0239639009132646,
+        "mass_integral": 1.000000000101411,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.871303816781205,
+        "low_mass_fraction": 0.3624095350728082,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 3.3371018503337295e-14
+      },
+      {
+        "redshift": 1.004635350829866,
+        "mass_integral": 1.000000000096105,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8707467527992725,
+        "low_mass_fraction": 0.3732167293854455,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 3.436615534846397e-14
+      },
+      {
+        "redshift": 1.0,
+        "mass_integral": 1.0000000000949558,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8706525918562793,
+        "low_mass_fraction": 0.37530839472382543,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 3.455875790428758e-14
+      },
+      {
+        "redshift": 0.9988690281851087,
+        "mass_integral": 1.0000000000946827,
+        "bias_integral": 0.9999999999999998,
+        "bias_renormalization": 0.8706320710540713,
+        "low_mass_fraction": 0.37578765157020877,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 3.4602888335583477e-14
+      },
+      {
+        "redshift": 0.9941888078819707,
+        "mass_integral": 1.0000000000935623,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8705506971726844,
+        "low_mass_fraction": 0.3777467271235627,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 3.478328189649593e-14
+      },
+      {
+        "redshift": 0.986290657921153,
+        "mass_integral": 1.0000000000917155,
+        "bias_integral": 0.9999999999999999,
+        "bias_renormalization": 0.8704300806242681,
+        "low_mass_fraction": 0.3809567295773387,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 3.507886200936243e-14
+      },
+      {
+        "redshift": 0.9764141547608776,
+        "mass_integral": 1.0000000000894937,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8702961988224067,
+        "low_mass_fraction": 0.38475992983533,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 3.5429064346494163e-14
+      },
+      {
+        "redshift": 0.9659310529639895,
+        "mass_integral": 1.0000000000872582,
+        "bias_integral": 0.9999999999999998,
+        "bias_renormalization": 0.8701803126654705,
+        "low_mass_fraction": 0.38846921890011277,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 3.577061925064487e-14
+      },
+      {
+        "redshift": 0.9562554885736645,
+        "mass_integral": 1.000000000085329,
+        "bias_integral": 0.9999999999999999,
+        "bias_renormalization": 0.8701029484789523,
+        "low_mass_fraction": 0.39152060703664027,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 3.605159400464649e-14
+      },
+      {
+        "redshift": 0.948654384250307,
+        "mass_integral": 1.0000000000839175,
+        "bias_integral": 1.0000000000000002,
+        "bias_renormalization": 0.8700660434383766,
+        "low_mass_fraction": 0.3936166435017117,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 3.624459905801937e-14
+      },
+      {
+        "redshift": 0.9440957993288397,
+        "mass_integral": 1.000000000083122,
+        "bias_integral": 0.9999999999999998,
+        "bias_renormalization": 0.8700550850491677,
+        "low_mass_fraction": 0.39473175225488666,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 3.634727934436437e-14
+      },
+      {
+        "redshift": 0.942993,
+        "mass_integral": 1.0000000000829354,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8700538214767775,
+        "low_mass_fraction": 0.39498398035400845,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 3.6370504750288533e-14
+      },
+      {
+        "redshift": 0.9418501193033813,
+        "mass_integral": 1.0000000000827443,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.870053095216601,
+        "low_mass_fraction": 0.39523795701128306,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 3.639389116512893e-14
+      },
+      {
+        "redshift": 0.9371564044367191,
+        "mass_integral": 1.0000000000819849,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8700560164521767,
+        "low_mass_fraction": 0.3962057128139383,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 3.6483003050087015e-14
+      },
+      {
+        "redshift": 0.9294283816814726,
+        "mass_integral": 1.0000000000808131,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8700785921868457,
+        "low_mass_fraction": 0.3975732316583993,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 3.660892550036968e-14
+      },
+      {
+        "redshift": 0.9197652481301579,
+        "mass_integral": 1.000000000079445,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8701298102889473,
+        "low_mass_fraction": 0.3989964253226912,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 3.6739974541602484e-14
+      },
+      {
+        "redshift": 0.9095093846842557,
+        "mass_integral": 1.0000000000780416,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8701984379310231,
+        "low_mass_fraction": 0.400341486873112,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 3.6863829102653705e-14
+      },
+      {
+        "redshift": 0.8998605078508701,
+        "mass_integral": 1.0000000000767004,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8702698210353096,
+        "low_mass_fraction": 0.40166210866368335,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 3.698543322711531e-14
+      },
+      {
+        "redshift": 0.8921747991349325,
+        "mass_integral": 1.000000000075571,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8703189041356187,
+        "low_mass_fraction": 0.4029038412326734,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 3.70997731561893e-14
+      },
+      {
+        "redshift": 0.8875666580089825,
+        "mass_integral": 1.0000000000748532,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8703384199550012,
+        "low_mass_fraction": 0.40378584456022293,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 3.7180988870775147e-14
+      },
+      {
+        "redshift": 0.886452,
+        "mass_integral": 1.0000000000746732,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8703417368072011,
+        "low_mass_fraction": 0.4040185372359527,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 3.7202415436126986e-14
+      },
+      {
+        "redshift": 0.8853340135585022,
+        "mass_integral": 1.000000000074489,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8703441179014588,
+        "low_mass_fraction": 0.40426475871973927,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 3.7225087747134787e-14
+      },
+      {
+        "redshift": 0.8807426698608383,
+        "mass_integral": 1.000000000073673,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8703413166038129,
+        "low_mass_fraction": 0.4054458869857316,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 3.733384717370817e-14
+      },
+      {
+        "redshift": 0.8731835614933849,
+        "mass_integral": 1.0000000000721752,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8702998719033359,
+        "low_mass_fraction": 0.4078868022400648,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 3.7558608997651534e-14
+      },
+      {
+        "redshift": 0.8637322762480735,
+        "mass_integral": 1.0000000000701488,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8702088298765934,
+        "low_mass_fraction": 0.411473336408252,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 3.788886051287555e-14
+      },
+      {
+        "redshift": 0.8537020305438172,
+        "mass_integral": 1.0000000000680143,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8701071401766381,
+        "low_mass_fraction": 0.41536291499608885,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 3.824701664968583e-14
+      },
+      {
+        "redshift": 0.8444458282737304,
+        "mass_integral": 1.000000000066256,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8700579146630006,
+        "low_mass_fraction": 0.41838040474636573,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 3.852487000768286e-14
+      },
+      {
+        "redshift": 0.8371751100630302,
+        "mass_integral": 1.0000000000651539,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8700830738555269,
+        "low_mass_fraction": 0.4199197880316972,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 3.86666179009556e-14
+      },
+      {
+        "redshift": 0.832815061547884,
+        "mass_integral": 1.000000000064652,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8701376738742662,
+        "low_mass_fraction": 0.4203284444590882,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 3.8704247377777265e-14
+      },
+      {
+        "redshift": 0.83176,
+        "mass_integral": 1.000000000064552,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.870156207924323,
+        "low_mass_fraction": 0.420358001137457,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 3.8706968985144875e-14
+      },
+      {
+        "redshift": 0.8307072487953302,
+        "mass_integral": 1.0000000000644564,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8701760498981094,
+        "low_mass_fraction": 0.4203702373507088,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 3.870809570742814e-14
+      },
+      {
+        "redshift": 0.8263820599133096,
+        "mass_integral": 1.0000000000640663,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8702622710553457,
+        "low_mass_fraction": 0.4203654314694512,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 3.8707653177260327e-14
+      },
+      {
+        "redshift": 0.8192439384999266,
+        "mass_integral": 1.000000000063434,
+        "bias_integral": 1.0000000000000002,
+        "bias_renormalization": 0.8704192632540066,
+        "low_mass_fraction": 0.4201960694250128,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 3.869205815734016e-14
+      },
+      {
+        "redshift": 0.8100180941943496,
+        "mass_integral": 1.0000000000626212,
+        "bias_integral": 1.0000000000000002,
+        "bias_renormalization": 0.8706571692858662,
+        "low_mass_fraction": 0.4197613625035673,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 3.8652029925974314e-14
+      },
+      {
+        "redshift": 0.8002276201892975,
+        "mass_integral": 1.0000000000617657,
+        "bias_integral": 1.0000000000000002,
+        "bias_renormalization": 0.8709201696929273,
+        "low_mass_fraction": 0.41919697948473955,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 3.8600060994857507e-14
+      },
+      {
+        "redshift": 0.7911931620176984,
+        "mass_integral": 1.00000000006097,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8711599687599114,
+        "low_mass_fraction": 0.4187379873045752,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 3.855779655351472e-14
+      },
+      {
+        "redshift": 0.784096943354222,
+        "mass_integral": 1.0000000000603395,
+        "bias_integral": 0.9999999999999999,
+        "bias_renormalization": 0.8713374386205293,
+        "low_mass_fraction": 0.4185285001281177,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 3.853850677285161e-14
+      },
+      {
+        "redshift": 0.7798416725299486,
+        "mass_integral": 1.0000000000599552,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8714364181607147,
+        "low_mass_fraction": 0.4185021539692894,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 3.853608079321072e-14
+      },
+      {
+        "redshift": 0.7788119999999998,
+        "mass_integral": 1.000000000059861,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.87145931197721,
+        "low_mass_fraction": 0.4185096463326274,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 3.853677069723197e-14
+      },
+      {
+        "redshift": 0.777771671312455,
+        "mass_integral": 1.0000000000597653,
+        "bias_integral": 0.9999999999999999,
+        "bias_renormalization": 0.8714816464975905,
+        "low_mass_fraction": 0.4185275556285496,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 3.8538419802423096e-14
+      },
+      {
+        "redshift": 0.7734978215031574,
+        "mass_integral": 1.0000000000593285,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.871564026389097,
+        "low_mass_fraction": 0.4187291799623574,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 3.855698556497366e-14
+      },
+      {
+        "redshift": 0.7664608462705762,
+        "mass_integral": 1.0000000000584768,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8716707776297764,
+        "low_mass_fraction": 0.41945761704383866,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 3.8624060751943406e-14
+      },
+      {
+        "redshift": 0.7576613720732208,
+        "mass_integral": 1.000000000057241,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8717642818888558,
+        "low_mass_fraction": 0.42091906662599216,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 3.8758632434882e-14
+      },
+      {
+        "redshift": 0.7483216242767212,
+        "mass_integral": 1.0000000000558045,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8718337216481414,
+        "low_mass_fraction": 0.42289087816108056,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 3.8940198737240206e-14
+      },
+      {
+        "redshift": 0.7397014992480273,
+        "mass_integral": 1.0000000000544553,
+        "bias_integral": 0.9999999999999999,
+        "bias_renormalization": 0.871890018324467,
+        "low_mass_fraction": 0.424836211086659,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 3.911932686377139e-14
+      },
+      {
+        "redshift": 0.732743650978765,
+        "mass_integral": 1.0000000000534026,
+        "bias_integral": 0.9999999999999999,
+        "bias_renormalization": 0.8719548719005341,
+        "low_mass_fraction": 0.4262969536138372,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 3.9253833440407905e-14
+      },
+      {
+        "redshift": 0.7285281892074227,
+        "mass_integral": 1.0000000000528044,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.872005704530019,
+        "low_mass_fraction": 0.42706648967783545,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 3.9324693061210965e-14
+      },
+      {
+        "redshift": 0.727508,
+        "mass_integral": 1.0000000000526654,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8720195253446461,
+        "low_mass_fraction": 0.42723379151619634,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 3.93400983753743e-14
+      },
+      {
+        "redshift": 0.7264916739136087,
+        "mass_integral": 1.0000000000525278,
+        "bias_integral": 0.9999999999999999,
+        "bias_renormalization": 0.8720336580392122,
+        "low_mass_fraction": 0.42739607800350854,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 3.935504187119002e-14
+      },
+      {
+        "redshift": 0.7223156440348248,
+        "mass_integral": 1.0000000000519647,
+        "bias_integral": 0.9999999999999999,
+        "bias_renormalization": 0.8720924405302833,
+        "low_mass_fraction": 0.4280577950604779,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 3.94159734141409e-14
+      },
+      {
+        "redshift": 0.7154400001690793,
+        "mass_integral": 1.0000000000510436,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8721914339645825,
+        "low_mass_fraction": 0.4291323202146798,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 3.951491672366494e-14
+      },
+      {
+        "redshift": 0.7068427357131091,
+        "mass_integral": 1.000000000049904,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8723188978064828,
+        "low_mass_fraction": 0.43045205293138833,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 3.963643898135028e-14
+      },
+      {
+        "redshift": 0.6977181854572223,
+        "mass_integral": 1.0000000000487064,
+        "bias_integral": 0.9999999999999998,
+        "bias_renormalization": 0.8724586865683627,
+        "low_mass_fraction": 0.4318243126860154,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 3.976279797920016e-14
+      },
+      {
+        "redshift": 0.6892972001758111,
+        "mass_integral": 1.0000000000476088,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8725919032829467,
+        "low_mass_fraction": 0.43306486498800484,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 3.9877029228153734e-14
+      },
+      {
+        "redshift": 0.6826821484528425,
+        "mass_integral": 1.0000000000467557,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.872698833655478,
+        "low_mass_fraction": 0.4340279129633986,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 3.996570761185026e-14
+      },
+      {
+        "redshift": 0.6787151187543576,
+        "mass_integral": 1.0000000000462448,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8727641631297873,
+        "low_mass_fraction": 0.434598499937402,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.001824780912571e-14
+      },
+      {
+        "redshift": 0.6777549999999999,
+        "mass_integral": 1.000000000046121,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.872780109468915,
+        "low_mass_fraction": 0.434735835111298,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.003089376400745e-14
+      },
+      {
+        "redshift": 0.6767928724863577,
+        "mass_integral": 1.0000000000459979,
+        "bias_integral": 1.0000000000000002,
+        "bias_renormalization": 0.8727961553011733,
+        "low_mass_fraction": 0.43487297409512066,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.0043521653518567e-14
+      },
+      {
+        "redshift": 0.6728393981224445,
+        "mass_integral": 1.0000000000454938,
+        "bias_integral": 0.9999999999999999,
+        "bias_renormalization": 0.872862675229817,
+        "low_mass_fraction": 0.4354319666188553,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.009499422266338e-14
+      },
+      {
+        "redshift": 0.6663291277436332,
+        "mass_integral": 1.0000000000446732,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8729745522172245,
+        "low_mass_fraction": 0.4363348192585223,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.01781297619589e-14
+      },
+      {
+        "redshift": 0.6581299236372615,
+        "mass_integral": 1.0000000000436478,
+        "bias_integral": 0.9999999999999999,
+        "bias_renormalization": 0.8731220680251739,
+        "low_mass_fraction": 0.4374467958169356,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.028052163279814e-14
+      },
+      {
+        "redshift": 0.6491363399260586,
+        "mass_integral": 1.0000000000425269,
+        "bias_integral": 1.0000000000000002,
+        "bias_renormalization": 0.8733018610511198,
+        "low_mass_fraction": 0.4386519299474271,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.039149154246003e-14
+      },
+      {
+        "redshift": 0.6408374753536541,
+        "mass_integral": 1.0000000000414877,
+        "bias_integral": 0.9999999999999999,
+        "bias_renormalization": 0.873469951103807,
+        "low_mass_fraction": 0.43976891585342603,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.049434467884224e-14
+      },
+      {
+        "redshift": 0.6343191978271794,
+        "mass_integral": 1.0000000000406595,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8736029687983079,
+        "low_mass_fraction": 0.440657942396244,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.0576207097843936e-14
+      },
+      {
+        "redshift": 0.6304105591226008,
+        "mass_integral": 1.000000000040159,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8736825115000353,
+        "low_mass_fraction": 0.4412035068221492,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.062644319482738e-14
+      },
+      {
+        "redshift": 0.6294650000000002,
+        "mass_integral": 1.0000000000400373,
+        "bias_integral": 0.9999999999999998,
+        "bias_renormalization": 0.8737017470050066,
+        "low_mass_fraction": 0.44133681208316733,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.063871807145593e-14
+      },
+      {
+        "redshift": 0.6285083720149995,
+        "mass_integral": 1.0000000000399134,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8737211801050344,
+        "low_mass_fraction": 0.44147252609839793,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.065121474848876e-14
+      },
+      {
+        "redshift": 0.624579362791496,
+        "mass_integral": 1.0000000000393996,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8738005336726848,
+        "low_mass_fraction": 0.44204096164421314,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.070355684018771e-14
+      },
+      {
+        "redshift": 0.6181103216527888,
+        "mass_integral": 1.0000000000385427,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8739298868208415,
+        "low_mass_fraction": 0.4430104042570651,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.079282404825084e-14
+      },
+      {
+        "redshift": 0.610021286003765,
+        "mass_integral": 1.0000000000374598,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.874091262174479,
+        "low_mass_fraction": 0.4442564757722688,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.090756351166476e-14
+      },
+      {
+        "redshift": 0.6014359104500568,
+        "mass_integral": 1.000000000036309,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8742650656744886,
+        "low_mass_fraction": 0.4455809918444015,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.10295262253175e-14
+      },
+      {
+        "redshift": 0.593512320511405,
+        "mass_integral": 1.0000000000352558,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8744312932145335,
+        "low_mass_fraction": 0.44676038495118897,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.113812587676268e-14
+      },
+      {
+        "redshift": 0.5872878563314055,
+        "mass_integral": 1.0000000000344444,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8745677226263477,
+        "low_mass_fraction": 0.44763203170674704,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.121838794824006e-14
+      },
+      {
+        "redshift": 0.5834966344049557,
+        "mass_integral": 1.0000000000339573,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.874656903600141,
+        "low_mass_fraction": 0.44812673652857227,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.126394084397031e-14
+      },
+      {
+        "redshift": 0.582554,
+        "mass_integral": 1.0000000000338378,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.874680628598029,
+        "low_mass_fraction": 0.4482447888582217,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.127481121601034e-14
+      },
+      {
+        "redshift": 0.5816221273936613,
+        "mass_integral": 1.0000000000337206,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8747041491189373,
+        "low_mass_fraction": 0.44836082599164095,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.128549602684356e-14
+      },
+      {
+        "redshift": 0.5777938258963911,
+        "mass_integral": 1.0000000000332403,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8748019825077691,
+        "low_mass_fraction": 0.44882714620741565,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.132843524075241e-14
+      },
+      {
+        "redshift": 0.5714907293941476,
+        "mass_integral": 1.0000000000324512,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8749671371407409,
+        "low_mass_fraction": 0.4495606810009689,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.1395979829952e-14
+      },
+      {
+        "redshift": 0.5636094244045826,
+        "mass_integral": 1.000000000031475,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8751795997488617,
+        "low_mass_fraction": 0.4504314246364313,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.147615874126249e-14
+      },
+      {
+        "redshift": 0.5552448050310708,
+        "mass_integral": 1.0000000000304436,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8754119738409484,
+        "low_mass_fraction": 0.45130577804719546,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.155667004415413e-14
+      },
+      {
+        "redshift": 0.5475252099042487,
+        "mass_integral": 1.0000000000294942,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8756317366430008,
+        "low_mass_fraction": 0.45208009340169575,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.1627969746622656e-14
+      },
+      {
+        "redshift": 0.541461167886123,
+        "mass_integral": 1.0000000000287488,
+        "bias_integral": 0.9999999999999999,
+        "bias_renormalization": 0.8758072351427237,
+        "low_mass_fraction": 0.45267548942869046,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.168279438535536e-14
+      },
+      {
+        "redshift": 0.5378245929670245,
+        "mass_integral": 1.0000000000283003,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8759136022785041,
+        "low_mass_fraction": 0.45302875356528,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.1715323286771614e-14
+      },
+      {
+        "redshift": 0.536945,
+        "mass_integral": 1.0000000000281912,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8759394512818031,
+        "low_mass_fraction": 0.4531138733643737,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.1723161199728256e-14
+      },
+      {
+        "redshift": 0.5360571074720204,
+        "mass_integral": 1.000000000028081,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8759656286024226,
+        "low_mass_fraction": 0.45319919284277543,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.1731017499347605e-14
+      },
+      {
+        "redshift": 0.5324109909674559,
+        "mass_integral": 1.0000000000276328,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8760741642451357,
+        "low_mass_fraction": 0.4535405906239146,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.176245373534262e-14
+      },
+      {
+        "redshift": 0.526407106993094,
+        "mass_integral": 1.0000000000268994,
+        "bias_integral": 0.9999999999999999,
+        "bias_renormalization": 0.8762564724014387,
+        "low_mass_fraction": 0.45407359564317795,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.181153335008464e-14
+      },
+      {
+        "redshift": 0.5188986279481023,
+        "mass_integral": 1.0000000000259825,
+        "bias_integral": 0.9999999999999998,
+        "bias_renormalization": 0.8764895117294207,
+        "low_mass_fraction": 0.45470633220254364,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.1869796340946865e-14
+      },
+      {
+        "redshift": 0.510805684654315,
+        "mass_integral": 1.0000000000249862,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8767489317934793,
+        "low_mass_fraction": 0.45537698924114123,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.193155108600327e-14
+      },
+      {
+        "redshift": 0.5031087751361976,
+        "mass_integral": 1.0000000000240234,
+        "bias_integral": 0.9999999999999998,
+        "bias_renormalization": 0.8770044882704225,
+        "low_mass_fraction": 0.45604181914587616,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.19927692629699e-14
+      },
+      {
+        "redshift": 0.4970639745284675,
+        "mass_integral": 1.0000000000232472,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8772043273221793,
+        "low_mass_fraction": 0.4566042335460539,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.2044556921788275e-14
+      },
+      {
+        "redshift": 0.4934395381350265,
+        "mass_integral": 1.000000000022773,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8773230664919386,
+        "low_mass_fraction": 0.456967717964766,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.2078026916610786e-14
+      },
+      {
+        "redshift": 0.4925630000000001,
+        "mass_integral": 1.0000000000226563,
+        "bias_integral": 1.0000000000000002,
+        "bias_renormalization": 0.8773516366604323,
+        "low_mass_fraction": 0.4570589733350276,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.2086429798860884e-14
+      },
+      {
+        "redshift": 0.49167926105616777,
+        "mass_integral": 1.0000000000225384,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.877380300307259,
+        "low_mass_fraction": 0.45715337248126653,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.209512216302621e-14
+      },
+      {
+        "redshift": 0.48805068031443044,
+        "mass_integral": 1.0000000000220464,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8774958395562591,
+        "low_mass_fraction": 0.4575743941902808,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.21338902468709e-14
+      },
+      {
+        "redshift": 0.48207660458864,
+        "mass_integral": 1.0000000000212164,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8776800833432771,
+        "low_mass_fraction": 0.4583639626568924,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.220659447057091e-14
+      },
+      {
+        "redshift": 0.4746070371385831,
+        "mass_integral": 1.0000000000201528,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8779057561402733,
+        "low_mass_fraction": 0.4594473626400498,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.230635498287972e-14
+      },
+      {
+        "redshift": 0.46667981133731695,
+        "mass_integral": 1.0000000000190137,
+        "bias_integral": 0.9999999999999999,
+        "bias_renormalization": 0.8781480073245875,
+        "low_mass_fraction": 0.46060540798712774,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.24129889120816e-14
+      },
+      {
+        "redshift": 0.4593642523367034,
+        "mass_integral": 1.0000000000179736,
+        "bias_integral": 1.0000000000000002,
+        "bias_renormalization": 0.8783827468101704,
+        "low_mass_fraction": 0.4615700896954995,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.2501817731481835e-14
+      },
+      {
+        "redshift": 0.45361784644193404,
+        "mass_integral": 1.0000000000171743,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8785808071653546,
+        "low_mass_fraction": 0.46218006625286423,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.255798495947249e-14
+      },
+      {
+        "redshift": 0.45017186180301905,
+        "mass_integral": 1.0000000000167066,
+        "bias_integral": 0.9999999999999998,
+        "bias_renormalization": 0.8787073936305008,
+        "low_mass_fraction": 0.46245732167147074,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.258351490504252e-14
+      },
+      {
+        "redshift": 0.4493379999999998,
+        "mass_integral": 1.0000000000165943,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8787390757800453,
+        "low_mass_fraction": 0.46251233669023917,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.2588580740876315e-14
+      },
+      {
+        "redshift": 0.4485140383442012,
+        "mass_integral": 1.0000000000164841,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8787707009468962,
+        "low_mass_fraction": 0.46256314123893094,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.2593258872576426e-14
+      },
+      {
+        "redshift": 0.44511330103143854,
+        "mass_integral": 1.0000000000160318,
+        "bias_integral": 0.9999999999999999,
+        "bias_renormalization": 0.8789036135470579,
+        "low_mass_fraction": 0.46275211409334044,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.261065967473761e-14
+      },
+      {
+        "redshift": 0.43926223293936917,
+        "mass_integral": 1.0000000000152647,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8791448734683243,
+        "low_mass_fraction": 0.46301001704812894,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.2634407626828836e-14
+      },
+      {
+        "redshift": 0.4319470303577462,
+        "mass_integral": 1.0000000000143094,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8794568415499896,
+        "low_mass_fraction": 0.46323912752906754,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.265550434023947e-14
+      },
+      {
+        "redshift": 0.4241843136089425,
+        "mass_integral": 1.0000000000132887,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.879796614865907,
+        "low_mass_fraction": 0.46341921376480133,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.267208685400711e-14
+      },
+      {
+        "redshift": 0.4170211970192601,
+        "mass_integral": 1.0000000000123281,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.88011399865535,
+        "low_mass_fraction": 0.46358117001636423,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.268699994139746e-14
+      },
+      {
+        "redshift": 0.41139495729479925,
+        "mass_integral": 1.000000000011553,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8803632046070665,
+        "low_mass_fraction": 0.46374036969388094,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.270165920079876e-14
+      },
+      {
+        "redshift": 0.40802121153827686,
+        "mass_integral": 1.0000000000110751,
+        "bias_integral": 1.0000000000000002,
+        "bias_renormalization": 0.8805117411927861,
+        "low_mass_fraction": 0.46386079553802967,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.271274812833638e-14
+      },
+      {
+        "redshift": 0.40720500000000004,
+        "mass_integral": 1.000000000010958,
+        "bias_integral": 0.9999999999999998,
+        "bias_renormalization": 0.8805475188339853,
+        "low_mass_fraction": 0.4638935092550709,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.271576043886092e-14
+      },
+      {
+        "redshift": 0.4063797047224338,
+        "mass_integral": 1.0000000000108382,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8805836634468546,
+        "low_mass_fraction": 0.4639275979011187,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.271889935417061e-14
+      },
+      {
+        "redshift": 0.40298988348990017,
+        "mass_integral": 1.0000000000103477,
+        "bias_integral": 0.9999999999999998,
+        "bias_renormalization": 0.8807319879145336,
+        "low_mass_fraction": 0.4640749274467306,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.273246560041111e-14
+      },
+      {
+        "redshift": 0.39740857098672344,
+        "mass_integral": 1.0000000000095275,
+        "bias_integral": 0.9999999999999999,
+        "bias_renormalization": 0.8809766425599027,
+        "low_mass_fraction": 0.46433404797781186,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.2756325668098264e-14
+      },
+      {
+        "redshift": 0.3904295110555176,
+        "mass_integral": 1.0000000000084834,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8812833556125794,
+        "low_mass_fraction": 0.46468636151373155,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.2788767037290687e-14
+      },
+      {
+        "redshift": 0.38302214558496184,
+        "mass_integral": 1.0000000000073506,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8816105652392329,
+        "low_mass_fraction": 0.4650869414967761,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.282565282735016e-14
+      },
+      {
+        "redshift": 0.37596301175075375,
+        "mass_integral": 1.0000000000062461,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8819264552532434,
+        "low_mass_fraction": 0.465487656458741,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.286255104639842e-14
+      },
+      {
+        "redshift": 0.37030975760702844,
+        "mass_integral": 1.000000000005346,
+        "bias_integral": 1.0000000000000002,
+        "bias_renormalization": 0.8821821304935444,
+        "low_mass_fraction": 0.4658189218318791,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.2893054280520793e-14
+      },
+      {
+        "redshift": 0.36692056464762257,
+        "mass_integral": 1.000000000004797,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8823365157587505,
+        "low_mass_fraction": 0.4660184366511973,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.291142579694853e-14
+      },
+      {
+        "redshift": 0.366101,
+        "mass_integral": 1.0000000000046643,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8823739135908196,
+        "low_mass_fraction": 0.46606734975468983,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.291592976255577e-14
+      },
+      {
+        "redshift": 0.3652800556543454,
+        "mass_integral": 1.0000000000045308,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8824113792006408,
+        "low_mass_fraction": 0.46611694317068764,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.292049637199273e-14
+      },
+      {
+        "redshift": 0.3619095862140169,
+        "mass_integral": 1.0000000000039775,
+        "bias_integral": 1.0000000000000002,
+        "bias_renormalization": 0.8825647956362926,
+        "low_mass_fraction": 0.46633249086057504,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.2940344210560606e-14
+      },
+      {
+        "redshift": 0.35636099573537106,
+        "mass_integral": 1.0000000000030531,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8828165020849306,
+        "low_mass_fraction": 0.46672185644888303,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.297619736836833e-14
+      },
+      {
+        "redshift": 0.3494243567739883,
+        "mass_integral": 1.0000000000018763,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8831316889581368,
+        "low_mass_fraction": 0.46724394786310186,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.3024272047862706e-14
+      },
+      {
+        "redshift": 0.3420638437062833,
+        "mass_integral": 1.0000000000006055,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8834701931306049,
+        "low_mass_fraction": 0.4677985124962221,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.307533689258163e-14
+      },
+      {
+        "redshift": 0.33527230358265325,
+        "mass_integral": 0.9999999999994107,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8837900491606485,
+        "low_mass_fraction": 0.46826441666220747,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.3118237796225785e-14
+      },
+      {
+        "redshift": 0.32993821272938884,
+        "mass_integral": 0.9999999999984562,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8840488462227165,
+        "low_mass_fraction": 0.4685689194325806,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.3146276704149095e-14
+      },
+      {
+        "redshift": 0.3267397773136096,
+        "mass_integral": 0.9999999999978788,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8842079525828396,
+        "low_mass_fraction": 0.4687164106078377,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.315985783340276e-14
+      },
+      {
+        "redshift": 0.325966,
+        "mass_integral": 0.9999999999977381,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8842469766934129,
+        "low_mass_fraction": 0.468747110363398,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.3162684696417406e-14
+      },
+      {
+        "redshift": 0.325198541050719,
+        "mass_integral": 0.999999999997598,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8842858441805899,
+        "low_mass_fraction": 0.46877617519803805,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.316536101434147e-14
+      },
+      {
+        "redshift": 0.3220461933628793,
+        "mass_integral": 0.9999999999970195,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.884446587245495,
+        "low_mass_fraction": 0.4688884416707252,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.31756986191084e-14
+      },
+      {
+        "redshift": 0.3167763227918525,
+        "mass_integral": 0.9999999999960458,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8847181655293342,
+        "low_mass_fraction": 0.4690551924946403,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.319105319533167e-14
+      },
+      {
+        "redshift": 0.30992047479797513,
+        "mass_integral": 0.999999999994758,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8850762129648561,
+        "low_mass_fraction": 0.46923082826703105,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.320722590615487e-14
+      },
+      {
+        "redshift": 0.3026470817783151,
+        "mass_integral": 0.9999999999933668,
+        "bias_integral": 1.0000000000000002,
+        "bias_renormalization": 0.8854640489235542,
+        "low_mass_fraction": 0.4693723945237942,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.322026146321586e-14
+      },
+      {
+        "redshift": 0.29593719846744904,
+        "mass_integral": 0.9999999999920587,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8858287558180248,
+        "low_mass_fraction": 0.4694675389913615,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.3229022457285844e-14
+      },
+      {
+        "redshift": 0.29066809628245105,
+        "mass_integral": 0.9999999999910182,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8861194316844595,
+        "low_mass_fraction": 0.469523235282962,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.3234151025377175e-14
+      },
+      {
+        "redshift": 0.28750899024681686,
+        "mass_integral": 0.9999999999903864,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8862955246662725,
+        "low_mass_fraction": 0.46954889859410115,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.323651412774618e-14
+      },
+      {
+        "redshift": 0.286745,
+        "mass_integral": 0.9999999999902339,
+        "bias_integral": 0.9999999999999999,
+        "bias_renormalization": 0.8863382643846334,
+        "low_mass_fraction": 0.4695547601846952,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.323705386864492e-14
+      },
+      {
+        "redshift": 0.28597251135655166,
+        "mass_integral": 0.9999999999900788,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.886381576819723,
+        "low_mass_fraction": 0.4695601533563676,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.32375504770789e-14
+      },
+      {
+        "redshift": 0.2828007916936368,
+        "mass_integral": 0.9999999999894391,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8865605766007174,
+        "low_mass_fraction": 0.46957493168728787,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.323891128000173e-14
+      },
+      {
+        "redshift": 0.2775793584763666,
+        "mass_integral": 0.9999999999883764,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8868588551564808,
+        "low_mass_fraction": 0.46957909181185314,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.323929434827232e-14
+      },
+      {
+        "redshift": 0.27105166335474107,
+        "mass_integral": 0.9999999999870268,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8872374549126677,
+        "low_mass_fraction": 0.46955755880779876,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.323731156855162e-14
+      },
+      {
+        "redshift": 0.26412501540685906,
+        "mass_integral": 0.9999999999855662,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8876450222442316,
+        "low_mass_fraction": 0.4695172110161333,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.323359630509431e-14
+      },
+      {
+        "redshift": 0.25766228028934557,
+        "mass_integral": 0.9999999999841732,
+        "bias_integral": 0.9999999999999999,
+        "bias_renormalization": 0.8880276488008817,
+        "low_mass_fraction": 0.46947967163276405,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.323013964257364e-14
+      },
+      {
+        "redshift": 0.25234316939534485,
+        "mass_integral": 0.9999999999830003,
+        "bias_integral": 0.9999999999999998,
+        "bias_renormalization": 0.888338600596841,
+        "low_mass_fraction": 0.46945920917040196,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.322825543936145e-14
+      },
+      {
+        "redshift": 0.24915491784914523,
+        "mass_integral": 0.9999999999822825,
+        "bias_integral": 1.0000000000000002,
+        "bias_renormalization": 0.8885257235375215,
+        "low_mass_fraction": 0.4694547273104497,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.322784274538703e-14
+      },
+      {
+        "redshift": 0.24838399999999994,
+        "mass_integral": 0.9999999999821066,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8885710359780328,
+        "low_mass_fraction": 0.4694547673686247,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.3227846433982315e-14
+      },
+      {
+        "redshift": 0.24761536559864816,
+        "mass_integral": 0.9999999999819332,
+        "bias_integral": 0.9999999999999999,
+        "bias_renormalization": 0.8886161607653449,
+        "low_mass_fraction": 0.46945603678678727,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.322796332322747e-14
+      },
+      {
+        "redshift": 0.24445984887577055,
+        "mass_integral": 0.9999999999812138,
+        "bias_integral": 1.0000000000000002,
+        "bias_renormalization": 0.8888016053838098,
+        "low_mass_fraction": 0.469466710649577,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.322894618277775e-14
+      },
+      {
+        "redshift": 0.23926595558912878,
+        "mass_integral": 0.9999999999800154,
+        "bias_integral": 0.9999999999999999,
+        "bias_renormalization": 0.8891076975270064,
+        "low_mass_fraction": 0.46950086705254046,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.3232091337209384e-14
+      },
+      {
+        "redshift": 0.23277420505464175,
+        "mass_integral": 0.999999999978496,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8894925100632289,
+        "low_mass_fraction": 0.4695631999764822,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.323783101278886e-14
+      },
+      {
+        "redshift": 0.2258875386337722,
+        "mass_integral": 0.999999999976857,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8899049860329051,
+        "low_mass_fraction": 0.4696346419648428,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.324440945977982e-14
+      },
+      {
+        "redshift": 0.21953483485341496,
+        "mass_integral": 0.9999999999753184,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8902909904240146,
+        "low_mass_fraction": 0.4696859111273349,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.3249130373565464e-14
+      },
+      {
+        "redshift": 0.21454649574299656,
+        "mass_integral": 0.999999999974089,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8905989051267256,
+        "low_mass_fraction": 0.46970316846792154,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.3250719446082334e-14
+      },
+      {
+        "redshift": 0.2115558397333075,
+        "mass_integral": 0.9999999999733399,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8907859969632381,
+        "low_mass_fraction": 0.46969851175047184,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.3250290651061404e-14
+      },
+      {
+        "redshift": 0.2108319999999999,
+        "mass_integral": 0.9999999999731568,
+        "bias_integral": 1.0000000000000002,
+        "bias_renormalization": 0.8908315959099861,
+        "low_mass_fraction": 0.46969528305248087,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.324999334944549e-14
+      },
+      {
+        "redshift": 0.21011400407660208,
+        "mass_integral": 0.999999999972977,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8908768633260621,
+        "low_mass_fraction": 0.46969214592531044,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.32497044797588e-14
+      },
+      {
+        "redshift": 0.2071634798894626,
+        "mass_integral": 0.9999999999722307,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8910638095632716,
+        "low_mass_fraction": 0.4696751632720948,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.324814070071921e-14
+      },
+      {
+        "redshift": 0.20230582591044732,
+        "mass_integral": 0.9999999999709852,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8913746594070915,
+        "low_mass_fraction": 0.4696349598580107,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.324443873168843e-14
+      },
+      {
+        "redshift": 0.1958521464270373,
+        "mass_integral": 0.9999999999693038,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8917763770588376,
+        "low_mass_fraction": 0.46956373501059867,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.3237880279244824e-14
+      },
+      {
+        "redshift": 0.18900492903076094,
+        "mass_integral": 0.9999999999674859,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8922087526940613,
+        "low_mass_fraction": 0.46947086896313106,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.322932908428868e-14
+      },
+      {
+        "redshift": 0.18269031867119723,
+        "mass_integral": 0.999999999965776,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8926129029027335,
+        "low_mass_fraction": 0.46937471173632894,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.322047483437443e-14
+      },
+      {
+        "redshift": 0.17773303684273234,
+        "mass_integral": 0.9999999999644122,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8929335434291826,
+        "low_mass_fraction": 0.46929620891563767,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.321324621915235e-14
+      },
+      {
+        "redshift": 0.1747614834701985,
+        "mass_integral": 0.9999999999635822,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8931271906826557,
+        "low_mass_fraction": 0.4692480824050543,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.320881468377661e-14
+      },
+      {
+        "redshift": 0.17404299999999995,
+        "mass_integral": 0.9999999999633815,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.893174124276042,
+        "low_mass_fraction": 0.4692368551900273,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.320778087102019e-14
+      },
+      {
+        "redshift": 0.17331737166458572,
+        "mass_integral": 0.9999999999631786,
+        "bias_integral": 1.0000000000000002,
+        "bias_renormalization": 0.8932215549391119,
+        "low_mass_fraction": 0.4692258965992716,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.3206771793444995e-14
+      },
+      {
+        "redshift": 0.17033866040897716,
+        "mass_integral": 0.999999999962336,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8934162976290101,
+        "low_mass_fraction": 0.4691882950712133,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.32033094085816e-14
+      },
+      {
+        "redshift": 0.1654359072023024,
+        "mass_integral": 0.9999999999609333,
+        "bias_integral": 0.9999999999999999,
+        "bias_renormalization": 0.8937373281940454,
+        "low_mass_fraction": 0.4691473731527093,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.3199541278972886e-14
+      },
+      {
+        "redshift": 0.15930826268460763,
+        "mass_integral": 0.9999999999591502,
+        "bias_integral": 0.9999999999999999,
+        "bias_renormalization": 0.8941414975634789,
+        "low_mass_fraction": 0.46910861887105726,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.319597274745002e-14
+      },
+      {
+        "redshift": 0.15280811377378956,
+        "mass_integral": 0.9999999999572264,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8945769580344615,
+        "low_mass_fraction": 0.4690451258376402,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.319012624787443e-14
+      },
+      {
+        "redshift": 0.14672313532045633,
+        "mass_integral": 0.9999999999553963,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8949888705123916,
+        "low_mass_fraction": 0.46892450961077675,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.317901978971335e-14
+      },
+      {
+        "redshift": 0.14170416707869493,
+        "mass_integral": 0.9999999999538653,
+        "bias_integral": 1.0000000000000002,
+        "bias_renormalization": 0.8953235141623077,
+        "low_mass_fraction": 0.4687508003469522,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.3163024473651576e-14
+      },
+      {
+        "redshift": 0.13869653201677923,
+        "mass_integral": 0.9999999999529432,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8955289127589497,
+        "low_mass_fraction": 0.46860486752487,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.314958683905686e-14
+      },
+      {
+        "redshift": 0.137969,
+        "mass_integral": 0.9999999999527183,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8955792418303,
+        "low_mass_fraction": 0.4685637772728608,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.31458032091371e-14
+      },
+      {
+        "redshift": 0.1372439983818825,
+        "mass_integral": 0.9999999999524938,
+        "bias_integral": 1.0000000000000002,
+        "bias_renormalization": 0.8956295709931976,
+        "low_mass_fraction": 0.46852148261490484,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.314190867635954e-14
+      },
+      {
+        "redshift": 0.13426643141235806,
+        "mass_integral": 0.9999999999515707,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8958370835641741,
+        "low_mass_fraction": 0.4683456984290427,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.3125722299481193e-14
+      },
+      {
+        "redshift": 0.12936659529652883,
+        "mass_integral": 0.9999999999500394,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8961816284466464,
+        "low_mass_fraction": 0.4680471435153999,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.309823107592539e-14
+      },
+      {
+        "redshift": 0.12324440408755821,
+        "mass_integral": 0.9999999999481053,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8966174991452434,
+        "low_mass_fraction": 0.4676583351250076,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.306242922543758e-14
+      },
+      {
+        "redshift": 0.11675223391878298,
+        "mass_integral": 0.9999999999460177,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8970865148813727,
+        "low_mass_fraction": 0.46722501283290685,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.3022528492073335e-14
+      },
+      {
+        "redshift": 0.11076567901325696,
+        "mass_integral": 0.9999999999440539,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8975253625246022,
+        "low_mass_fraction": 0.4668056889749285,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.298391674798477e-14
+      },
+      {
+        "redshift": 0.10606635735777625,
+        "mass_integral": 0.9999999999424822,
+        "bias_integral": 0.9999999999999998,
+        "bias_renormalization": 0.8978742166860553,
+        "low_mass_fraction": 0.4664629158202389,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.295235386627059e-14
+      },
+      {
+        "redshift": 0.10324961080853146,
+        "mass_integral": 0.999999999941523,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8980852575128049,
+        "low_mass_fraction": 0.466250951201467,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.293283596033671e-14
+      },
+      {
+        "redshift": 0.10256799999999999,
+        "mass_integral": 0.9999999999412903,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8981365232481816,
+        "low_mass_fraction": 0.4661991522080406,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.292806625920912e-14
+      },
+      {
+        "redshift": 0.10189413908439704,
+        "mass_integral": 0.9999999999410587,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8981872851125658,
+        "low_mass_fraction": 0.4661477366789501,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.2923331867846343e-14
+      },
+      {
+        "redshift": 0.09912550505519335,
+        "mass_integral": 0.9999999999401004,
+        "bias_integral": 0.9999999999999999,
+        "bias_renormalization": 0.8983965545357626,
+        "low_mass_fraction": 0.4659357293341481,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.290381002765854e-14
+      },
+      {
+        "redshift": 0.09443586615425148,
+        "mass_integral": 0.9999999999384651,
+        "bias_integral": 0.9999999999999998,
+        "bias_renormalization": 0.8987431278165481,
+        "low_mass_fraction": 0.4655770499613092,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.287078248608083e-14
+      },
+      {
+        "redshift": 0.08834762203511914,
+        "mass_integral": 0.9999999999363127,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8991803238763263,
+        "low_mass_fraction": 0.46510868589593213,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.2827655072535115e-14
+      },
+      {
+        "redshift": 0.08189334941643378,
+        "mass_integral": 0.9999999999339986,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.8996493265158056,
+        "low_mass_fraction": 0.46460704516473217,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.2781463511599663e-14
+      },
+      {
+        "redshift": 0.0759434720534331,
+        "mass_integral": 0.999999999931841,
+        "bias_integral": 0.9999999999999999,
+        "bias_renormalization": 0.900086954194249,
+        "low_mass_fraction": 0.4641377956270523,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.2738254562912785e-14
+      },
+      {
+        "redshift": 0.07127410494535136,
+        "mass_integral": 0.9999999999301332,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.9004340936048089,
+        "low_mass_fraction": 0.4637636242984082,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.270380050714659e-14
+      },
+      {
+        "redshift": 0.06847580332244463,
+        "mass_integral": 0.9999999999291027,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.9006438050751814,
+        "low_mass_fraction": 0.4635357892895538,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.268282124043204e-14
+      },
+      {
+        "redshift": 0.06779899999999994,
+        "mass_integral": 0.9999999999288547,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.9006946852928787,
+        "low_mass_fraction": 0.46348057538759196,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.2677737091242535e-14
+      },
+      {
+        "redshift": 0.06711726272419227,
+        "mass_integral": 0.9999999999286033,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.9007460429403945,
+        "low_mass_fraction": 0.46342444443301617,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.2672568498966445e-14
+      },
+      {
+        "redshift": 0.06431785358316677,
+        "mass_integral": 0.9999999999275568,
+        "bias_integral": 0.9999999999999998,
+        "bias_renormalization": 0.900958272631358,
+        "low_mass_fraction": 0.4631860774736091,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.2650619440116873e-14
+      },
+      {
+        "redshift": 0.059711253520216,
+        "mass_integral": 0.9999999999258002,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.9013115507112707,
+        "low_mass_fraction": 0.46277354458042047,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.2612633014596735e-14
+      },
+      {
+        "redshift": 0.05395556064353846,
+        "mass_integral": 0.9999999999235513,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.9017592594882661,
+        "low_mass_fraction": 0.4622325951655475,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.256282187226719e-14
+      },
+      {
+        "redshift": 0.04785216960106009,
+        "mass_integral": 0.9999999999211177,
+        "bias_integral": 1.0000000000000002,
+        "bias_renormalization": 0.9022401664190597,
+        "low_mass_fraction": 0.4616467522302484,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.250887689140462e-14
+      },
+      {
+        "redshift": 0.04187299488222207,
+        "mass_integral": 0.9999999999187064,
+        "bias_integral": 0.9999999999999999,
+        "bias_renormalization": 0.902683624410752,
+        "low_mass_fraction": 0.46108203469694337,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.2456877157873064e-14
+      },
+      {
+        "redshift": 0.03714187455432527,
+        "mass_integral": 0.9999999999167972,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.9030325460953041,
+        "low_mass_fraction": 0.4606570876057445,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.241774762106193e-14
+      },
+      {
+        "redshift": 0.03430748103561965,
+        "mass_integral": 0.9999999999156575,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.903241790146905,
+        "low_mass_fraction": 0.4604170775441451,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.2395647263782385e-14
+      },
+      {
+        "redshift": 0.03362200000000004,
+        "mass_integral": 0.9999999999153831,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.9032923836543324,
+        "low_mass_fraction": 0.46036108528348485,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.239049144257542e-14
+      },
+      {
+        "redshift": 0.03293237963600504,
+        "mass_integral": 0.9999999999151068,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.9033433021539449,
+        "low_mass_fraction": 0.4603053243209283,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.2385356919520265e-14
+      },
+      {
+        "redshift": 0.03010080570915341,
+        "mass_integral": 0.9999999999139606,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.9035527305946666,
+        "low_mass_fraction": 0.4600807011862256,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.236467340526633e-14
+      },
+      {
+        "redshift": 0.025442734136485345,
+        "mass_integral": 0.9999999999120468,
+        "bias_integral": 0.9999999999999998,
+        "bias_renormalization": 0.9038984057868197,
+        "low_mass_fraction": 0.4597273594705785,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.233213736029585e-14
+      },
+      {
+        "redshift": 0.01962527723556229,
+        "mass_integral": 0.999999999909613,
+        "bias_integral": 1.0000000000000002,
+        "bias_renormalization": 0.9043321965320286,
+        "low_mass_fraction": 0.4593139333081158,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.229406868168193e-14
+      },
+      {
+        "redshift": 0.013459479627212056,
+        "mass_integral": 0.9999999999069857,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.9047946439553668,
+        "low_mass_fraction": 0.45890819231486085,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.225670766083916e-14
+      },
+      {
+        "redshift": 0.007776816369117423,
+        "mass_integral": 0.9999999999045301,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.9052234222620326,
+        "low_mass_fraction": 0.45856284333878805,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.2224907595014956e-14
+      },
+      {
+        "redshift": 0.0033180163695678555,
+        "mass_integral": 0.999999999902587,
+        "bias_integral": 1.0000000000000002,
+        "bias_renormalization": 0.9055616502333451,
+        "low_mass_fraction": 0.4583105255004372,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.220167392581628e-14
+      },
+      {
+        "redshift": 0.000646268466180322,
+        "mass_integral": 0.9999999999014174,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.9057651170295066,
+        "low_mass_fraction": 0.4581668265941702,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.218844199233809e-14
+      },
+      {
+        "redshift": 0.0,
+        "mass_integral": 0.9999999999011329,
+        "bias_integral": 1.0,
+        "bias_renormalization": 0.9058144417023407,
+        "low_mass_fraction": 0.4581327313760927,
+        "high_mass_fraction": 0.0,
+        "low_mass_one_halo_upper_bound_mpc_h3": 4.2185302471869584e-14
+      }
+    ]
+  ],
+  "convergence": [
+    {
+      "phase": "tail_cutoff",
+      "minimum_mass": 1000000.0,
+      "maximum_mass": 1e+18,
+      "mass_order": 512,
+      "closure_rtol": 1e-05,
+      "maximum_high_tail": 1e-12,
+      "bias_normalization_relative_change": null,
+      "point_limit_absolute_response_bound": 1.5846837018861721
+    },
+    {
+      "phase": "tail_cutoff",
+      "minimum_mass": 100000.0,
+      "maximum_mass": 1e+18,
+      "mass_order": 512,
+      "closure_rtol": 1e-05,
+      "maximum_high_tail": 1e-12,
+      "bias_normalization_relative_change": 0.0024493456814091985,
+      "point_limit_absolute_response_bound": 0.3414097540071714
+    },
+    {
+      "phase": "tail_cutoff",
+      "minimum_mass": 10000.0,
+      "maximum_mass": 1e+18,
+      "mass_order": 512,
+      "closure_rtol": 1e-05,
+      "maximum_high_tail": 1e-12,
+      "bias_normalization_relative_change": 0.004300293149063883,
+      "point_limit_absolute_response_bound": 0.0735545017548302
+    },
+    {
+      "phase": "tail_cutoff",
+      "minimum_mass": 1000.0,
+      "maximum_mass": 1e+18,
+      "mass_order": 512,
+      "closure_rtol": 1e-05,
+      "maximum_high_tail": 1e-12,
+      "bias_normalization_relative_change": 0.006961464481605617,
+      "point_limit_absolute_response_bound": 0.015846837018861727
+    },
+    {
+      "phase": "tail_cutoff",
+      "minimum_mass": 100.0,
+      "maximum_mass": 1e+18,
+      "mass_order": 512,
+      "closure_rtol": 1e-05,
+      "maximum_high_tail": 1e-12,
+      "bias_normalization_relative_change": 0.0026092722304487115,
+      "point_limit_absolute_response_bound": 0.0034140975400717144
+    },
+    {
+      "phase": "tail_cutoff",
+      "minimum_mass": 10.0,
+      "maximum_mass": 1e+18,
+      "mass_order": 512,
+      "closure_rtol": 1e-05,
+      "maximum_high_tail": 1e-12,
+      "bias_normalization_relative_change": 0.0006348719426334526,
+      "point_limit_absolute_response_bound": 0.0007355450175483021
+    },
+    {
+      "phase": "tail_cutoff",
+      "minimum_mass": 1.0,
+      "maximum_mass": 1e+18,
+      "mass_order": 512,
+      "closure_rtol": 1e-05,
+      "maximum_high_tail": 1e-12,
+      "bias_normalization_relative_change": 0.0001404244125763343,
+      "point_limit_absolute_response_bound": 0.00015846837018861732
+    },
+    {
+      "phase": "tail_cutoff",
+      "minimum_mass": 0.1,
+      "maximum_mass": 1e+18,
+      "mass_order": 512,
+      "closure_rtol": 1e-05,
+      "maximum_high_tail": 1e-12,
+      "bias_normalization_relative_change": 3.0423888526698306e-05,
+      "point_limit_absolute_response_bound": 3.4140975400717154e-05
+    },
+    {
+      "minimum_mass": 0.1,
+      "maximum_mass": 1e+18,
+      "mass_order": 512,
+      "closure_rtol": 1e-05,
+      "maximum_high_tail": 1e-12,
+      "maximum_relative_change": null,
+      "low_mass_white_power_fraction_bound": 3.823346482670632e-13
+    },
+    {
+      "minimum_mass": 0.01,
+      "maximum_mass": 1e+18,
+      "mass_order": 1024,
+      "closure_rtol": 1e-05,
+      "maximum_high_tail": 1e-12,
+      "maximum_relative_change": 0.00048226729341446626,
+      "low_mass_white_power_fraction_bound": 3.823310247667254e-14
+    }
+  ],
+  "inputs_sha256": {
+    "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/geppetto_reduced/angular_power_validation_schema5/angular_power_theory.npz": "24ede2561e2c1ede02264c13aa2a58885f4d0a850a7cb4d41246653bf60fd81e",
+    "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/pinocchio.0.0000.000.mf.out": "f17d4762ac0df04ef8a49e55ce057f747891b2443cedca57a04c2ad92e912e53",
+    "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/pinocchio.0.0336.000.mf.out": "267916412dad567639c86f8d4d2230e264bae605685f7dfb7b2f301b54fc2b46",
+    "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/pinocchio.0.0678.000.mf.out": "cb95d5d980fd5ed1fd6db069e15289872e4677abac53f4879ba1b436615a8b71",
+    "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/pinocchio.0.1026.000.mf.out": "76ffd90027daf9b71cd699341c030c8efbd99b1473ea133aec8c7dd6a906a17c",
+    "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/pinocchio.0.1380.000.mf.out": "f2df453f49322f5dcc161c5a70dcd777b723a415e1186e107c54f0e3ec69c262",
+    "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/pinocchio.0.1740.000.mf.out": "39e03f7304fbb4501f60f0832cf6d07f8896d5fce99368421e8786062bd75d8c",
+    "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/pinocchio.0.2108.000.mf.out": "c752f982f48cc3d459b538943fb5af8246debed1be31fc3ccf5bccc57fc8aa74",
+    "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/pinocchio.0.2484.000.mf.out": "6b3e0bf601b823ba13ffd3a0b3c868fef8b9fd94e233904c8403df0a167df975",
+    "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/pinocchio.0.2867.000.mf.out": "e85fd5f76a792ee8ffe1441e37b66e18b20e08ac7203faf47fe009f4ab67f4b5",
+    "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/pinocchio.0.3260.000.mf.out": "a0240c393f594dfd7ad47d57f2eb8da92c597d43ef23fea4c58a597bdf2bfaec",
+    "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/pinocchio.0.3661.000.mf.out": "0703d1ece459e640c5a2694885ceca44368223667d70ce5aedbd48ba7051c7e3",
+    "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/pinocchio.0.4072.000.mf.out": "57cf8dbf2353b03867c547f13c873f243a8cbcd4e0a1c4284756721f9e445ba9",
+    "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/pinocchio.0.4493.000.mf.out": "fe6a0b2c4097b603b044a3cbc62c65c5b1e0d5b3388e8245f9fcc8abff8caf47",
+    "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/pinocchio.0.4926.000.mf.out": "de58fd3cfffbaef1d98267791e62a44c91e2bd02aa3119298aea49c4321829e9",
+    "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/pinocchio.0.5369.000.mf.out": "ad618862c0fcc7f2aa7a60cee03bf632b6a5bdea2fdcb73b270f008b450c2387",
+    "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/pinocchio.0.5826.000.mf.out": "9e556bc3232a63949a3282ed98f485051d6499cc3afac1217202ad4b58a090bd",
+    "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/pinocchio.0.6295.000.mf.out": "e574c7912a477d7a78487c3a9ca89cf6a575f74a2ebf41b4d2406f0cfc188f50",
+    "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/pinocchio.0.6778.000.mf.out": "6a49283c80308ea4305f55be55d1cd097d14b1d064a3a7379d98fbd45fe41080",
+    "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/pinocchio.0.7275.000.mf.out": "57a1a0d1f5f57e3d01bd82bfd4b8e4b78cad27b5eac1dd1986d15f3f8abaa440",
+    "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/pinocchio.0.7788.000.mf.out": "54a8d71dc432d976decfe23f2315a321185cad9ea2cd3660126c6a3287d4ecb9",
+    "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/pinocchio.0.8318.000.mf.out": "6926e74f43b4bfbe5d56cbea292144b6a5014b48e22276cb4b24eabcacf783e5",
+    "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/pinocchio.0.8865.000.mf.out": "a6a242e285e9c9f944c1664aa782daaa581a74f6ff38c57f53f1b7dfe4e2b583",
+    "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/pinocchio.0.9430.000.mf.out": "f6f55108124aaa969e3afa8028d7b5085ec5d5642faf3c0e5ed3610efbf74fae",
+    "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/pinocchio.1.0000.000.mf.out": "4ff19088187d10b16688ce614fc5cd8a0235128bc877a0a7f9845a7f5a0762d0",
+    "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/pinocchio.1.2559.000.mf.out": "8ed11fc0540a82b90770f1638b59eb8b3ecc1329d7b244032046b898885447c9",
+    "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/pinocchio.1.3992.000.mf.out": "1b5ec7759b95c1383506b88bcd5b23bdbfaaf3bd1d92316ddc280b6561c489bf",
+    "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/pinocchio.1.5544.000.mf.out": "7640027d99a39e80fcacdee0e34735294f6c83ea61af4521e68e17acbc11e6fb",
+    "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/pinocchio.1.7232.000.mf.out": "3ec1c08c45fa4d530b2e8b248a1eada550f10d4da3d515ad4c2553afb4764b98",
+    "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/pinocchio.1.9074.000.mf.out": "ba19860d56c9b301274a1b01d04d601b38fd4435c898cd3edb4292c8e599d027",
+    "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/pinocchio.2.0000.000.mf.out": "9362c5695212f0fb833516df682bd593165060b4d4387f4e93eb626c8d4fc367",
+    "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/params.txt": "b30873457c9835336b3ea4f975abd9710689e7c513b61d204b9268f19fb24183",
+    "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/pinocchio.000.cosmology.out": "4073680b99dd3ade9a479150f204c56efb1cfb8c6e58b55c699380dc0f32824e",
+    "/leonardo_scratch/large/userexternal/tbatalha/AB-MAH/Sims/L3870N2160/000/geppetto_reduced/painted_nfw_manifest.csv": "9c4227897ca46dd9cce8b2ea341a4d068815551ad57e362c6f4c47e992493896"
+  },
+  "profile_convention": "continuum_nfw",
+  "bias_note": "Castro-corrected PBS bias divided by its full mass-weighted integral",
+  "low_tail": "analytic multiplicity and PBS tails; endpoint Castro correction; u=1",
+  "mass_definition_note": "PINOCCHIO abundance; manifest profile mass definition; Castro calibration is virial, renormalized here",
+  "linear_power_evolution": "scale_dependent_camb",
+  "power_z0_closure": 9.699637120830218e-06,
+  "omega_m0": 0.3913,
+  "h": 0.7276,
+  "reconstructed_sigma8": 0.6085032466547744,
+  "reference_sigma8": 0.6085032466547744,
+  "sigma8_relative_error": 0.0,
+  "sigma8_reference_source": "cosmology_power_spectrum"
+}

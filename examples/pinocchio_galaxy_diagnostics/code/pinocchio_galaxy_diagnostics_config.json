@@ -1,0 +1,14 @@
+{
+  "catalogue": "outputs/galaxy_lightcone/validation/galaxies_dc3fc74d63c89809.hdf5",
+  "output_dir": "examples/pinocchio_galaxy_diagnostics",
+  "redshift_edges": [0.05, 0.14, 0.23, 0.32],
+  "log10_host_mass_edges": [12.4, 13.5, 14.2, 15.0],
+  "luminosity_edges": [-23.4, -23.1, -22.8, -22.5, -22.2, -22.0, -21.8, -21.5],
+  "complete_magnitude_limit": -22.0,
+  "minimum_lf_count": 200,
+  "aperture_deg": 65.0,
+  "clustering_max_data": 10000,
+  "clustering_random_multiplier": 3,
+  "clustering_jackknife_regions": 8,
+  "diagnostic_seed": 271828
+}

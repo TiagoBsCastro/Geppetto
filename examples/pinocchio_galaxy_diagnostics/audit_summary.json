@@ -1,0 +1,115 @@
+{
+  "model_parameters_changed": false,
+  "required_lf_bins": 9,
+  "minimum_required_count": 246,
+  "required_lf_passed": true,
+  "maximum_mock_lf_residual": 0.030264566976537233,
+  "maximum_cumulative_lf_residual": 8.377900049572062e-05,
+  "maximum_complete_bin_missing_fraction": 0.007532216196756698,
+  "colour_tests": 80,
+  "colour_p_value_cutoff": 0.000125,
+  "colour_failures": [],
+  "sampling_tests": 12,
+  "sampling_p_value_cutoff": 0.0008333333333333334,
+  "sampling_failures": [],
+  "occupation_chi2": 88.89088053088769,
+  "occupation_bins": 61,
+  "occupation_chi2_p_value": 0.01139350435884993,
+  "integrity_passed": true,
+  "clustering_fitted": false,
+  "occupation_p_value_cutoff": 0.01,
+  "histogram_checks": [
+    {
+      "product": "apparent_magnitude",
+      "populated_bins": 24,
+      "maximum_absolute_pull": 1.3797542094199862
+    },
+    {
+      "product": "redshift_counts",
+      "populated_bins": 27,
+      "maximum_absolute_pull": 2.00009994366678
+    },
+    {
+      "product": "colour_distribution",
+      "populated_bins": 113,
+      "maximum_absolute_pull": 2.7204462540643455
+    },
+    {
+      "product": "satellite_radii",
+      "populated_bins": 74,
+      "maximum_absolute_pull": 2.620367510393101
+    },
+    {
+      "product": "satellite_velocity",
+      "populated_bins": 62,
+      "maximum_absolute_pull": 3.1088718771562083
+    },
+    {
+      "product": "sky",
+      "populated_bins": 579,
+      "maximum_absolute_pull": 3.1502286533404633
+    }
+  ],
+  "checks": [
+    {
+      "check": "Frozen inputs and model",
+      "status": "PASS",
+      "evidence": "Catalogue, input, calibration and model-source hashes verified before/after; no fitter called",
+      "cause": "Read-only audit"
+    },
+    {
+      "check": "Independent LF target",
+      "status": "PASS",
+      "evidence": "9 complete bins; min N=246; max mock residual=3.026%; cumulative=0.00838%",
+      "cause": "Fixed target is fitted by the HOD; remaining mock deviations are stochastic and include boundary migrations"
+    },
+    {
+      "check": "Native-mass completeness",
+      "status": "LIMIT",
+      "evidence": "10-particle native floor; 32-particle painting cut; max missing fraction in claimed bins=0.7532%",
+      "cause": "Fainter M_r>-22 and sparse bright bins are diagnostic only; not a physical halo-finder convergence test"
+    },
+    {
+      "check": "HOD occupation",
+      "status": "PASS",
+      "evidence": "Conditional chi2=88.9/61 bins; p=0.0114, alpha=.01",
+      "cause": "Mild excess scatter; E[N]>=20 and variance>=10 for Gaussian chi2. Compatible at the stated threshold, not a precision richness validation"
+    },
+    {
+      "check": "Conditional colours",
+      "status": "PASS",
+      "evidence": "80 mixture/mean/width tests; 0 failures at familywise alpha=.01",
+      "cause": "Same hodpy prescription tested, not independent observed colour data; red probability saturates in bright satellite bins"
+    },
+    {
+      "check": "NFW radial / Gaussian velocity draws",
+      "status": "PASS",
+      "evidence": "12 mass/redshift-stratified KS tests; 0 failures; minimum p=0.0242",
+      "cause": "Model tests only; low-z satellites have limited statistics"
+    },
+    {
+      "check": "Units, support and redshift closure",
+      "status": "PASS",
+      "evidence": "Integrity passed=True; Doppler closure=2.95e-17",
+      "cause": "R_sat is an effective model radius, not measured R200m"
+    },
+    {
+      "check": "Native PLC identities",
+      "status": "CAVEAT",
+      "evidence": "374 extra group-ID occurrences; 59 extra centrals across persistent IDs",
+      "cause": "Nearby distinct native crossing records retained; one central per unique PLC occurrence, not persistent ID"
+    },
+    {
+      "check": "Sky / distance closure",
+      "status": "CAVEAT",
+      "evidence": "Native distance max relative mismatch=1.14e-04; sky residuals shown",
+      "cause": "Finite-precision native table/PLC; host-centre sky prediction omits satellite boundary migrations"
+    },
+    {
+      "check": "Angular clustering",
+      "status": "DIAGNOSTIC",
+      "evidence": "Measured across 3 z and 3 host-mass bins, with spatial jackknife; no fitting",
+      "cause": "Nonzero clustering relative to the unclustered null is expected; no observed clustering or richness claim"
+    }
+  ]
+}
